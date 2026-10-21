@@ -90,6 +90,8 @@ plugin enablement. Owner attachment starts a tracked, cancellable cache probe
 outside the status and process-wide lifecycle locks. Status reads do not install
 or execute a runtime. Start rechecks the cache without downloading, even if
 cached availability is false because another component installed Bun later.
+An explicit Start or runtime installation supersedes the initial cache probe;
+a late initial result cannot overwrite the newer availability snapshot.
 Missing runtime installation is a separate explicit operation; Start refuses a
 missing runtime rather than downloading silently. The helper preserves an
 explicit extra-CA file or reuses the system-trust export used by the plugin

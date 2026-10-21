@@ -46,28 +46,29 @@ type Status struct {
 // Neither construction nor Status reads a credential, discovers a runtime,
 // installs software, signs in or publishes a tunnel.
 type Manager struct {
-	mu         sync.Mutex
-	status     Status
-	current    *hosting
-	handler    http.Handler
-	path       string
-	find       func(context.Context) (string, error)
-	hasRuntime func(context.Context) (bool, error)
-	install    func(context.Context) (string, error)
-	proxy      func(context.Context, func()) (*wanProxy, error)
-	command    func(string, ...string) *exec.Cmd
-	startTree  func(*exec.Cmd) (sdkTree, error)
-	wait       time.Duration
-	runtime    *tunnelRuntime
-	owner      context.Context
-	cancel     context.CancelFunc
-	ownerDone  chan struct{}
-	auth       *auth
-	clientID   string
-	store      credentialStore
-	blocked    bool // logout/install operation; Start cannot race it
-	closed     bool
-	actions    sync.WaitGroup
+	mu              sync.Mutex
+	status          Status
+	current         *hosting
+	handler         http.Handler
+	path            string
+	find            func(context.Context) (string, error)
+	hasRuntime      func(context.Context) (bool, error)
+	install         func(context.Context) (string, error)
+	proxy           func(context.Context, func()) (*wanProxy, error)
+	command         func(string, ...string) *exec.Cmd
+	startTree       func(*exec.Cmd) (sdkTree, error)
+	wait            time.Duration
+	runtime         *tunnelRuntime
+	owner           context.Context
+	cancel          context.CancelFunc
+	ownerDone       chan struct{}
+	auth            *auth
+	clientID        string
+	store           credentialStore
+	blocked         bool // logout/install operation; Start cannot race it
+	closed          bool
+	runtimeExplicit bool // an explicit start/install supersedes initial discovery
+	actions         sync.WaitGroup
 }
 
 type hosting struct {
@@ -129,7 +130,7 @@ func (m *Manager) discoverRuntime() {
 	available, err := m.hasRuntime(m.owner)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if !m.closed && m.owner.Err() == nil && err == nil && m.current == nil && !m.blocked {
+	if !m.closed && m.owner.Err() == nil && err == nil && m.current == nil && !m.blocked && !m.runtimeExplicit {
 		m.status.RuntimeAvailable = available
 	}
 }
@@ -245,6 +246,7 @@ func (m *Manager) InstallRuntime(owner context.Context) error {
 		return errors.New("WAN runtime owner is unavailable or busy")
 	}
 	m.blocked = true
+	m.runtimeExplicit = true
 	ctx := m.owner
 	m.actions.Add(1)
 	defer m.actions.Done()
@@ -288,6 +290,7 @@ func (m *Manager) Start(ctx context.Context) error {
 		return r.err
 	}
 	r := &hosting{done: make(chan struct{}), ready: make(chan struct{})}
+	m.runtimeExplicit = true
 	r.ctx, r.cancel = context.WithCancel(m.owner)
 	r.requests, r.cancelRequests = context.WithCancel(r.ctx)
 	m.current = r

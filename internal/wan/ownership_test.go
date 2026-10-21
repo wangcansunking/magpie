@@ -56,6 +56,50 @@ func TestMissingToolAndCanceledOwnerNeverLaunch(t *testing.T) {
 	}
 }
 
+func TestExplicitRuntimeResultSupersedesInitialDiscovery(t *testing.T) {
+	for _, install := range []bool{false, true} {
+		name := "failed-start"
+		if install {
+			name = "installed"
+		}
+		t.Run(name, func(t *testing.T) {
+			m := New(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+			m.runtime, m.store = &tunnelRuntime{}, memoryCredentialStore{}
+			entered, release := make(chan struct{}), make(chan struct{})
+			m.hasRuntime = func(context.Context) (bool, error) {
+				close(entered)
+				<-release
+				return !install, nil // contradict the newer explicit result
+			}
+			m.find = func(context.Context) (string, error) { return "", nil }
+			m.install = func(context.Context) (string, error) { return "installed-runtime", nil }
+			var once sync.Once
+			unblock := func() { once.Do(func() { close(release) }) }
+			t.Cleanup(func() { unblock(); m.Close() })
+			if err := m.Own(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			waitDone(t, entered)
+			m.auth.mu.Lock()
+			m.auth.credential = savedCredential{Version: 1, ClientID: DefaultGitHubClientID, Access: "fake-sdk-token"}
+			m.auth.status.State = "signed_in"
+			m.auth.mu.Unlock()
+			if install {
+				if err := m.InstallRuntime(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := m.Start(context.Background()); err == nil {
+				t.Fatal("missing runtime started")
+			}
+			unblock()
+			m.actions.Wait()
+			if got := m.Status().RuntimeAvailable; got != install {
+				t.Fatalf("late initial discovery replaced explicit result: available=%v, want %v", got, install)
+			}
+		})
+	}
+}
+
 func TestCanceledStartupDoesNotPersistOrHost(t *testing.T) {
 	m, folder := fakeManager(t, "ok", http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	m.wait = -time.Second // already expired before any subprocess, not a scheduling assertion
