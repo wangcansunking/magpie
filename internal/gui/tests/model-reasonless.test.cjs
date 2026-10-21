@@ -68,7 +68,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.route("**/*", serve(lang, posts));
         await page.goto("http://magpie.test/?view=providers");
         const tr = (k, v = {}) => page.evaluate(([k, v]) => t(k, v), [k, v]);
-        await page.locator(".row.provider").click();
+        await page.locator('.row.provider[data-id="relay"]').click();
 
         if (!(await page.locator(".mnames:not([hidden])").count())) await page.getByRole("button", { name: await tr("Names & levels"), exact: true }).click();
         const row = (id) => page.locator(".mname", { has: page.locator("code", { hasText: id }) });

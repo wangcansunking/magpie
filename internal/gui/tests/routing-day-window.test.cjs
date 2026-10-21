@@ -13,6 +13,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
+const { watchReplies, repliesConsumed } = require("./lifecycle.cjs");
 const { chromium, webkit } = require("playwright");
 
 const assets = path.resolve(process.env.MAGPIE_ROUTING_ASSETS || path.join(__dirname, "../assets"));
@@ -109,10 +110,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         page.setDefaultTimeout(15000);
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
+        await watchReplies(page, ["/api/gateway/history"]);
         await page.route("**/*", serve(lang));
         t.after(() => browser.close());
         await page.goto("http://magpie.test/?view=routing");
         await page.locator(".rt-req").first().waitFor();
+        await repliesConsumed(page, ["/api/gateway/history"]);
         // a day picked from its pill, or at a narrow width, from the menu
         // the pills past the bar's width go under (#961); picked, the day's
         // requests are in the list (each day's models are its own)

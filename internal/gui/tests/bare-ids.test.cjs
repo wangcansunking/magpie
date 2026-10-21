@@ -13,6 +13,8 @@ const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
 const { watchSettingsReads, settingsDrawn, wheelTo } = require("./reader.cjs");
 
+const { watchReplies, repliesConsumed } = require("./lifecycle.cjs");
+
 const assets = path.resolve(__dirname, "../assets");
 
 function settingsPayload(over) {
@@ -124,6 +126,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         phase("install fixture");
         await page.route("**/*", server(lang, gateway, posted));
         await watchSettingsReads(page);
+        await watchReplies(page, ["/api/settings/bare-ids"]);
         phase("navigate");
         await page.goto("http://magpie.test/?view=settings&tab=network");
         phase("settings drawn");
@@ -161,7 +164,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await segs.nth(1).click();
         phase("verify on");
         await page.locator("#bareIdsSegs .opt.on", { hasText: w.on }).waitFor();
-        await page.waitForTimeout(400);
+        await repliesConsumed(page, ["/api/settings/bare-ids"]);
         assert.equal(await view(page), before, "the click scrolled the page");
         assert.deepEqual(posted, [["bare-ids", { on: true }]]);
 
@@ -170,6 +173,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await segs.nth(0).click();
         phase("verify off");
         await page.locator("#bareIdsSegs .opt.on", { hasText: w.off }).waitFor();
+        await repliesConsumed(page, ["/api/settings/bare-ids"]);
         assert.deepEqual(posted.at(-1), ["bare-ids", { on: false }]);
         assert.equal(posted.length, 2);
         assert.equal(await view(page), before, "the click scrolled the page");

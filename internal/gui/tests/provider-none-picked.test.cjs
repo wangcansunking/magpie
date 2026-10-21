@@ -91,6 +91,24 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const chip = (id) => editor.locator(".mchips .mchip", { hasText: id });
       await chip("glm-5.2").waitFor();
       const cls = (id) => chip(id).evaluate((c) => [c.classList.contains("on"), c.classList.contains("auto")]);
+      const clickMode = async (mode) => {
+        const target = editor.locator('.mserves .opt[data-serves="' + mode + '"]');
+        await page.evaluate(async () => {
+          await document.fonts.ready;
+          await Promise.all(document.getAnimations().filter(a => a.effect.getTiming().iterations !== Infinity).map(a => a.finished.catch(() => {})));
+        });
+        for (let i = 0; i < 40; i++) {
+          const at = await target.evaluateAll(([e]) => {
+            const body = e.closest('.ebody'), r = e.getBoundingClientRect(), b = body.getBoundingClientRect();
+            return { fits: r.top >= b.top + 2 && r.bottom <= b.bottom - 2 && e.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)), x: b.x + b.width / 2, y: b.y + b.height / 2, dy: r.top < b.top + 2 ? -80 : 80, top: body.scrollTop };
+          });
+          if (at.fits) { await target.click(); return; }
+          await page.mouse.move(at.x, at.y);
+          await page.mouse.wheel(0, at.dy);
+          await page.waitForFunction(top => document.querySelector('#modal .ebody').scrollTop !== top, at.top, {timeout:1000}).catch(() => {});
+        }
+        throw new Error('the serving-mode button did not come into the editor viewport: ' + mode);
+      };
       // which of Vendor's list / Picked only / Usage only is on, and the
       // control fits
       const serves = async () => {
@@ -123,20 +141,20 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await editor.getByText(w.none, { exact: false }).waitFor();
       assert.equal(await serves(), w.usage);
       // Vendor's list goes back to it
-      await editor.locator(".mserves .opt[data-serves=list]").click();
+      await clickMode("list");
       for (const id of ["glm-5.3-free", "glm-5.2"]) assert.deepEqual(await cls(id), [false, true], id + " vendor's list again");
       await editor.getByText(w.hint, { exact: false }).waitFor();
       assert.equal(await serves(), w.list);
       // Usage only is none, at a click (#2068)
-      await editor.locator(".mserves .opt[data-serves=none]").click();
+      await clickMode("none");
       for (const id of ["glm-5.3-free", "glm-5.2"]) assert.deepEqual(await cls(id), [false, false], id + " usage only");
       await editor.getByText(w.none, { exact: false }).waitFor();
       assert.equal(await serves(), w.usage);
       // Picked only from there picks what the vendor's list serves
-      await editor.locator(".mserves .opt[data-serves=picked]").click();
+      await clickMode("picked");
       for (const id of ["glm-5.3-free", "glm-5.2"]) assert.deepEqual(await cls(id), [true, false], id + " picked from the vendor's list");
       assert.equal(await serves(), w.picked);
-      await editor.locator(".mserves .opt[data-serves=none]").click();
+      await clickMode("none");
       await chip("glm-5.2").click();
       // and another clicked joins it
       await chip("glm-5.3-free").click();

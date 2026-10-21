@@ -29,6 +29,17 @@ async function watchReplies(page, paths) {
             entry.error = `${path}: ${e.message}`; consumed(); throw e;
           });
         };
+        // Some built-in pages consume fetch directly with json(), rather
+        // than api()'s text(). Headers alone still don't complete the read.
+        const json = res.json;
+        res.json = function () {
+          return json.call(this).then((body) => {
+            consumed(); return body;
+          }, (e) => {
+            entry.error = `${path}: ${e?.name === "SyntaxError" ? "invalid JSON" : e.message}`;
+            consumed(); throw e;
+          });
+        };
         return res;
       }, (e) => {
         entry.error = `${path}: ${e.message}`; consumed(); throw e;

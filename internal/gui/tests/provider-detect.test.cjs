@@ -73,7 +73,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         names: zh ? "名称与推理档位" : "Names & levels", auto: zh ? "自动" : "Auto", unsaved: zh ? "未保存" : "unsaved", save: zh ? "保存" : "Save",
         ms: zh ? "321 毫秒" : "321 ms",
       };
-      await page.locator(".row.provider").click();
+      await page.locator('.row.provider[data-id="relay"]').click();
       const ed = page.locator(".editor");
       await ed.locator(".detect").waitFor();
       const row = (id) => page.locator(".mname", { has: page.locator("code", { hasText: id }) });

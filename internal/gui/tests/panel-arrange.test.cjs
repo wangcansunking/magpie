@@ -7,6 +7,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
+const { watchReplies, repliesConsumed } = require("./lifecycle.cjs");
 const { chromium, webkit } = require("playwright");
 
 const assets = path.resolve(__dirname, "../assets");
@@ -30,7 +31,7 @@ function serve(lang, posts, fail, saved = {}) {
     if (url.pathname === "/api/usage/arrange") {
       const body = route.request().postDataJSON();
       posts.push(body);
-      if (fail.next) { fail.next = false; return route.fulfill({ status: 500, body: "disk full" }); }
+      if (fail.next) { fail.next = false; return route.fulfill({ status: 500, json: { error: "disk full" } }); }
       if (body.order) settings.usageOrder = body.order;
       if (body.panelHidden) settings.panelUsageHidden = body.panelHidden;
       return json(settings);
@@ -63,6 +64,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const page = await context.newPage();
       page.setDefaultTimeout(5000);
       page.on("pageerror", (e) => errors.push(e.message));
+      await watchReplies(page, ["/api/usage/arrange"]);
       await page.route("**/*", serve(lang, posts, fail));
       await page.goto("http://magpie.test/?mode=panel");
       await page.waitForFunction(() => document.querySelectorAll("#panelQuota .pq-card").length >= 3);
@@ -114,15 +116,19 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.waitForFunction(() => !document.querySelector('#panelQuota .pq-arow[data-key="kimi"]').classList.contains("put-away"));
       await page.locator('#panelQuota .pq-arow[data-key="deepseek"] .pq-show').click();
       await page.waitForFunction(() => document.querySelector('#panelQuota .pq-arow[data-key="deepseek"]').classList.contains("put-away"));
+      await repliesConsumed(page, ["/api/usage/arrange"]);
       assert.deepEqual(posts.splice(0), [{ panelHidden: [] }, { panelHidden: ["deepseek"] }]);
       assert.equal(await view.evaluate((v) => v.scrollTop), top, "a pill's click doesn't move the page");
       assert(await page.evaluate(() => document.activeElement?.closest(".pq-arow")?.dataset.key === "deepseek"), "the keyboard stays on the pill");
 
       // a save that fails is put back
+      const failureAt = await page.evaluate(() => __apiReplies.length);
       fail.next = true;
       await page.locator('#panelQuota .pq-arow[data-key="claude"] .pq-show').click();
       await page.waitForFunction(() => document.querySelector("#status")?.textContent.includes("disk full") || document.body.textContent.includes("disk full"));
       assert(!(await page.locator('#panelQuota .pq-arow[data-key="claude"]').evaluate((r) => r.classList.contains("put-away"))), "the failed hide is undone");
+      await page.waitForFunction(() => __apiReplies.every(r => r.done));
+      assert.deepEqual(await page.evaluate(n => __apiReplies.splice(n).map(r => r.error), failureAt), ["/api/usage/arrange: HTTP 500"], "only the intentional disk error occurred");
       posts.splice(0);
 
       // Alt+arrow moves a row, the keyboard staying on its logo
@@ -130,6 +136,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.keyboard.press("Alt+ArrowDown");
       await page.waitForFunction(() => document.querySelector("#panelQuota .pq-arow")?.dataset.key === "codex");
       assert.deepEqual(await rows(), ["codex", "claude", "deepseek", "kimi"]);
+      await repliesConsumed(page, ["/api/usage/arrange"]);
       assert.deepEqual(posts.splice(0), [{ order: ["codex", "claude", "deepseek", "kimi"] }]);
       assert(await page.evaluate(() => document.activeElement?.matches('.pq-arow[data-key="claude"] .pq-ahandle')));
 
@@ -141,6 +148,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       for (let i = 1; i <= 8; i++) await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2 + (to.y - from.y - 4) * i / 8);
       await page.mouse.up();
       await page.waitForFunction(() => document.querySelector("#panelQuota .pq-arow")?.dataset.key === "deepseek");
+      await repliesConsumed(page, ["/api/usage/arrange"]);
       assert.deepEqual(posts.splice(0), [{ order: ["deepseek", "codex", "claude", "kimi"] }]);
 
       // Done: the cards in the new order, DeepSeek left out. The reader brings

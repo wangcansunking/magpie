@@ -7,6 +7,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
+const { watchReplies, repliesConsumed } = require("./lifecycle.cjs");
 const { chromium, webkit } = require("playwright");
 
 const assets = path.resolve(__dirname, "../assets");
@@ -60,10 +61,16 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await page.addInitScript(() => { try { localStorage.setItem("magpie.navLayout", "side"); } catch {} });
+        await watchReplies(page, ["/api/state", "/api/providers"]);
         await page.route("**/*", serve(lang));
         await page.goto("http://magpie.test/");
         await page.waitForSelector("#nav button.on");
         await page.locator("#side").waitFor();
+        // Its deferred gateway footer appears after 1.5s and shortens this
+        // scroll box by 29px. Start the drag with that initial layout ready.
+        await page.locator("#sideGw").waitFor({ state: "visible" });
+        await repliesConsumed(page, ["/api/state", "/api/providers"]);
+        await page.evaluate(() => document.fonts.ready.then(() => {}));
         await frame(page);
 
         let s = await bar(page);
@@ -95,10 +102,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           b.scrollTop = 1;
         }));
         await frame(page);
+        // The thumb can be placed again by a pending wheel/resize observer.
+        // Hit-test its current node before pressing, not a stale rectangle's bar.
+        await page.locator("#side .side-bar").first().locator("i").hover({ position: { x: 3, y: 4 } });
         s = await bar(page);
         const x = s.thumb.left + s.thumb.width / 2;
-        await page.mouse.move(x, s.thumb.top + 4);
         await page.mouse.down();
+        await page.waitForFunction(() => document.querySelector("#side .side-bar").classList.contains("drag"));
         await page.mouse.move(x, s.box.bottom + 200, { steps: 6 });
         await page.mouse.up();
         await frame(page);

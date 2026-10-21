@@ -14,6 +14,8 @@ const fsp = require("node:fs/promises");
 const path = require("node:path");
 const vm = require("node:vm");
 const { test } = require("node:test");
+const { watchReplies } = require("./lifecycle.cjs");
+const { reach } = require("./reader.cjs");
 const { chromium, webkit } = require("playwright");
 
 const assets = path.resolve(__dirname, "../assets");
@@ -69,6 +71,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const errors = [], posts = [];
         let refuse = false, keyless = false;
         page.on("pageerror", (e) => errors.push(e.message));
+        await watchReplies(page, ["/api/provider/detect"]);
         await page.route("**/*", serve(lang, posts, (body, json) => {
           if (refuse) return json({ error: "the base URL must start with http:// or https://" }, 400);
           if (body.detectModels) {
@@ -82,7 +85,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.goto("http://magpie.test/?view=providers");
         const T = (s) => tr(lang, s);
         await page.locator("#addProvider").click();
-        await page.locator("#addSheet .custom-foot .custom").click();
+        const custom = page.locator("#addSheet .custom-foot .custom");
+        await reach(page, custom);
+        await custom.click();
         const ed = page.locator(".editor.new");
         await ed.locator(".detect").waitFor();
         const detect = ed.getByRole("button", { name: T("Detect APIs"), exact: true });
@@ -91,14 +96,24 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const say = out.locator(".detect-say");
         const detects = () => posts.filter((p) => p.path === "/api/provider/detect");
 
+        const settled = () => page.evaluate(async () => {
+          await document.fonts.ready;
+          await Promise.all(document.getAnimations().filter(a => a.effect.getTiming().iterations !== Infinity).map(a => a.finished.catch(() => {})));
+          // Let observer-driven modal placement land before the baseline.
+          await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)));
+        });
+
         // a click that leaves the page, and the button, where they were
         const still = async (loc, what) => {
           await loc.scrollIntoViewIfNeeded();
-          await page.waitForTimeout(120);
+          await settled();
           const before = await loc.evaluate((e) => e.getBoundingClientRect().top);
           const y = await page.evaluate(() => [scrollY, ...[...document.querySelectorAll("*")].filter((e) => e.scrollTop).map((e) => e.scrollTop)].join());
+          const at = await page.evaluate(() => __apiReplies.length);
           await loc.click();
-          await page.waitForTimeout(250);
+          await page.waitForFunction(() => __apiReplies.every(r => r.done));
+          assert.deepEqual(await page.evaluate(n => __apiReplies.slice(n).filter(r => r.error).map(r => r.error), at), refuse ? ["/api/provider/detect: HTTP 400"] : [], "only the intentional refusal can fail");
+          await settled();
           // to half a pixel: a dialog that starts to scroll under a hint
           // lays its rows out again, WebKit's to a fraction of a pixel
           const after = await loc.evaluate((e) => e.getBoundingClientRect().top);

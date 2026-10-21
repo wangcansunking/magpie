@@ -2565,3 +2565,14 @@ does. Both engines, at 440px. The reckoning itself is covered by
 `TestHistoricalWindowHoldsUsesEachWindowsOwnReading`,
 `TestWindowHoldsResetBeforeRefillReading` and
 `TestWindowHoldsDryAgainAfterReset`.
+
+## Response completion and redraw fixtures
+
+`lifecycle.cjs` joins selected fetch responses after their text or JSON bodies
+are consumed and the caller has applied its synchronous update. Optimistic DOM
+state is not evidence that the fixture received a write. Tests of a held request
+join fixture arrival separately, so they still exercise the busy state.
+`lifecycle-consumption.test.cjs` uses an isolated loopback HTTP server to hold a
+partial JSON body, then checks JSON, text and invalid-JSON paths in both engines.
+It never contacts a vendor or reads user settings. Offscreen WebKit frames use
+timer polling for bridge readiness because their animation frames can stop.

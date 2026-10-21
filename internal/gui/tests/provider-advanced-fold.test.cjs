@@ -66,6 +66,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.locator(".row.provider", { hasText: name }).click();
       await page.locator(".editor details.advanced").waitFor({ state: "attached" });
       await page.waitForTimeout(300);
+      if (motion) await page.evaluate(() => Promise.all(document.getAnimations().map(a => a.finished.catch(() => {}))));
       const words = await page.evaluate((l) => ({ advanced: l === "en" ? "Advanced" : I18N[l]["Advanced"], save: l === "en" ? "Save" : I18N[l]["Save"] }), lang);
       assert(words.advanced && words.save, "every string has its translation");
       return { page, errors, posts, words };
@@ -131,6 +132,20 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const inner = fold(page).locator(":scope > .inner");
       const arrow = () => fold(page).locator(":scope > summary").evaluate((s) => getComputedStyle(s, "::before").transform);
       const y = await page.evaluate(() => scrollY);
+      // Hold disclosure animations as they are created. A loaded browser
+      // can otherwise finish the spring between two geometry reads.
+      await page.evaluate(() => {
+        const animate = Element.prototype.animate;
+        window.__holdFold = true;
+        Element.prototype.animate = function (...args) {
+          const a = animate.apply(this, args);
+          if (window.__holdFold && this.matches(".modal .dialog, .editor details.advanced > .inner, .editor details.advanced > .inner > *")) {
+            a.pause(); a.currentTime = a.effect.getTiming().duration * .1;
+          }
+          return a;
+        };
+      });
+      const finish = () => page.evaluate(() => { window.__holdFold = false; for (const a of document.getAnimations()) a.finish(); });
       await fold(page).locator(":scope > summary").click();
       assert.equal(await isOpen(page), true, "open from the click on");
       const boxMoves = () => page.evaluate(() => document.querySelector(".modal .dialog").getAnimations().length > 0);
@@ -138,6 +153,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert(await boxMoves(), "the dialog grows with it");
       assert(await inner.evaluate((x) => [...x.children].some((r) => r.getAnimations().length)), "its rows come in");
       const mid = await inner.evaluate((x) => x.getBoundingClientRect().height);
+      assert(mid > 0, "the held opening has made visible progress");
+      await finish();
       await page.waitForFunction(() => !document.querySelector(".editor details.advanced > .inner").getAnimations().length);
       const full = await inner.evaluate((x) => x.getBoundingClientRect().height);
       assert(mid < full, `it grows (${mid} then ${full})`);
@@ -145,18 +162,22 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(await arrow(), "matrix(0, 1, -1, 0, 0, 0)", "the arrow turned");
       assert.equal(await page.evaluate(() => scrollY), y, "the click moves no page");
 
+      await page.evaluate(() => { window.__holdFold = true; });
       await fold(page).locator(":scope > summary").click();
       assert.equal(await isOpen(page), true, "shown while it shrinks");
       assert(await inner.evaluate((x) => x.getAnimations().length) > 0, "it shrinks");
       assert(await boxMoves(), "and the dialog with it");
+      await finish();
       await page.waitForFunction(() => !document.querySelector(".editor details.advanced").open);
       await page.waitForFunction(() => !document.getAnimations().length);
       assert.equal(await arrow(), "none", "the arrow turned back");
-      // clicked again while it shrinks, it turns back and stays open
+      // Reverse the held opening, then reverse the held closing.
+      await page.evaluate(() => { window.__holdFold = true; });
       await fold(page).locator(":scope > summary").click();
-      await page.waitForTimeout(80);
       await fold(page).locator(":scope > summary").click();
+      assert(await fold(page).evaluate(d => d.classList.contains("closing")), "the second press is closing");
       await fold(page).locator(":scope > summary").click();
+      await finish();
       await page.waitForFunction(() => !document.querySelector(".editor details.advanced > .inner").getAnimations().length);
       assert.equal(await isOpen(page), true);
       assert.equal(await page.evaluate(() => advanced.open), true, "kept as it ends");

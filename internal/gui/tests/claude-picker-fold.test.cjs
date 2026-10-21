@@ -20,6 +20,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
+const { watchReplies, repliesConsumed } = require("./lifecycle.cjs");
 const { chromium, webkit } = require("playwright");
 
 const assets = path.resolve(__dirname, "../assets");
@@ -89,6 +90,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const page = await context.newPage();
       page.setDefaultTimeout(5000);
       page.on("pageerror", (e) => errors.push(e.message));
+      await watchReplies(page, ["/api/set"]);
       await page.route("**/*", server(lang, value, sets));
       await page.goto("http://magpie.test/");
       await page.locator(row).waitFor();
@@ -145,6 +147,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await foldRow.click();
         await page.locator("#list li").filter({ has: page.locator(".v", { hasText: /^Claude Opus 5\.5$/ }) }).click();
         await page.waitForFunction(() => document.querySelector("#pop").hidden);
+        await repliesConsumed(page, ["/api/set"]);
         assert.deepEqual(sets, [{ agent: "claude", field: "model", value: "claude/claude-opus-5-5[1m]" }]);
         // set: it is its own row, current, and the rest fold again
         await page.locator(`${row} .field[data-key="model"]`).click();
@@ -190,6 +193,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.locator("#q").fill("claude/claude-opus-5-5[1m]");
         await page.keyboard.press("Enter");
         await page.waitForFunction(() => document.querySelector("#pop").hidden);
+        await repliesConsumed(page, ["/api/set"]);
         assert.deepEqual(sets, [{ agent: "claude", field: "model", value: "claude/claude-opus-5-5[1m]" }]);
         await page.context().close();
       });

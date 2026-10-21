@@ -68,6 +68,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", serve(lang, [c.done]));
+        // Observe opening without a foreground popup suspending this page's animation-frame polling.
+        await page.addInitScript(() => { window.fixtureOpened = []; window.open = url => { window.fixtureOpened.push(url); return null; }; });
         // the vendor's sign-in page, opened in a new window, gets an empty page:
         // the real one is a page the test can't control (ChatGPT's Cloudflare
         // challenge hung clicks on this page in Chromium, #1307)
@@ -83,6 +85,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.waitForFunction((s) => document.querySelector("#status").textContent.includes(s), say);
         assert.equal((await page.locator("#status").textContent()).trim(), say);
         assert.deepEqual(await scrolls(), before, "nothing scrolled");
+        assert.deepEqual(await page.evaluate(() => fixtureOpened), ["https://www.codebuddy.cn/login?x=1"]);
         assert.deepEqual(errors, []);
       });
     }

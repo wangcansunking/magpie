@@ -15,6 +15,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
+const { reach } = require("./reader.cjs");
+const { watchReplies, repliesConsumed } = require("./lifecycle.cjs");
 const { chromium, webkit } = require("playwright");
 
 const assets = path.resolve(__dirname, "../assets");
@@ -86,6 +88,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           page.setDefaultTimeout(5000);
           const errors = [];
           page.on("pageerror", (e) => errors.push(e.message));
+          await watchReplies(page, ["/api/provider/save", "/api/state", "/api/provider/test"]);
           await page.route("**/*", server(lang, saves, asks));
           await page.goto("http://magpie.test/?view=providers");
           const shot = async (name) => {
@@ -96,6 +99,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
             await page.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `local-address-${engine}-${lang}-${width}-${name}.png`), fullPage: true });
           };
           const ed = page.locator(".editor");
+          const openProvider = async (name) => {
+            const row = page.locator(".row.provider", { hasText: name }).first();
+            await reach(page, row);
+            await row.click();
+          };
           const address = ed.locator("input.address");
           const more = ed.locator("details.more", { has: page.locator("input.address") });
           const isOpen = () => more.evaluate((d) => d.open);
@@ -113,6 +121,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
             // A received write is not yet a closed editor. Reopening before
             // the save finishes can click the old draft instead of the row.
             await page.locator("#modal").waitFor({ state: "hidden" });
+            await repliesConsumed(page, ["/api/provider/save"]);
             assert.equal(saves.length, n + 1, "one Save asked");
             return saves.at(-1);
           };
@@ -121,23 +130,43 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
             const reply = page.waitForResponse((r) => new URL(r.url()).pathname === "/api/provider/test");
             await ed.locator(".eps").getByRole("button", { name: w.test, exact: true }).click();
             await reply;
+            await repliesConsumed(page, ["/api/provider/test"]);
             assert.equal(asks.length, n + 1, "a Test asked");
             return asks.at(-1);
           };
 
           // added: folded under the key, Server address its summary
           await page.locator("#addProvider").click();
+          await reach(page, page.locator("#addSheet .tile .n", { hasText: /^Ollama$/ }));
           await page.locator("#addSheet .tile .n", { hasText: /^Ollama$/ }).click();
           await ed.locator(".ehead b", { hasText: "Ollama" }).waitFor();
           assert.equal(await isOpen(), false, "folded when added");
           assert.equal(await address.isVisible(), false);
           const summary = more.locator("summary");
+          const clickSummary = async () => {
+            await page.evaluate(async () => {
+              await document.fonts.ready;
+              await Promise.all(document.getAnimations().filter(a => a.effect.getTiming().iterations !== Infinity).map(a => a.finished.catch(() => {})));
+            });
+            for (let i = 0; i < 40; i++) {
+              const at = await summary.evaluate(e => {
+                const body = e.closest(".ebody"), r = e.getBoundingClientRect(), b = body.getBoundingClientRect();
+                const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+                return { fits: r.top >= b.top && r.bottom <= b.bottom && (hit === e || e.contains(hit)), x: b.x + b.width / 2, y: b.y + b.height / 2, dy: r.top < b.top ? -60 : 60, top: body.scrollTop };
+              });
+              if (at.fits) { await summary.click(); return; }
+              await page.mouse.move(at.x, at.y);
+              await page.mouse.wheel(0, at.dy);
+              await page.waitForFunction(top => document.querySelector("#modal .ebody").scrollTop !== top, at.top, { timeout: 1000 }).catch(() => {});
+            }
+            throw new Error("the address fold did not come into the editor viewport");
+          };
           assert.equal(await summary.textContent(), w.more);
           const key = ed.locator("input[type=password]").first();
           assert((await key.boundingBox()).y < (await summary.boundingBox()).y, "the section under the key");
           await shot("folded");
           // opened: empty, the preset's address its placeholder
-          await summary.click();
+          await clickSummary();
           assert.equal(await address.isVisible(), true);
           assert.equal(await ed.locator("label", { hasText: new RegExp("^" + w.field + "$") }).count(), 1);
           assert.equal(await address.inputValue(), "");
@@ -149,7 +178,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
           // no address: said, opened, focused, nothing sent, the page where it was
           await address.fill("ftp://box");
-          await summary.click();
+          await clickSummary();
           assert.equal(await isOpen(), false);
           const y = await page.evaluate(() => document.scrollingElement.scrollTop);
           assert.equal(await press(w.add, true), null);
@@ -172,7 +201,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           assert(!added.responses, JSON.stringify(added));
 
           // edited: the address it is at; left alone, none is sent
-          await page.locator(".row.provider", { hasText: /^oMLX$|oMLX(?! Apart)/ }).first().click();
+          await openProvider(/^oMLX$|oMLX(?! Apart)/);
           await ed.locator(".ehead b", { hasText: /^oMLX$/ }).waitFor();
           assert.equal(await isOpen(), true, "open for an address not the preset's");
           assert.equal(await address.inputValue(), "http://192.168.1.5:8000");
@@ -183,7 +212,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           assert.equal(s.decide, "http://192.168.1.5:8000/v1");
 
           // moved: its URLs there
-          await page.locator(".row.provider", { hasText: /^oMLX$|oMLX(?! Apart)/ }).first().click();
+          await openProvider(/^oMLX$|oMLX(?! Apart)/);
           await address.fill("https://studio.local:8001");
           // its decision API (#1641) is the same server's: it moves too
           assert.equal(await ed.locator("input.decide-url").inputValue(), "https://studio.local:8001/v1");
@@ -201,7 +230,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           assert.equal(s.decide, "https://studio.local:8001/v1");
 
           // a decision endpoint typed in its own field is kept as typed
-          await page.locator(".row.provider", { hasText: /^oMLX$|oMLX(?! Apart)/ }).first().click();
+          await openProvider(/^oMLX$|oMLX(?! Apart)/);
           await ed.locator("input.decide-url").fill("https://jev.example/v1");
           await address.fill("https://studio.local:8002");
           assert.equal(await ed.locator("input.decide-url").inputValue(), "https://jev.example/v1");
@@ -210,7 +239,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           assert.equal(s.decide, "https://jev.example/v1");
 
           // URLs set apart, saved with the address untouched, stay apart
-          await page.locator(".row.provider", { hasText: "oMLX Apart" }).click();
+          await openProvider("oMLX Apart");
           await ed.locator(".ehead b", { hasText: "oMLX Apart" }).waitFor();
           assert.equal(await isOpen(), true);
           assert.equal(await address.inputValue(), "http://10.0.0.2:8000");
@@ -223,7 +252,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
           // edited, then put back as it was: still apart, in the Endpoints,
           // a Test and the Save
-          await page.locator(".row.provider", { hasText: "oMLX Apart" }).click();
+          await openProvider("oMLX Apart");
           await ed.locator(".ehead b", { hasText: "oMLX Apart" }).waitFor();
           // on macOS End doesn't move the caret, and focusing a field puts
           // it at the start: focus first, then the caret, then the keys
@@ -242,7 +271,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           assert.equal(s.anthropic, "http://10.0.0.3:9000");
 
           // no address, then put back: the same
-          await page.locator(".row.provider", { hasText: "oMLX Apart" }).click();
+          await openProvider("oMLX Apart");
           await ed.locator(".ehead b", { hasText: "oMLX Apart" }).waitFor();
           await address.fill("ftp://box");
           assert.equal(await eps(), apartEps);
@@ -265,6 +294,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
           // added with no address: no URLs, the gateway takes the preset's
           await page.locator("#addProvider").click();
+          await reach(page, page.locator("#addSheet .tile .n", { hasText: /^Ollama$/ }));
           await page.locator("#addSheet .tile .n", { hasText: /^Ollama$/ }).click();
           await ed.locator(".ehead b", { hasText: "Ollama" }).waitFor();
           s = await press(w.add);
@@ -273,6 +303,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
           // a vendor's preset has no address
           await page.locator("#addProvider").click();
+          await reach(page, page.locator("#addSheet .tile .n", { hasText: /^OpenAI$/ }));
           await page.locator("#addSheet .tile .n", { hasText: /^OpenAI$/ }).click();
           await ed.locator(".ehead b", { hasText: "OpenAI" }).waitFor();
           assert.equal(await address.count(), 0);

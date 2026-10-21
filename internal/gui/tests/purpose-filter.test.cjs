@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
+const { watchReplies, repliesConsumed } = require("./lifecycle.cjs");
 const { chromium, webkit } = require("playwright");
 // Wheel into view before clicking: the app undoes unsolicited auto-scroll.
 // Cover the long ledger and the Routing filters below a narrow-window stage.
@@ -215,6 +216,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       page.setDefaultTimeout(7000);
       const errors = [];
       page.on("pageerror", (e) => { if (!/^ResizeObserver loop completed with undelivered notifications/.test(e.message)) errors.push(e.message); });
+      await watchReplies(page, ["/api/gateway/history"]);
       await page.route("**/*", server(lang, []));
       await page.goto("http://magpie.test/?view=routing");
       await page.locator(".rt-req").nth(7).waitFor();
@@ -254,6 +256,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.locator(".rt-group-by button").last().click();
       assert.match(await page.locator(".rt-session .summary").textContent(), /^5/);
       await page.locator(".rt-days .rt-day").nth(1).click();
+      await repliesConsumed(page, ["/api/gateway/history"]);
       assert.equal(await page.locator(".rt-req").count(), 5, "the same union applies to history and sessions");
       // Cross-page navigation keeps the union if its target already matches.
       await page.evaluate(() => window.openRoute(95, new Date().toISOString()));

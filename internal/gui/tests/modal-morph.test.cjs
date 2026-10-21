@@ -54,7 +54,8 @@ const shown = (page, at) => page.evaluate((at) => {
   for (const a of [...d.parentElement.getAnimations(), ...d.getAnimations()]) { a.pause(); a.currentTime = at * a.effect.getTiming().duration; }
   const box = d.getBoundingClientRect(), s = box.width / d.offsetWidth;
   const clip = getComputedStyle(d).clipPath;
-  const m = clip.match(/^inset\(([-\d.]+)px(?: ([-\d.]+)px)?(?: ([-\d.]+)px)?(?: ([-\d.]+)px)?/);
+  // Chromium can serialize a near-zero inset as 2.84217e-14px.
+  const m = clip.match(/^inset\(([-\d.]+(?:[eE][+-]?\d+)?)px(?: ([-\d.]+(?:[eE][+-]?\d+)?)px)?(?: ([-\d.]+(?:[eE][+-]?\d+)?)px)?(?: ([-\d.]+(?:[eE][+-]?\d+)?)px)?/);
   if (!m) return { clip, top: box.top, bottom: box.bottom, left: box.left, right: box.right };
   const [t, r = t, b = t, l = r] = m.slice(1).map((v) => v === undefined ? undefined : +v);
   return { clip, top: box.top + Math.max(0, t) * s, bottom: box.bottom - Math.max(0, b) * s, left: box.left + Math.max(0, l) * s, right: box.right - Math.max(0, r) * s };
@@ -84,7 +85,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const row = page.locator('.row.provider[data-id="delta"]');
       await row.waitFor();
       await page.evaluate(() => { window.__hold = true; });
-      const r = await row.boundingBox();
+      // Find and measure the live row together. WebKit's separate protocol
+      // box lookup can return null when startup redraws replace the row.
+      const r = await row.evaluateAll(([e]) => e.getBoundingClientRect().toJSON());
 
       // held at the start: a strip of the dialog over the row
       await row.locator(".name, .who").first().click();

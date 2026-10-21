@@ -12,6 +12,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
+const { watchReplies, repliesConsumed } = require("./lifecycle.cjs");
 const { chromium, webkit } = require("playwright");
 
 const assets = path.resolve(__dirname, "../assets");
@@ -93,6 +94,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       page.setDefaultTimeout(5000);
       const errors = [], posts = [];
       page.on("pageerror", (e) => errors.push(e.message));
+      await watchReplies(page, ["/api/groups/arrange"]);
       await page.route("**/*", serve(lang, posts));
       await page.goto("http://magpie.test/?view=routing");
       await page.locator(".rt-groups > .rt-group").nth(2).waitFor();
@@ -136,6 +138,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(await menu.getByRole("menuitem", { name: w.up }).isDisabled(), true, "Move up on the first group");
       await menu.getByRole("menuitem", { name: w.down }).click();
       await saved();
+      await repliesConsumed(page, ["/api/groups/arrange"]);
       assert.deepEqual(posts.at(-1), ["two", "one", "auto-m", "auto-z"]);
       assert.deepEqual(await listed(page), ["two", "one", "auto-m"]);
       assert.equal(await page.locator(".rt-gedit").count(), 0, "the right-click opened the editor");
@@ -144,10 +147,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.locator(".rt-group[data-id=one] .rt-ghandle").focus();
       await page.keyboard.press("Alt+ArrowDown");
       await page.waitForFunction(() => [...document.querySelectorAll(".rt-groups > .rt-group")].map((r) => r.dataset.id).join() === "two,auto-m,one");
+      await repliesConsumed(page, ["/api/groups/arrange"]);
       assert.deepEqual(posts.at(-1), ["two", "auto-m", "one", "auto-z"]);
       await page.waitForFunction(() => document.activeElement?.closest(".rt-group")?.dataset.id === "one");
       await page.keyboard.press("Alt+ArrowUp");
       await page.waitForFunction(() => [...document.querySelectorAll(".rt-groups > .rt-group")].map((r) => r.dataset.id).join() === "two,one,auto-m");
+      await repliesConsumed(page, ["/api/groups/arrange"]);
       assert.deepEqual(posts.at(-1), ["two", "one", "auto-m", "auto-z"]);
 
       // a click on the handle opens the same menu, not the editor
@@ -163,6 +168,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await answered;
       await page.waitForFunction(() => [...document.querySelectorAll(".rt-groups > .rt-group")].map((r) => r.dataset.id).join() === "two,auto-m,one");
       await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => setTimeout(r))));
+      await repliesConsumed(page, ["/api/groups/arrange"]);
       assert.deepEqual(posts.at(-1), ["two", "auto-m", "one", "auto-z"]);
 
       // dragging by the grip moves the row to the top
@@ -175,7 +181,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.locator(".rt-groups > .rt-group.dragging").waitFor();
       await page.mouse.up();
       await page.waitForFunction(() => document.querySelector(".rt-groups > .rt-group")?.dataset.id === "one");
+      await repliesConsumed(page, ["/api/groups/arrange"]);
       assert.equal(posts.length, n + 1);
+      await repliesConsumed(page, ["/api/groups/arrange"]);
       assert.deepEqual(posts.at(-1), ["one", "two", "auto-m", "auto-z"]);
       assert.equal(await page.locator(".rt-gedit").count(), 0, "letting go opened the editor");
       assert.equal(await page.locator(".row-menu").count(), 0, "letting go opened the menu");

@@ -14,6 +14,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
+const { watchReplies, repliesConsumed } = require("./lifecycle.cjs");
 const { chromium, webkit } = require("playwright");
 
 const assets = path.resolve(__dirname, "../assets");
@@ -103,6 +104,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const page = await ctx.newPage(), f = fixture(lang);
         page.setDefaultTimeout(5000);
         page.on("pageerror", (e) => errors.push(e.message));
+        await watchReplies(page, ["/api/providers/arrange"]);
         await page.route("**/*", f.route);
         await page.goto("http://magpie.test/?view=providers");
         await page.locator("#providers > .row.provider").nth(7).waitFor();
@@ -148,6 +150,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.keyboard.press("Alt+ArrowUp");
         await page.waitForFunction(() => document.querySelector("#status")?.textContent);
         await page.waitForFunction(() => [...document.querySelectorAll("#providers > .row.provider")].filter((r) => !r.hidden).map((r) => r.dataset.id).join() === "relay-one,relay-three,relay-two");
+        await repliesConsumed(page, ["/api/providers/arrange"]);
         assert.deepEqual(f.posted.at(-1), ["openai", "relay-one", "anthropic", "relay-three", "relay-two", "deepseek", "moonshot", "zhipu", "relay-off"]);
         await page.waitForFunction(() => document.activeElement?.closest(".row.provider")?.dataset.id === "relay-three");
         assert.equal(await q.inputValue(), "relay", "the move cleared the search");
@@ -162,6 +165,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.locator("#providers > .row.dragging").waitFor();
         await page.mouse.up();
         await page.waitForFunction(() => [...document.querySelectorAll("#providers > .row.provider")].filter((r) => !r.hidden).map((r) => r.dataset.id).join() === "relay-two,relay-one,relay-three");
+        await repliesConsumed(page, ["/api/providers/arrange"]);
         assert.deepEqual(f.posted.at(-1), ["openai", "relay-two", "relay-one", "anthropic", "relay-three", "deepseek", "moonshot", "zhipu", "relay-off"]);
 
         // Escape clears it: every row back, the fold as it was
@@ -182,6 +186,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.deepEqual(await menu.locator(".rm-item").evaluateAll((bs) => bs.map((b) => b.disabled)), [false, false, true, true]);
         await menu.locator(".rm-item").first().click();
         await page.waitForFunction(() => document.querySelector("#providers > .row.provider").dataset.id === "zhipu");
+        await repliesConsumed(page, ["/api/providers/arrange"]);
         assert.deepEqual(f.posted.at(-1), ["zhipu", "openai", "relay-two", "relay-one", "anthropic", "relay-three", "deepseek", "moonshot", "relay-off"]);
         assert.equal(await page.locator("#providers > .row.provider.selected").count(), 0, "the right-click opened the row");
 
@@ -191,6 +196,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.deepEqual(await menu.locator(".rm-item").evaluateAll((bs) => bs.map((b) => b.disabled)), [true, true, false, false]);
         await menu.locator(".rm-item").last().click();
         await page.waitForFunction(() => [...document.querySelectorAll("#providers > .row.provider")].at(-1).dataset.id === "zhipu");
+        await repliesConsumed(page, ["/api/providers/arrange"]);
         assert.deepEqual(f.posted.at(-1), ["openai", "relay-two", "relay-one", "anthropic", "relay-three", "deepseek", "moonshot", "zhipu", "relay-off"]);
 
         // Alt+Shift+↑ from the keyboard: to the top, the keyboard kept on it
@@ -198,9 +204,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.keyboard.press("Alt+Shift+ArrowUp");
         await page.waitForFunction(() => document.querySelector("#providers > .row.provider").dataset.id === "moonshot");
         await page.waitForFunction(() => document.activeElement?.closest(".row.provider")?.dataset.id === "moonshot");
+        await repliesConsumed(page, ["/api/providers/arrange"]);
         assert.deepEqual(f.posted.at(-1), ["moonshot", "openai", "relay-two", "relay-one", "anthropic", "relay-three", "deepseek", "zhipu", "relay-off"]);
         await page.keyboard.press("Alt+Shift+ArrowDown");
         await page.waitForFunction(() => [...document.querySelectorAll("#providers > .row.provider")].at(-1).dataset.id === "moonshot");
+        await repliesConsumed(page, ["/api/providers/arrange"]);
         assert.deepEqual(f.posted.at(-1), ["openai", "relay-two", "relay-one", "anthropic", "relay-three", "deepseek", "zhipu", "moonshot", "relay-off"]);
 
         // only the order was posted, and nothing scrolled

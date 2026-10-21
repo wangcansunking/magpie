@@ -12,6 +12,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
+const { watchReplies, repliesConsumed } = require("./lifecycle.cjs");
 const { chromium, webkit } = require("playwright");
 const { watchSettingsReads, settingsDrawn, reach } = require("./reader.cjs");
 
@@ -90,6 +91,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const posted = [];
       await page.route("**/*", serve(lang, posted));
       await watchSettingsReads(page);
+      await watchReplies(page, ["/api/settings/search-api"]);
       await page.goto("http://magpie.test/?view=settings&tab=models");
       await settingsDrawn(page);
       const keys = page.locator("#searchList .row.search-keys");
@@ -144,6 +146,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(await segs.nth(0).getAttribute("aria-pressed"), "true");
       await click(segs.nth(1));
       await page.waitForFunction(() => document.querySelectorAll("#searchList .search-keys .segs .opt")[1]?.getAttribute("aria-pressed") === "true");
+      await repliesConsumed(page, ["/api/settings/search-api"]);
       assert.deepEqual(posted.filter((p) => p.pick), [{ vendor: "tavily", pick: "order" }]);
       await click(keys.locator(".segs .opt").nth(0));
       await page.waitForFunction(() => document.querySelectorAll("#searchList .search-keys .segs .opt")[0]?.getAttribute("aria-pressed") === "true");

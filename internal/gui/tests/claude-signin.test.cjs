@@ -12,6 +12,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
+const { watchReplies, repliesConsumed } = require("./lifecycle.cjs");
 const { chromium, webkit } = require("playwright");
 
 const assets = path.resolve(__dirname, "../assets");
@@ -96,6 +97,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         page.setDefaultTimeout(5000);
         const errors = [], sets = [];
         page.on("pageerror", (e) => errors.push(e.message));
+        await watchReplies(page, ["/api/set"]);
         await page.route("**/*", server(lang, sets));
         await page.goto("http://magpie.test/");
         await page.locator(claude).waitFor();
@@ -141,12 +143,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const way = (i) => page.locator("#pop #list li").filter({ has: page.locator(".n", { hasText: words[i][1] }) });
         await way(1).click();
         await page.waitForFunction(() => document.querySelector('.row.agent[data-id="claude"] .field.set[data-key="login"]'));
+        await repliesConsumed(page, ["/api/set"]);
         assert.deepEqual(sets, [{ agent: "claude", field: "login", value: "claudeai" }]);
         await square.click();
         await page.locator("#pop:not([hidden]) #list li").first().waitFor();
         assert.equal(await page.locator("#pop #list li.cur .v").textContent(), "claude.ai");
         await way(0).click();
         await page.waitForFunction(() => !document.querySelector('.row.agent[data-id="claude"] .field.set[data-key="login"]'));
+        await repliesConsumed(page, ["/api/set"]);
         assert.deepEqual(sets.at(-1), { agent: "claude", field: "login", value: "" });
         assert.deepEqual(errors, []);
       }

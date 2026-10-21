@@ -137,6 +137,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     t.after(() => browser.close());
     const page = await browser.newPage({ viewport: { width: 1100, height: 1000 }, reducedMotion: "reduce" });
     page.setDefaultTimeout(5000);
+    page.setDefaultNavigationTimeout(30000);
     const f = liveRestFixture(), errors = [];
     page.on("pageerror", e => errors.push(e.message));
     // This fixture is magpie web: api("open") uses the browser's window,
@@ -305,6 +306,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const context = await browser.newContext({ viewport: { width, height: 900 }, reducedMotion: "reduce" });
         const page = await context.newPage();
         page.setDefaultTimeout(5000);
+    page.setDefaultNavigationTimeout(30000);
         const errors = [], lifted = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", serve(lang, lifted));

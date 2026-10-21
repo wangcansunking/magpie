@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
+const { once, EventEmitter } = require("node:events");
 const { chromium, webkit } = require("playwright");
 
 const assets = process.env.MAGPIE_RECENT_ASSETS || path.resolve(__dirname, "../assets");
@@ -28,6 +29,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const errors = [];
       page.on("pageerror", (e) => errors.push(e.message));
       const seen = [];
+      const arrivals = new EventEmitter();
       let shown = calls;
       let release;
       const pending = new Promise((resolve) => { release = resolve; });
@@ -42,6 +44,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           const c = calls.find((c) => url.searchParams.get("id") === String(c.id));
           assert(c, "detail identifies the exact call");
           seen.push(c.id);
+          arrivals.emit("call");
           if (c === calls[0]) { await pending; return json(bodies); }
           if (c === calls[2]) return json({ error: "This request is no longer in the recent calls." }, 404);
           if (seen.filter((id) => id === c.id).length === 1) return json({ error: "temporarily unavailable" }, 503);
@@ -66,8 +69,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await rows.first().waitFor();
       await page.locator("#foldConnect").click();
       assert.equal(seen.length, 0, "the recent list is metadata only");
+      const firstBody = once(arrivals, "call", { signal: AbortSignal.timeout(5000) });
       await rows.first().locator(".call").click();
       await rows.first().getByText(words[lang].loading, { exact: true }).waitFor();
+      await firstBody;
       assert.equal(seen.length, 1);
       assert.equal(await rows.first().locator(".call-body").count(), 0, "pending is not an empty body");
       await rows.first().locator(".call").press("Enter");

@@ -87,24 +87,20 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       t.after(() => browser.close());
       for (const width of [560, 650, 760, 900, 1024, 1280]) {
         const context = await browser.newContext({ viewport: { width, height: 640 }, reducedMotion: "reduce" });
-        const page = await context.newPage();
-        page.setDefaultTimeout(5000);
         const errors = [];
-        let on = "";
-        // going from page to page cancels the reads still on their way, and
-        // WebKit reports each one as a page error, "Fetch API cannot load …
-        // due to access control checks" (#1350, #1307): not this test's
-        page.on("pageerror", (e) => {
-          if (engine === "webkit" && /^Fetch API cannot load .* due to access control checks/.test(e.message)) return;
-          errors.push(`${width}px ${on}: ${e.stack}`);
-        });
-        await page.route("**/*", serve(lang));
-        await page.addInitScript(() => { localStorage.setItem("magpie.navLayout", "side"); });
         for (const p of pages) {
-          on = p.name;
-          if (p.init) await page.evaluate(([k, v]) => localStorage.setItem(k, v), p.init).catch(() => {});
+          // Each layout owns its page. Navigating a reused page cancelled
+          // unrelated startup reads and WebKit reported them against the next layout.
+          const page = await context.newPage();
+          page.setDefaultTimeout(5000);
+          const capture = e => errors.push(`${width}px ${p.name}: ${e.stack}`);
+          page.on("pageerror", capture);
+          await page.route("**/*", serve(lang));
+          await page.addInitScript(init => {
+            localStorage.setItem("magpie.navLayout", "side");
+            if (init) localStorage.setItem(init[0], init[1]);
+          }, p.init || null);
           await page.goto("http://magpie.test/" + p.url);
-          if (p.init) { await page.evaluate(([k, v]) => localStorage.setItem(k, v), p.init); await page.reload(); }
           await page.locator(p.head).waitFor();
           await page.locator("#crumb b").waitFor();
           // the Library's buttons have their tooltips once it has loaded
@@ -144,6 +140,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           // where the tools have their icons alone, nothing more of them
           // can give way: the title shows whole wherever it fits beside them
           if (width >= 650) assert(!title.cut, `the title is cut at ${at}`);
+          // Cancellation after this layout is checked belongs to teardown.
+          page.removeListener("pageerror", capture);
+          await page.close();
         }
         assert.deepEqual(errors, []);
         await context.close();
