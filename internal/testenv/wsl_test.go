@@ -62,9 +62,10 @@ func TestWSLStandInBlocksInstalledExecutable(t *testing.T) {
 	if got, err := exec.LookPath("wsl.exe"); err != nil || got != sentinel {
 		t.Fatalf("negative control resolved %q (%v), want our sentinel %q", got, err, sentinel)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	out, err := proc.CommandContext(ctx, "wsl.exe", "--magpie-test-wsl-sentinel").CombinedOutput()
+	// This checks executable selection, not startup latency. A copied test
+	// binary can spend more than ten seconds in Windows' executable scanner.
+	// Let the test own the child rather than racing that unrelated startup.
+	out, err := proc.CommandContext(t.Context(), "wsl.exe", "--magpie-test-wsl-sentinel").CombinedOutput()
 	if err != nil || string(out) != "test WSL sentinel reached\n" {
 		t.Fatalf("negative control did not reach our sentinel: %q %v", out, err)
 	}
