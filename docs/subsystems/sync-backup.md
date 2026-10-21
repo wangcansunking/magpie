@@ -26,7 +26,7 @@ clone a working tree or synchronize arbitrary files.
   the remote bundle, first keeping the local setup for Undo.
 - [`backup.go`](../../internal/gui/backup.go), the Settings form in
   [`app.js`](../../internal/gui/assets/app.js) and
-  [`webdav_cli.go`](../../webdav_cli.go) reach the same sync operations.
+  [`webdav_cli.go`](../../internal/cli/webdav_cli.go) reach the same sync operations.
 
 ## What stays on each computer
 
@@ -52,6 +52,11 @@ set there. The default sharing key is different: it is in the gateway-key
 store, which rides the settings part with `LANKey` and `LANKeyID`, so every
 computer holds the same one, and sharing turned on at a second computer takes
 it up rather than making another (`TestLANSharingStaysOnItsComputer`).
+
+WAN keys follow the same credential inclusion rules, preserving their WAN
+scope and separate secret field. The tunnel's `wan.json`, CLI sign-in and
+running state are not collected. Restoring a WAN key never starts a public
+tunnel; see [WAN gateway](wan-gateway.md#ownership-and-persistence).
 
 ## Runtime and state
 

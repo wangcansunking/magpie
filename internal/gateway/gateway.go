@@ -402,6 +402,7 @@ type Server struct {
 	// taken off it (see Relisten)
 	lnMu sync.Mutex
 	ln   net.Listener
+	wan  wanRuntime
 	// what it serves other computers TLS with, nil without (tls.go)
 	tls *tls.Config
 	// the images described for models that can't see them (vision.go)
@@ -570,6 +571,8 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		}
 	})
 	defer stopLimits()
+	stopWAN := s.ownWAN(ctx)
+	defer stopWAN()
 	freshCtx, stopFresh := context.WithCancel(ctx)
 	defer stopFresh()
 	go pluginrt.KeepFresh(freshCtx, 2*time.Second, settings.Path(), provider.Path(), plugin.ListPath(), plugin.ToolsPath(), access.Path())
@@ -654,15 +657,12 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 // Handler routes the client APIs.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	s.inferenceRoutes(mux)
 	mux.HandleFunc("GET /{$}", s.info)
 	// an OpenAI-compatible base URL answers too: Empryo lists a provider with
 	// no key of its own only when its baseURL does
 	mux.HandleFunc("GET /v1", s.info)
 	mux.HandleFunc("GET /v1/{$}", s.info)
-	mux.HandleFunc("GET /v1/models", s.models)
-	mux.HandleFunc("GET /models", s.models)
-	mux.HandleFunc("GET /v1/models/{id...}", s.model)
-	mux.HandleFunc("GET /muse-code/models", s.museModels)
 	// Claude Desktop's third-party gateway looks for one here before it
 	// takes the address
 	mux.HandleFunc("GET /api/hello", func(w http.ResponseWriter, r *http.Request) {
@@ -695,6 +695,31 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET "+CPUPath, s.cpuProfile)
 	mux.HandleFunc("GET /v1/magpie/omarchy", s.omarchyTheme)
 	mux.HandleFunc("OPTIONS /v1/magpie/omarchy", s.omarchyTheme)
+	mux.HandleFunc("POST /v1/systemone", s.serveSystemOne)
+	// Codex's web.run tool (anton on Discord)
+	mux.HandleFunc("POST /v1"+AlphaSearchPath, s.alphaSearch)
+	mux.HandleFunc("POST "+AlphaSearchPath, s.alphaSearch)
+	mux.HandleFunc("POST "+claudeMCPPath+"{token}", s.subscription.mcpCall)
+	mux.HandleFunc("/mcp/{name}", s.mcpProxy)
+	mux.HandleFunc(SearchMCPPath, s.searchMCP)
+	mux.HandleFunc(VisionMCPPath, s.visionMCP)
+	mux.HandleFunc(ToolsMCPPath, s.toolsMCP)
+	mux.HandleFunc(CodexPath+"/", s.codexBackend)
+	mux.HandleFunc("GET "+CodexCatalogPath, s.codexCatalog)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, provider.Chat, http.StatusNotFound, "magpie serves /v1/chat/completions, /v1/responses, /v1/messages, /v1/systemone, /v1/images/generations, /v1/images/edits, /v1/videos, /v1/embeddings, /v1/rerank, /v1/audio/transcriptions, /v1/audio/translations and /v1beta/models/*")
+	})
+	return localKeysOnly(s.apiHandler(mux))
+}
+
+// inferenceRoutes is shared by the local and strict WAN entry points. Only
+// inference and model discovery belong here: no control APIs, MCP tools,
+// internal callbacks, or arbitrary backend subtrees.
+func (s *Server) inferenceRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /v1/models", s.models)
+	mux.HandleFunc("GET /models", s.models)
+	mux.HandleFunc("GET /v1/models/{id...}", s.model)
+	mux.HandleFunc("GET /muse-code/models", s.museModels)
 	mux.HandleFunc("POST /v1/chat/completions", s.handle(provider.Chat))
 	mux.HandleFunc("POST /chat/completions", s.handle(provider.Chat))
 	mux.HandleFunc("POST /v1/responses", s.handle(provider.Responses))
@@ -703,10 +728,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /responses", responsesOverHTTP)
 	mux.HandleFunc("POST /v1/messages", keepsSignIn(s.handle(provider.Anthropic)))
 	mux.HandleFunc("POST /messages", keepsSignIn(s.handle(provider.Anthropic)))
-	mux.HandleFunc("POST /v1/systemone", s.serveSystemOne)
-	// Codex's web.run tool (anton on Discord)
-	mux.HandleFunc("POST /v1"+AlphaSearchPath, s.alphaSearch)
-	mux.HandleFunc("POST "+AlphaSearchPath, s.alphaSearch)
 	mux.HandleFunc("POST /v1/messages/count_tokens", keepsSignIn(s.countTokens))
 	mux.HandleFunc("POST /v1/images/generations", s.images(false))
 	mux.HandleFunc("POST /images/generations", s.images(false))
@@ -727,18 +748,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /videos/{id}", s.videosGet)
 	mux.HandleFunc("GET /v1/videos/{id}/content", s.videosContent)
 	mux.HandleFunc("GET /videos/{id}/content", s.videosContent)
-	mux.HandleFunc("POST "+claudeMCPPath+"{token}", s.subscription.mcpCall)
-	mux.HandleFunc("/mcp/{name}", s.mcpProxy)
-	mux.HandleFunc(SearchMCPPath, s.searchMCP)
-	mux.HandleFunc(VisionMCPPath, s.visionMCP)
-	mux.HandleFunc(ToolsMCPPath, s.toolsMCP)
-	mux.HandleFunc(CodexPath+"/", s.codexBackend)
-	mux.HandleFunc("GET "+CodexCatalogPath, s.codexCatalog)
 	mux.HandleFunc("GET /v1beta/models", s.geminiModels)
 	mux.HandleFunc("POST /v1beta/models/{call...}", s.gemini)
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, provider.Chat, http.StatusNotFound, "magpie serves /v1/chat/completions, /v1/responses, /v1/messages, /v1/systemone, /v1/images/generations, /v1/images/edits, /v1/videos, /v1/embeddings, /v1/rerank, /v1/audio/transcriptions, /v1/audio/translations and /v1beta/models/*")
-	})
+}
+
+func (s *Server) apiHandler(mux http.Handler) http.Handler {
 	return s.counted(holdCatalog(corsGuard(callerGuard(withCaller(keyLimited(mux))))))
 }
 

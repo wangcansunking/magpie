@@ -194,13 +194,18 @@ for (const [engine, runtime] of engines) {
       const { page, api, errors } = await open(browser, "zh", { viewport: { width: 560, height: 620 } });
       await page.locator("#uiFontRow .font-family").click();
       const second = await page.locator(".font-menu .pm-item").nth(1).boundingBox();
+      await page.evaluate(() => addEventListener("mousemove", (e) => { window.__fontPoint = { clientX: e.clientX, clientY: e.clientY }; }, { once: true }));
       await page.mouse.move(second.x + second.width / 2, second.y + second.height / 2);
+      await page.waitForFunction(() => window.__fontPoint);
       await page.locator(".font-menu .sc-q").fill("HarmonyOS");
-      // the item now under the pointer is Refresh fonts. The redraw's
-      // mouseenter comes on the engine's own hover timer (WebKit's is
-      // later than a frame), and what is checked is that nothing came, so
-      // there is no state to wait for: 300ms is past both engines' timers.
-      await page.waitForTimeout(300);
+      // Inject the redraw's enter at the last mouse position; no elapsed
+      // hover timer is evidence that the field would keep its focus.
+      await page.evaluate(() => {
+        const p = window.__fontPoint;
+        const item = document.elementFromPoint(p.clientX, p.clientY)?.closest(".pm-item");
+        if (!item) throw new Error("the narrowed menu has no item under the pointer");
+        item.dispatchEvent(new MouseEvent("mouseenter", { ...p, screenX: 0, screenY: 0 }));
+      });
       assert.equal(await page.evaluate(() => document.activeElement.className), "sc-q", "the search field keeps the focus");
       const reads = api.reads;
       await page.keyboard.press("Enter");
@@ -211,8 +216,20 @@ for (const [engine, runtime] of engines) {
       await page.locator("#uiFontRow .font-family").click();
       const item = page.locator(".font-menu .pm-item").nth(2);
       const box = await item.boundingBox();
+      await item.evaluate((e) => e.addEventListener("mouseenter", () => { window.__fontEntered = true; }, { once: true }));
       await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2 + 1);
+      await page.waitForFunction(() => window.__fontEntered);
       assert.equal(await item.evaluate(e => e === document.activeElement), true, "a moved pointer focuses the item it's on");
+      // Windows WebKit gives real moves zero screen coordinates. Inject
+      // that protocol in both engines, preserving the stationary guard.
+      await page.locator(".font-menu .sc-q").focus();
+      await item.evaluate((e) => {
+        e.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: 20, clientY: 30, screenX: 0, screenY: 0 }));
+        e.dispatchEvent(new MouseEvent("mouseenter", { clientX: 20, clientY: 30, screenX: 0, screenY: 0 }));
+      });
+      assert.equal(await page.evaluate(() => document.activeElement.className), "sc-q", "a stationary zero-screen pointer keeps typing focus");
+      await item.evaluate((e) => e.dispatchEvent(new MouseEvent("mouseenter", { clientX: 21, clientY: 31, screenX: 0, screenY: 0 })));
+      assert.equal(await item.evaluate(e => e === document.activeElement), true, "client movement focuses even when screen coordinates are zero");
       assert.deepEqual(errors, []);
     } finally { await browser.close(); }
   });

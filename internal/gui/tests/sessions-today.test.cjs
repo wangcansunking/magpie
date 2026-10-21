@@ -7,8 +7,8 @@
 // again where they are: today's bar stays under the pointer, hovered, its
 // title today's numbers as they are now. A metric picked after that draws
 // the numbers now in, not those of the first draw. The API is faked here,
-// with today's usage growing at each read; the fifteen seconds are the page
-// clock's, run forward.
+// with today's usage growing before the next poll; the fifteen seconds are
+// the page clock's, run forward. Startup's overlapping reads see one snapshot.
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
@@ -34,13 +34,14 @@ function serve(lang, reads) {
     if (url.pathname === "/api/plugins") return json({ plugins: [] });
     if (url.pathname === "/api/sessions/progress") return json({ indexing: false });
     if (url.pathname === "/api/sessions") return json({ sessions: [], dirs: ["/test/sessions"] });
-    // 30 days up to today; today's tokens grow a million each read
+    // Request arrival isn't response publication: startup can ask again
+    // while the previous response is still being drawn. One generation is
+    // stable until this test changes the upstream data for the next poll.
     const days = Array.from({ length: 30 }, (_, i) => back(29 - i)).map((date, i) => ({
-      date, usage: i === 29 ? use(1_000_000 * reads.n, 100_000 * reads.n) : use(2_000_000, 200_000), active: [],
+      date, usage: i === 29 ? use(1_000_000 * reads.value, 100_000 * reads.value) : use(2_000_000, 200_000), active: [],
     }));
     if (url.pathname === "/api/sessions/stats") {
       reads.n++;
-      days[29].usage = use(1_000_000 * reads.n, 100_000 * reads.n);
       return json({ from: days[0].date, to: today, days, agents: { claude: "Claude Code" } });
     }
     if (url.pathname === "/api/sessions/overview") {
@@ -69,7 +70,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const context = await browser.newContext({ viewport: { width: 1100, height: 760 }, reducedMotion: "reduce", timezoneId: TZ });
       const page = await context.newPage();
       page.setDefaultTimeout(5000);
-      const errors = [], reads = { n: 0 };
+      const errors = [], reads = { n: 0, value: 1 };
       page.on("pageerror", (e) => errors.push(e.message));
       await page.route("**/*", serve(lang, reads));
       await page.clock.install();
@@ -87,7 +88,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert(n >= 1);
         const tt = await title();
         assert(tt.startsWith(w.day + " · "), tt);
-        assert(tt.includes(w.tokens(n)), tt);
+        assert(tt.includes(w.tokens(reads.value)), tt);
       });
 
       await t.test("read again while hovered, the bar stays, its title today's now", async () => {
@@ -95,11 +96,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await last.hover();
         await page.evaluate(() => { window.__today = document.querySelector("#sessChart .bars > .bar:last-child"); });
         const was = reads.n, before = await title();
+        reads.value++;
         await page.clock.runFor(16000);
         await page.waitForFunction((b) => document.querySelector("#sessChart .bars > .bar:last-child")?.title !== b, before);
         assert(reads.n > was, "the sessions were not read again");
         const now = await title();
-        assert(now.includes(w.tokens(reads.n)), now);
+        assert(now.includes(w.tokens(reads.value)), now);
         assert.equal(await page.evaluate(() => window.__today.isConnected), true, "today's bar was drawn anew under the pointer");
         assert.equal(await page.evaluate(() => window.__today.matches(":hover")), true);
         assert.equal(await bars.count(), 30);
@@ -111,11 +113,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       });
 
       await t.test("a metric picked after draws the numbers now in", async () => {
-        const n = reads.n;
         await page.locator("#sessChart .segs .opt", { hasText: w.output }).click();
         await page.waitForFunction(() => document.querySelector("#sessChart .bars > .bar:last-child i.in") === null);
         const tt = await title();
-        assert(tt.includes(w.tokens(n)), tt);
+        assert(tt.includes(w.tokens(reads.value)), tt);
       });
 
       assert.deepEqual(errors, []);

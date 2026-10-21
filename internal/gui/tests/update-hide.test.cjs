@@ -143,8 +143,16 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           const pill = page.locator("#update"), x = page.locator("#updateHide");
           await pill.waitFor({ state: "visible" });
           if (tight) {
-            // the header as fitTop leaves it when the tabs don't fit (#442)
-            await page.evaluate(() => { topFit.disconnect(); document.querySelector(".top").classList.add("tight"); });
+            // The header as fitTop leaves it when the tabs don't fit (#442).
+            // This fixture owns the layout: finish font fitting and cancel
+            // a resize fit already queued before disconnecting its observer.
+            await page.evaluate(async () => {
+              await document.fonts.ready;
+              topFit.disconnect();
+              cancelAnimationFrame(topFitFrame);
+              topFitFrame = 0;
+              document.querySelector(".top").classList.add("tight");
+            });
             assert.equal(await pill.locator("span").evaluate((e) => getComputedStyle(e).display), "none", "the pill is its round arrow");
           }
           await pill.hover();

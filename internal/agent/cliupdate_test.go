@@ -556,9 +556,17 @@ func TestGrokInstalled(t *testing.T) {
 	}))
 	defer rel.Close()
 	says := "grok 1.0.46 (2765805b9442)"
-	oldRel, oldVer, oldRun := grokReleases, runVersion, runUpdate
+	oldRel, oldVer, oldRun, oldCheck := grokReleases, runVersion, runUpdate, runCheck
 	grokReleases = []string{rel.URL + "/"}
 	runVersion = func(string) string { return says }
+	// The installed files are metadata fixtures, not executable releases.
+	// Keep the post-update probe on the same fake version source too.
+	runCheck = func(_ context.Context, got string, _ []string) (string, int, error) {
+		if got != bin {
+			t.Errorf("checked %q, want installed release %q", got, bin)
+		}
+		return says, 0, nil
+	}
 	versions, latests = memo{}, memo{}
 	var ran [][]string
 	runUpdate = func(_ context.Context, u *updater) ([]byte, error) {
@@ -568,7 +576,7 @@ func TestGrokInstalled(t *testing.T) {
 		return []byte("✓ grok v1.0.50 installed successfully!"), nil
 	}
 	t.Cleanup(func() {
-		grokReleases, runVersion, runUpdate = oldRel, oldVer, oldRun
+		grokReleases, runVersion, runUpdate, runCheck = oldRel, oldVer, oldRun, oldCheck
 		versions, latests = memo{}, memo{}
 	})
 

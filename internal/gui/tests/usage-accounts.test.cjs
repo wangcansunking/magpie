@@ -68,6 +68,33 @@ function fixture(lang, requests) {
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
   for (const lang of ["en", "zh"]) {
+    test(`${engine} ${lang}: accounts and their heading stay together while a period loads`, async (t) => {
+      const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+      const page = await (await browser.newContext({ viewport: { width: 1000, height: 600 }, reducedMotion: "reduce" })).newPage();
+      page.setDefaultTimeout(5000);
+      let release, arrived, hold = false;
+      const held = new Promise((r) => { release = r; }), started = new Promise((r) => { arrived = r; });
+      t.after(async () => { release(); await browser.close(); });
+      const errors = [], requests = [], routeFixture = fixture(lang, requests);
+      page.on("pageerror", (e) => errors.push(e.message));
+      await page.route("**/*", async (route) => {
+        if (hold && new URL(route.request().url()).pathname === "/api/usage") { arrived(); await held; }
+        await routeFixture(route);
+      });
+      await page.goto("http://magpie.test/?view=usage");
+      await page.locator("#usageAccountsHead").waitFor();
+      await page.locator("#usageAccounts .row").first().waitFor();
+      hold = true;
+      await page.locator("#period .opt").nth(1).click();
+      await started;
+      assert.equal(await page.locator("#usageAccountsHead").isHidden(), true, "the pending period hides the heading");
+      assert.equal(await page.locator("#usageAccounts").isHidden(), true, "old account rows must not remain without their heading");
+      release();
+      await page.locator("#view-usage:not([aria-busy]) #usageAccountsHead").waitFor();
+      assert.equal(await page.locator("#usageAccounts .row").count(), 4);
+      assert.equal(await page.locator("#usageAccounts").isVisible(), true);
+      assert.deepEqual(errors, []);
+    });
     test(`${engine} ${lang}: usage by subscription account`, async (t) => {
       const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
       t.after(() => browser.close());
@@ -82,7 +109,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.goto("http://magpie.test/?view=usage");
 
       // Overview: one row per provider and account, the unrecorded one named so
-      await page.locator("#usageAccounts .row").first().waitFor();
+      await page.locator("#view-usage:not([aria-busy]) #usageAccounts .row").first().waitFor();
       assert.equal(await page.locator("#usageAccountsHead").isHidden(), false);
       assert.equal((await page.locator("#usageAccountsHead").textContent()).trim(), w.head);
       assert.deepEqual(await page.locator("#usageAccounts .name").allTextContents(), ["a@example.com", "b@example.com", w.none, "a@example.com"]);
@@ -102,7 +129,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
       await page.mouse.wheel(0, 40);
       await page.waitForFunction((sel) => document.querySelector(sel).scrollTop > 0, view);
-      await page.waitForTimeout(200);
+      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
       const was = await page.locator(view).evaluate((v) => v.scrollTop);
       assert(was > 0, "the view must scroll");
       await page.locator("#ledAccount").click();

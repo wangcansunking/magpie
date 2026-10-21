@@ -100,16 +100,27 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           const more = ed.locator("details.more", { has: page.locator("input.address") });
           const isOpen = () => more.evaluate((d) => d.open);
           const eps = async () => (await ed.locator(".eps code").allTextContents()).join(" ");
-          const press = async (name) => {
+          const press = async (name, invalid = false) => {
             const n = saves.length;
+            const saved = invalid ? null : page.waitForResponse((r) => new URL(r.url()).pathname === "/api/provider/save");
             await ed.locator(".bar").getByRole("button", { name, exact: true }).click();
-            for (let i = 0; i < 50 && saves.length === n; i++) await page.waitForTimeout(50);
-            return saves.length > n ? saves.at(-1) : null;
+            if (invalid) {
+              await ed.locator(".editor-error").waitFor();
+              assert.equal(saves.length, n, "an invalid address was not saved");
+              return null;
+            }
+            await saved;
+            // A received write is not yet a closed editor. Reopening before
+            // the save finishes can click the old draft instead of the row.
+            await page.locator("#modal").waitFor({ state: "hidden" });
+            assert.equal(saves.length, n + 1, "one Save asked");
+            return saves.at(-1);
           };
           const tested = async () => {
             const n = asks.length;
+            const reply = page.waitForResponse((r) => new URL(r.url()).pathname === "/api/provider/test");
             await ed.locator(".eps").getByRole("button", { name: w.test, exact: true }).click();
-            for (let i = 0; i < 50 && asks.length === n; i++) await page.waitForTimeout(50);
+            await reply;
             assert.equal(asks.length, n + 1, "a Test asked");
             return asks.at(-1);
           };
@@ -141,7 +152,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           await summary.click();
           assert.equal(await isOpen(), false);
           const y = await page.evaluate(() => document.scrollingElement.scrollTop);
-          assert.equal(await press(w.add), null);
+          assert.equal(await press(w.add, true), null);
           assert.equal(await isOpen(), true, "opened for the refused address");
           assert.equal(await ed.locator(".editor-error").textContent(), w.bad);
           assert.equal(await page.evaluate(() => document.activeElement?.classList.contains("address")), true);
@@ -235,7 +246,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           await ed.locator(".ehead b", { hasText: "oMLX Apart" }).waitFor();
           await address.fill("ftp://box");
           assert.equal(await eps(), apartEps);
-          assert.equal(await press(w.save), null);
+          assert.equal(await press(w.save, true), null);
           assert.equal(await ed.locator(".editor-error").textContent(), w.bad);
           await address.fill("http://10.0.0.2:8000");
           assert.equal(await eps(), apartEps);

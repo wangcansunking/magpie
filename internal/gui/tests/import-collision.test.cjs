@@ -59,8 +59,10 @@ async function fixture(t, engine, lang, width) {
     assert.deepEqual(errors, []);
   });
   await page.goto("http://magpie.test/?view=providers");
-  await page.waitForFunction(() => typeof openImportApps === "function");
-  await page.evaluate(() => openImportApps());
+  // The function exists before the provider reply does. Use the Import
+  // control drawn by that reply, as the reader does, not the early function.
+  const importLabel = await page.evaluate(() => t("Import…"));
+  await page.locator("#addSheet").getByRole("button", { name: importLabel, exact: true }).click();
   const picker = page.locator("#modal .importapps");
   await picker.locator(".approw").first().waitFor();
   return { page, picker, posts };

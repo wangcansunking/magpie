@@ -130,7 +130,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           await page.mouse.move(0, 0);
           const r = row(page, "files"), all = r.locator(".lib-ag.all");
           await r.evaluate(async (r) => {
-            await Promise.all(r.parentElement.getAnimations({ subtree: true }).map((a) => a.finished.catch(() => {})));
+            // The page's view-in transform moves every chip too. Watching
+            // just the list's subtree measured that entry motion as a hover
+            // jump, especially when the first frame arrived late under load.
+            const animations = [...r.parentElement.getAnimations({ subtree: true })];
+            for (let p = r.parentElement.parentElement; p; p = p.parentElement) animations.push(...p.getAnimations());
+            await Promise.all(animations.map((a) => a.finished.catch(() => {})));
           });
           const before = await all.boundingBox();
           const point = { x: before.x + before.width / 2, y: before.y + before.height / 2 };

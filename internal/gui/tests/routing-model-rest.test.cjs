@@ -16,6 +16,7 @@ const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
 // a reader wheels down to it, and it is the button under the pointer
 const { reach } = require("./reader.cjs");
+const reader = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const now = new Date();
@@ -82,6 +83,46 @@ const posted = async (lifted) => {
 };
 const sideways = (page) => page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
 
+// Force a redraw between locator resolution and evaluation, not by hoping the
+// one-second account refresh lands there. Both the view lookup and the hit-test
+// must discard the old handle and reach the replacement before a normal click.
+for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
+  test(`${engine}: reader reaches a row replaced after its element was resolved`, async (t) => {
+    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+    t.after(() => browser.close());
+    const page = await browser.newPage({ viewport: { width: 600, height: 500 }, reducedMotion: "reduce" });
+    await page.route("**/*", (route) => route.abort());
+    for (const detachedAt of [1, 2]) {
+      await page.setContent('<div class="view" id="fixture" style="height:300px;overflow:auto"><div style="height:400px"></div><button onclick="this.dataset.clicked=\'yes\'">Try now</button><div style="height:100px"></div></div>');
+      const button = page.getByRole("button", { name: "Try now", exact: true });
+      let evaluations = 0, replaced = false;
+      const changing = {
+        waitFor: (opts) => button.waitFor(opts),
+        boundingBox: () => button.boundingBox(),
+        evaluateAll: async (fn) => {
+          if (++evaluations !== detachedAt) return button.evaluateAll(fn);
+          const held = await button.elementHandle();
+          try {
+            await held.evaluate((e) => e.replaceWith(e.cloneNode(true)));
+            replaced = true;
+            return null;
+          } finally { await held.dispose(); }
+        },
+      };
+      await reader.reach(page, changing);
+      assert(replaced, `detachment ${detachedAt} was injected`);
+      assert(evaluations > detachedAt, "the detached handle was re-queried");
+      await button.click();
+      assert.equal(await button.getAttribute("data-clicked"), "yes", "the replacement received the click");
+    }
+    const fault = new Error("unrelated evaluation failure");
+    await assert.rejects(reader.reach(page, {
+      waitFor: () => Promise.resolve(),
+      evaluateAll: () => Promise.reject(fault),
+    }), (err) => err === fault, "unrelated errors must not be swallowed");
+  });
+}
+
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
   for (const lang of Object.keys(go)) {
     for (const width of [1100, 420]) {
@@ -142,7 +183,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // Try now lifts the model's own rest
         const row = page.locator(".rt-act", { hasText: "me@x.test" });
         const btn = row.locator(".fix button", { hasText: go[lang] });
-        await reach(page, btn);
+        await reader.reach(page, btn);
         await btn.click();
         assert.deepEqual(await posted(lifted), [{ key: opusRest.key }]);
         await row.locator(".st.part").waitFor({ state: "detached" });

@@ -37,6 +37,39 @@ Run `go test -v ./internal/fonts` without `nogui` on each desktop platform.
 Browser fixtures never read or write user settings, install fonts or contact
 a live gateway.
 
+## Stable Usage costs
+
+`usage-head-steady.test.cjs` checks the Requests head around its scrollbar
+threshold in both engines and all five languages. Each fixture alternates
+$0.176/$0.177 to exercise digit-width changes independently of other cases.
+Custom proportional fonts, narrow layouts, literal currency/approximation
+and unpriced markers, and empty/unpriced-only totals are checked without
+changing the user's font or relaxing the head-position assertions.
+
+## WAN Gateway
+
+`wan-gateway.test.cjs` uses the real assets with isolated WAN API fixtures,
+never devtunnel or a public endpoint. It covers stopped, starting, running,
+stopping, failed and unknown states; setup/login guidance; owner gating;
+Endpoint copying; named WAN-key creation, rename, copy, off/on, rotation and
+removal; cancellation and write errors. It holds stale responses across an
+action and drives the page's poll explicitly, checking that leaving the page
+cancels reads without stopping the tunnel. Synthetic persisted pagehide/pageshow
+cases cover polling restoration, hidden-page suppression and late-action
+rejection; they do not establish native back/forward-cache behavior. Actual
+error-boundary Try again remounts exercise lifecycle-hook cleanup and automatic
+visible polling recovery, while hidden-document/off-page retries stay idle. The pending
+Start/Stop check awaits the original Start click handler's returned promise
+before asserting that its late reply did not overwrite stopped status.
+The matrix defines all five languages in Chromium and WebKit, including narrow
+layouts and focus without scrolling. SDK-auth cases include explicit runtime
+installation, device-code cancellation by attempt, logout superseding held
+sign-in/start replies, and retrying Start after an external runtime install.
+A separate `keysError` disables key edits without hiding Stop or sign-out;
+unknown keys retain a draft and never read as an empty store. These current
+browser cases have not been rerun while historical interrupted-browser cleanup
+remains unresolved; backend and syntax checks do not establish a browser pass.
+
 ## Gateway Caller Keys
 
 `gateway-caller-keys.test.cjs` checks the named caller-key list on the
@@ -46,8 +79,8 @@ CSV export in Chinese and English on Chromium and WebKit. The fixtures do
 not access local credentials. Gateway keys appear only while sharing is on, with one create entry point
 and confirmation before rotation/removal (Cancel and Escape send no mutation).
 Creation, renaming and confirmation focus their controls without scrolling.
-Gateway is the only key-management page;
-Settings controls sharing and shows addresses. The test checks that toggling
+Gateway manages ordinary gateway keys; WAN Gateway separately manages WAN-only keys.
+Settings controls local sharing and shows addresses. The test checks that toggling
 sharing retains the key, and that a removed default key is recreated as
 Magpie and appears in Gateway without a reload.
 
@@ -55,6 +88,9 @@ Magpie and appears in Gateway without a reload.
 caller keys for Shell, curl, Python and Node examples across all four APIs.
 It checks rotation, disabling, removal, stale list responses, empty states,
 literal custom names and narrow layouts in Chinese and English on both engines.
+Both saved shell choices are exercised explicitly, including PowerShell's
+`curl.exe` and environment syntax; the host platform does not choose the
+fixture's expected shell.
 Sharing off keeps the original API-key field and hides the gateway-key picker;
 sharing on names the arbitrary local option separately from the Magpie key.
 
@@ -63,7 +99,13 @@ picked in Connect, and the address picked under Share on local network, are
 kept across a reload (a restart or an update opens the page again; coeo91 on
 Discord). With no local network address yet, this computer's is shown, and
 the pick comes back once the address does. It runs on both engines, at 1100
-and 420 wide, in every language.
+and 420 wide, in every language. Persistence reloads wait for the specific
+startup update/whatsnew/titlebar operations, not network idle. A separate
+interruption test releases a consumed provider response after the app's real
+pagehide guard to catch new requests launched by the old document's async
+continuation, and checks API suspension/restoration without changing ordinary
+HTTP or JSON failure behavior. This does not suppress WebKit's canceled-request
+diagnostics during committed navigation before pagehide.
 
 `gateway-takeover.test.cjs` checks the Gateway card's button: with an older
 magpie serving the gateway it reads "Quit magpie {v} and take over" and posts
@@ -113,6 +155,46 @@ WebKit. No separate colours are defined for gateway keys.
 ```sh
 node --test --test-concurrency=1 internal/gui/tests/gateway-caller-keys.test.cjs internal/gui/tests/gateway-connect-keys.test.cjs internal/gui/tests/gateway-key-limit.test.cjs internal/gui/tests/gateway-key-models.test.cjs internal/gui/tests/api-key-usage.test.cjs internal/gui/tests/api-key-theme.test.cjs
 ```
+
+## Fixture lifecycle and interaction
+
+A recorded POST is not a completed save. Before testing persistence with a
+reload, await the actual operation or completed preference queue; a transient
+Saved message can expire before the test observes it. Capture operation
+settlement and errors durably before triggering it, then use a bounded
+`waitForFunction` to observe completion, rather than awaiting an unbounded
+promise through `evaluate`. Keep separate held-response tests for interrupted
+actions. Settings redraws from both its own read and startup's read: install
+`watchSettingsReads` before navigation and await `settingsDrawn` before
+measuring or interacting with rows that the second draw replaces. These
+helpers are in `reader.cjs`.
+
+`lifecycle.cjs` exports `watchReplies(page, paths)` (installed before navigation)
+and `repliesConsumed(page, requiredSeenPaths = [])`. It observes only named API
+pathnames, tracks each request separately in its document, and waits for all
+observed replies to be consumed through `Response.text()` and the caller's
+microtasks (204 included). Required paths must each have a completed request;
+HTTP, JSON and fetch/body failures are not hidden. This is not network-idle or
+a guarantee about future requests: first join the action or preference queue
+that can start those reads, then await its selected replies. Do not include
+an unrelated intentionally held read or poll. `lifecycle.test.cjs` exercises
+the actual completion predicate while a repeated response body is held,
+consumer continuations, errors, unselected endpoints and document replacement
+in both engines. Release held gates and close the browser in teardown even
+when an assertion or page operation fails; no helper suppresses page errors.
+
+Use `reader.reach` for a control inside a scrolling view. It wheels like a
+reader and checks that the target is visible and not covered by a sticky bar;
+Playwright's unsolicited scroll is deliberately undone by the app. Scope
+reused classes to the intended control, such as Routing's `.rt-days`, not
+another control that shares `.rt-day`.
+
+Windows desktop fixtures handle the exact native titlebar-paint POST
+`/api/window/titlebar` separately from configuration mutations. Unexpected
+configuration writes and neighboring unknown routes still fail the fixture.
+Independent state scenarios get their own page/fixture; actual reload tests
+retain their reload and all page-error assertions. None of these checks
+contact a vendor or start a public tunnel.
 
 ## Other Browser Regressions
 
@@ -603,7 +685,12 @@ without the provider" (love1sbug on X): off by default, On posts
 `settings/bare-ids` with `on: true` on its own and lights On, Off posts it
 back, neither click scrolls the page, the row is drawn in gateway mode, and
 nothing runs out of the row or the page sideways at 420px and 900px. Every
-language, Chromium and WebKit.
+language, Chromium and WebKit. It prints the active browser/interaction phase
+immediately, since a stalled case has no TAP result yet. A 120-second case
+watchdog cancels browser work; existing five-second assertion timeouts remain
+unchanged. Cleanup is registered as soon as the browser exists and joins its
+close even if context/page setup or screenshot capture fails. These cleanup
+checks do not establish the cause of the earlier whole-file timeout.
 
 `routing-steady.test.cjs` scrolls the Routing page down to its routing groups,
 opens one in its editor and types into its name, then streams six requests in
@@ -973,6 +1060,12 @@ uncovered, and Add posts the group, where its draft had no fast members and
 Add threw. A save the server refuses shows its error in sight, the editor
 stays, and a second Add is posted, where the button stayed busy. At 600x420
 and 1000x700, in Chromium and WebKit, English and Chinese.
+It and `group-first-token.test.cjs` print the active phase before browser
+setup, navigation, interactions and cleanup. Their 120-second case watchdog
+joins browser cancellation; it does not enlarge the existing action or
+navigation timeouts. Cleanup is registered before context/page creation,
+and held trace polls settle after their context closes. These cleanup and
+diagnostic checks do not establish the cause of the earlier whole-file stalls.
 
 `group-pick-filter.test.cjs` covers a group's Add a model picker and the
 filter over the routing groups (#907; PAMI on Discord). A model in the group

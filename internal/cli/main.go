@@ -29,6 +29,7 @@ import (
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/tui"
 	"github.com/yetone/magpie/internal/update"
+	"github.com/yetone/magpie/internal/wan"
 )
 
 // version is the root main package's, set at build time
@@ -188,6 +189,7 @@ func Main(v string) {
 	netproxy.Install()
 	update.GUI = hasGUI
 	err = run(os.Args[1:])
+	wan.Shutdown()   // relay children must be reaped before process exit
 	proc.EndProbes() // a CLI still being asked something isn't left to init
 	sessions.Saved() // the session index kept, for the next run
 	if err != nil {

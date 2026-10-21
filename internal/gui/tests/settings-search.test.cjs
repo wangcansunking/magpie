@@ -32,6 +32,8 @@ function server(lang, posts, web) {
   return async (route) => {
     const req = route.request(), url = new URL(req.url());
     const json = (data) => route.fulfill({ json: data });
+    // Windows paints its native title bar; searching still writes no settings.
+    if (url.pathname === "/api/window/titlebar" && req.method() === "POST") return route.fulfill({ status: 204 });
     if (req.method() !== "GET") posts.push(url.pathname);
     if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:"${lang}",theme:"light",web:${web},textSize:100};` });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });

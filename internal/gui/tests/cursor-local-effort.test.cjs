@@ -84,6 +84,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await t.test("the window", async () => {
         const sets = [];
         const page = await open("", sets);
+        t.after(() => page.evaluate(() => window.releaseEffortSave?.()).catch(() => {}));
         // its Models menu stays in the row; the effort is in the row opened
         assert.equal(await page.locator(`${row} > .field.ag-menu`).count(), 1);
         await page.locator(`${row} .ag-link`).click();
@@ -106,6 +107,19 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // the default, then its models' four levels
         assert.equal(await page.locator("#effortTicks i").count(), 5);
         assert.equal(await page.locator("#effortMin").textContent(), w.def);
+        // Hold the save before fetch: the label is optimistic, not proof that
+        // the fixture has received the change. Exercise that ordering directly.
+        await page.evaluate(() => {
+          const fetch0 = window.fetch;
+          window.fetch = async function (url, ...args) {
+            if (url === "/api/set") {
+              window.fetch = fetch0;
+              await new Promise((resolve) => { window.releaseEffortSave = resolve; });
+            }
+            return fetch0.call(this, url, ...args);
+          };
+        });
+        const saved = page.waitForResponse((r) => new URL(r.url()).pathname === "/api/set" && r.request().method() === "POST");
         await page.locator("#effortRange").evaluate((r) => {
           r.value = "3";
           r.dispatchEvent(new Event("input", { bubbles: true }));
@@ -113,6 +127,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         });
         assert.equal(await page.locator("#effortValue").textContent(), w.high);
         await page.waitForFunction(() => document.querySelector('.row.agent[data-id="cursor-local"] .field[data-key="effort"] .v')?.textContent !== document.querySelector("#effortMin")?.textContent);
+        await page.waitForFunction(() => typeof releaseEffortSave === "function");
+        assert.deepEqual(sets, [], "the optimistic label can precede the request");
+        await page.evaluate(() => releaseEffortSave());
+        await saved;
         assert.deepEqual(sets, [{ agent: "cursor-local", field: "effort", value: "high" }]);
         assert.equal(await page.locator(`${row} .field[data-key="effort"] .v`).textContent(), w.high);
         assert(await noSideScroll(page), "the window scrolls sideways");
@@ -124,14 +142,15 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // three bars, none lit on the default
         assert.equal(await page.locator(`${row} .ag-sum .eff`).getAttribute("data-l"), "0");
         await page.locator(`${row} .ag-sum`).click();
-        await page.waitForTimeout(700);
+        await page.locator(`${row} .ag-open .effort-control`).waitFor();
         const box = page.locator(`${row} .ag-open .effort-control`);
         assert.equal(await box.locator(".effort-ticks i").count(), 5);
         assert.equal(await box.locator(".effort-ends span").first().textContent(), w.def);
         // the Models menu is still there beside it
         assert.equal(await page.locator(`${row} .ag-open .field.ag-menu`).count(), 1);
+        const saved = page.waitForResponse((r) => new URL(r.url()).pathname === "/api/set" && r.request().method() === "POST");
         await box.locator(".eslide").press("ArrowRight");
-        await page.waitForTimeout(300);
+        await saved;
         assert.deepEqual(sets, [{ agent: "cursor-local", field: "effort", value: "low" }]);
         assert(await noSideScroll(page), "the panel scrolls sideways");
       });

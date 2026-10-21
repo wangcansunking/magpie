@@ -49,6 +49,12 @@ function server(lang, web, saved, posts) {
     if (url.pathname === "/api/usage/arrange") {
       const body = JSON.parse(req.postData() || "{}");
       posts.push(body);
+      if (saved.failNext) {
+        const fail = saved.failNext;
+        delete saved.failNext;
+        fail(route); // held until the optimistic rows and focus are checked
+        return;
+      }
       if (body.agentsHidden) saved.hidden = body.agentsHidden;
       return json(settings());
     }
@@ -83,17 +89,26 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     for (const lang of Object.keys(L)) {
       for (const { width, web } of SIZES) {
         const w = L[lang];
-        await t.test(`${lang} ${width}${web ? " web" : ""}`, async () => {
+        await t.test(`${lang} ${width}${web ? " web" : ""}`, async (t) => {
           const errors = [];
           // python-httpx was hidden before: it stays hidden
           const saved = { hidden: ["python-httpx"] }, posts = [];
           const ctx = await browser.newContext({ viewport: { width, height: 700 }, reducedMotion: "reduce", hasTouch: web, isMobile: web && engine === "chromium" });
+          t.after(() => ctx.close());
           const open = async () => {
             const p = await ctx.newPage();
             p.setDefaultTimeout(5000);
             p.on("pageerror", (e) => errors.push(e.message));
+            const pending = new Map();
+            p.on("request", (r) => pending.set(r, Date.now()));
+            p.on("requestfinished", (r) => pending.delete(r));
+            p.on("requestfailed", (r) => pending.delete(r));
             await p.route("**/*", server(lang, web, saved, posts));
-            await p.goto("http://magpie.test/");
+            try { await p.goto("http://magpie.test/"); }
+            catch (e) {
+              t.diagnostic("unfinished navigation requests: " + JSON.stringify([...pending].map(([r, at]) => ({ url: r.url(), ms: Date.now() - at }))));
+              throw e;
+            }
             const nav = p.locator('[data-view="usage"]:visible').first();
             if (await nav.count()) await nav.click();
             else await p.evaluate(() => show("usage"));
@@ -105,6 +120,19 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           const top = (p) => p.locator("#view-usage").evaluate((v) => v.scrollTop);
 
           let p = await open();
+          const focused = (control) => control.evaluate((e) => document.activeElement === e);
+          const drawn = () => p.evaluate(() => new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok))));
+          let failures = 0;
+          const failedSave = async (act, optimistic) => {
+            const failed = new Promise((ok) => { saved.failNext = ok; });
+            await Promise.all([p.waitForRequest((r) => new URL(r.url()).pathname === "/api/usage/arrange"), act()]);
+            const route = await failed;
+            const message = `arrangement save refused ${++failures}`;
+            try { await optimistic(); }
+            finally { await route.fulfill({ status: 500, json: { error: message } }); }
+            await p.waitForFunction((message) => document.querySelector("#status").textContent === message, message);
+            await drawn();
+          };
           const allTokens = await tokens(p);
           assert.deepEqual(await ids(p, "#usageAgents"), ["pi", "novelcraft", "curl", "Go-http-client", "AsyncOpenAI"]);
           const line = p.locator("#usageAgentsHid .us-hidline");
@@ -128,6 +156,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           assert.deepEqual(posts.at(-1), { agentsHidden: ["python-httpx", "curl"] });
           assert.equal((await line.textContent()).trim(), w.n(2));
           assert.equal(await top(p), at, "hiding a row doesn't move the page");
+          assert(await focused(line), "hiding a row leaves focus on the hidden line");
 
           // and a right-click opens the same menu
           if (!web) {
@@ -174,6 +203,26 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           // within the pixel the page's hold leaves it
           const now = await lineAt();
           assert(Math.abs(now - was) < 1.5, `unhiding a row leaves the hidden line where it was: ${was} → ${now}`);
+          assert(await focused(row("curl").locator(".us-more")), "Unhide focuses the restored row without scrolling");
+
+          // A failed Unhide restores both lists, keeps the open hidden line
+          // where it was, and puts keyboard focus back on the retry action.
+          const retry = p.locator('#usageAgentsHid .row.stat[data-id="Go-http-client"] .us-unhide');
+          await reader.inView(p, retry);
+          const rollbackAt = await lineAt();
+          await failedSave(() => retry.press("Enter"), async () => {
+            await p.waitForFunction(() => !!document.querySelector('#usageAgents .row.stat[data-id="Go-http-client"]'));
+            assert(await focused(row("Go-http-client").locator(".us-more")), "the optimistic Unhide focuses the restored row");
+            await drawn();
+            assert(Math.abs(await lineAt() - rollbackAt) < 1.5, "an in-flight Unhide holds the hidden line");
+          });
+          assert.deepEqual(saved.hidden, ["python-httpx", "Go-http-client"]);
+          assert.deepEqual(await ids(p, "#usageAgents"), ["pi", "novelcraft", "curl", "AsyncOpenAI"]);
+          assert.deepEqual(await ids(p, "#usageAgentsHid"), ["Go-http-client", "python-httpx"]);
+          assert.equal(await line.getAttribute("aria-expanded"), "true");
+          assert(await focused(retry), "a refused Unhide restores focus to its retry button");
+          assert(Math.abs(await lineAt() - rollbackAt) < 1.5, "a refused Unhide leaves the hidden line where it was");
+          assert.equal(await tokens(p), allTokens);
 
           // nothing is wider than the page
           const wide = await p.evaluate(() => { const v = document.querySelector("#view-usage"); return [v.scrollWidth, v.clientWidth, document.documentElement.scrollWidth, window.innerWidth]; });
@@ -196,12 +245,44 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           for (const id of ["Go-http-client", "python-httpx"]) {
             const b = p.locator(`#usageAgentsHid .row.stat[data-id="${id}"] .us-unhide`);
             await reader.inView(p, b);
+            if (id === "python-httpx") {
+              // The last hidden row makes its entire section disappear.
+              // If saving fails, it must reopen with the retry in focus.
+              const lastTop = await top(p);
+              await failedSave(() => b.press("Enter"), async () => {
+                assert.equal(await p.locator("#usageAgentsHid").isHidden(), true);
+                assert(await focused(row(id).locator(".us-more")));
+              });
+              assert.deepEqual(saved.hidden, [id]);
+              assert.deepEqual(await ids(p, "#usageAgentsHid"), [id]);
+              assert.equal(await p.locator("#usageAgentsHid .us-hidline").getAttribute("aria-expanded"), "true");
+              assert(await focused(b), "a refused last Unhide reopens the hidden row for retry");
+              assert(Math.abs(await top(p) - lastTop) < 1.5, "a refused last Unhide returns to the same place");
+            }
             await b.click();
             await p.waitForFunction((id) => !!document.querySelector(`#usageAgents .row.stat[data-id="${id}"]`), id);
+            assert(await focused(row(id).locator(".us-more")), "Unhide focuses its restored row");
           }
           assert.deepEqual(saved.hidden, []);
           assert.equal(await p.locator("#usageAgentsHid").isHidden(), true);
           assert.equal(await p.locator("#usageAgents .row.stat").count(), AGENTS.length);
+
+          // A refused Hide restores focus to the row, not the hidden line
+          // that disappeared again, and keeps the reader's scroll position.
+          await reader.inView(p, row("curl"));
+          if (!web) await row("curl").hover();
+          await row("curl").locator(".us-more").click();
+          const hideAt = await top(p);
+          await failedSave(() => p.locator(".row-menu .rm-item", { hasText: w.hide }).press("Enter"), async () => {
+            assert.deepEqual(await ids(p, "#usageAgents"), AGENTS.filter((g) => g.id !== "curl").map((g) => g.id));
+            assert(await focused(p.locator("#usageAgentsHid .us-hidline")));
+          });
+          assert.deepEqual(saved.hidden, []);
+          assert.deepEqual(await ids(p, "#usageAgents"), AGENTS.map((g) => g.id));
+          assert.equal(await p.locator("#usageAgentsHid").isHidden(), true);
+          assert(await focused(row("curl").locator(".us-more")), "a refused Hide returns focus to the row's actions");
+          assert(Math.abs(await top(p) - hideAt) < 1.5, "a refused Hide leaves the page where it was");
+          assert.equal(await tokens(p), allTokens);
           assert.deepEqual(errors, []);
           await ctx.close();
         });

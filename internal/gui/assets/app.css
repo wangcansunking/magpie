@@ -478,6 +478,7 @@ body:not(.side-nav) .side-toggle .st-pane { opacity: 0; }
 .nav-morph #nav button[data-view="providers"] { view-transition-name: nav-providers; }
 .nav-morph #nav button[data-view="routing"] { view-transition-name: nav-routing; }
 .nav-morph #nav button[data-view="gateway"] { view-transition-name: nav-gateway; }
+.nav-morph #nav button[data-view="wan"] { view-transition-name: nav-wan; }
 .nav-morph #nav button[data-view="usage"] { view-transition-name: nav-usage; }
 .nav-morph #nav button[data-view="plugins"] { view-transition-name: nav-plugins; }
 ::view-transition-group(*) { z-index: 1; animation-duration: var(--morph-t); animation-timing-function: var(--morph-ease); }
@@ -506,7 +507,7 @@ body.window .view { padding: 2px 16px 8px; }
    other (#860); Routing, Usage and Sessions too, so a large screen doesn't
    stretch them alone edge to edge while the others sit in the middle (面条 on
    Discord): their tables and charts lay out by the room they get */
-body.window :is(#view-agents, #view-sessions, #view-providers, #view-routing, #view-gateway, #view-usage, #view-library, #view-plugins, #view-settings) { padding-left: max(16px, calc(50% - 600px)); padding-right: max(16px, calc(50% - 600px)); }
+body.window :is(#view-agents, #view-sessions, #view-providers, #view-routing, #view-gateway, #view-wan, #view-usage, #view-library, #view-plugins, #view-settings) { padding-left: max(16px, calc(50% - 600px)); padding-right: max(16px, calc(50% - 600px)); }
 /* a view takes focus (tabIndex -1) only so the keys scroll it after a click;
    a ring round the whole list there marks nothing a reader can act on (#1601) */
 .view:focus { outline: none; }
@@ -1026,6 +1027,9 @@ body.window .field.solo { grid-column: auto; }
 #view-usage.loading .opt { cursor: default; }
 .usage-cost { display: inline-flex; align-items: baseline; gap: 6px; min-width: 0; overflow: hidden; white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; }
 .usage-cost b { font-size: 15px; font-weight: 600; color: var(--fg); }
+/* A font without tabular figures still gives each changing digit the same
+   slot. No clipping on the glyph: a wider custom digit can overhang it. */
+.usage-cost .cost-digit { display: inline-block; width: 1ch; font-style: normal; text-align: center; }
 /* a tab with no sum leaves the refresh at the content's right edge (a
    class app.js sets, not :has(), which Safari before 15.4 can't parse) */
 .usage-cost:empty { display: none; }
@@ -1494,7 +1498,7 @@ details.cx-part[open] > summary .cx-h { margin-bottom: 2px; }
 .sess-cal-side b { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .sess-cal-side span { font-size: 10.5px; color: var(--muted); }
 .sess-cal-side small { font-size: 10.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
-@container (max-width: 560px) { .sess-cal-wrap { flex-direction: column; gap: 10px; } .sess-cal-side { flex-direction: row; flex-wrap: wrap; gap: 16px; padding-top: 0; } }
+@container (max-width: 560px) { .sess-cal-wrap { flex-direction: column; gap: 10px; } .sess-cal { align-self: stretch; } .sess-cal-side { flex-direction: row; flex-wrap: wrap; gap: 16px; padding-top: 0; } }
 .sess-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
 .sess-grid[hidden] { display: none; }
 .sess-card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px 10px; min-width: 0; display: flex; flex-direction: column; }
@@ -2201,7 +2205,37 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 .gw .url:hover { background: var(--pill-hover); box-shadow: inset 0 0 0 1px var(--line); }
 .gw .url code { color: var(--fg-2); font-size: 11px; }
 .gw .url:hover code { color: var(--fg); }
-#view-gateway .row-head, #view-usage .row-head { margin: 14px 0 6px; padding: 0 2px; }
+#view-gateway .row-head, #view-wan .row-head, #view-usage .row-head { margin: 14px 0 6px; padding: 0 2px; }
+/* WAN uses the same rows and controls, with readable setup and bearer-key
+   boundaries, and room for the actions to wrap on a phone. */
+#view-wan > .usage-note { color: var(--fg-2); line-height: 1.5; margin: 0; padding: 8px 4px 2px; overflow-wrap: anywhere; }
+#view-wan > .wan-assignment { color: var(--fg); }
+#view-wan > .usage-note.warn { color: var(--red); }
+#wanKeys .acc { min-width: 0; flex-wrap: wrap; }
+#wanKeys .acc .plan { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+#wanKeys .acc.adding .kf { grid-template-columns: minmax(0, 1fr); }
+#wanStatus { flex-wrap: wrap; }
+#wanStatus .who { min-width: 120px; }
+#wanStatus .name { white-space: normal; }
+/* WAN readiness stays separate from the endpoint and client credentials. */
+#view-wan > * { flex-shrink: 0; }
+#view-wan .wan-intro { padding: 0 2px 14px; }
+#view-wan .wan-status-card { margin-bottom: 16px; }
+#view-wan .wan-setup { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 16px; align-items: start; }
+#view-wan .wan-setup-card { min-width: 0; border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+#view-wan .wan-setup-card > .row-head { margin-top: 0; }
+#view-wan .wan-setup-card > .list { border: 0; background: transparent; margin: 0; }
+#view-wan .wan-setup-card .row { min-height: 32px; padding: 6px 0; }
+#view-wan .wan-setup-card > .usage-note { margin: 8px 0 0; }
+#view-wan .usage-note { color: var(--fg-2); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+#view-wan .usage-note.warn { color: var(--red); }
+#view-wan .wan-details { padding: 12px 4px; font-size: 12px; color: var(--fg-2); }
+#view-wan .wan-details summary { cursor: pointer; }
+#view-wan .wan-client-example { border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-top: 10px; min-width: 0; }
+#view-wan .wan-client-example pre { background: var(--pill); padding: 12px; border-radius: 7px; margin: 10px 0; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; font-size: 12px; }
+#view-wan #wanUserCode { display: block; font-size: 22px; letter-spacing: 2px; padding-top: 10px; user-select: text; -webkit-user-select: text; }
+#view-wan #wanConnect .val { height: auto; min-height: 32px; }
+#view-wan #wanConnect .val code { white-space: normal; overflow-wrap: anywhere; }
 #view-usage .row-head.quota-head { margin: 6px 0 6px; }
 #view-gateway .row-head .note { font-size: 11px; color: var(--faint); }
 /* providers switched off, folded below the ones on */
@@ -3612,7 +3646,10 @@ html.theming, html.theming *, html.theming *::before, html.theming *::after {
 .modal .dialog { display: flex; flex-direction: column; }
 .modal .editor.framed { display: flex; flex-direction: column; align-items: stretch; gap: 0; padding: 0; min-height: 0; overflow: hidden; }
 .modal .editor.framed > .ebody {
-  flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+  /* Reserve the scrollbar from the first layout. WebKit otherwise keeps
+     grid tracks from the old width when a capped editor starts scrolling,
+     then wraps its rows again on a click, moving fields under the pointer. */
+  flex: 1 1 auto; min-height: 0; overflow-y: scroll; overscroll-behavior: contain;
   display: grid; grid-template-columns: inherit; gap: 10px 14px; align-items: start; padding: 14px 18px;
 }
 .modal .editor.framed > .ehead, .modal .editor.framed > .bar { flex: none; min-height: 48px; margin: 0; padding: 0 18px; }

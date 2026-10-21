@@ -1132,13 +1132,9 @@ func TestPiMCPAdapter3(t *testing.T) {
 // its Connectors', and the page says so.
 func TestClaudeDesktopMCP(t *testing.T) {
 	h := sandbox(t)
+	p, _ := desktopFiles(t, h)
 	if targetByID("claude-desktop") != nil {
 		t.Fatal("Claude Desktop found without its folder")
-	}
-	d, _ := os.UserConfigDir()
-	p := filepath.Join(d, "Claude", "claude_desktop_config.json")
-	if !strings.HasPrefix(p, h) {
-		t.Skip("config dir outside the sandbox: " + p)
 	}
 	write(t, p, `{"globalShortcut": "Alt+Space", "mcpServers": {"mine": {"command": "x"}}}`)
 	tg := targetByID("claude-desktop")

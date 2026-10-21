@@ -642,6 +642,7 @@ function renderActivity() {
 
 
 magpie.plugin("gateway", (ctx) => {
+  registerWANPage(ctx);
   const configured = () => {
     callsPage = ctx.config.callsPage || 20;
     callsShown = callsPage;

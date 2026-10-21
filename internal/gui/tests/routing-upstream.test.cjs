@@ -88,8 +88,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       });
       await page.goto("http://magpie.test/?view=routing");
       // a browser started cold draws the days late
-      await page.locator(".rt-day").nth(1).waitFor({ state: "visible", timeout: 15000 });
-      await page.locator(".rt-day").nth(1).click();
+      const historical = page.locator("#view-routing .rt-days .rt-day").nth(1);
+      await historical.waitFor({ state: "visible", timeout: 15000 });
+      await reader.reach(page, historical);
+      await historical.click();
       await page.locator(".rt-req").nth(ups.length - 1).waitFor();
 
       // the list: the one passed on says where, whole, inside its row
@@ -105,6 +107,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
       // its story says so, and the click leaves the row where it is
       const row = page.locator(".rt-req").nth(0);
+      await reader.reach(page, row);
       // measure once the page holds still: the day's rows arriving grow the
       // page above the list, and the day button's click is kept in place by
       // scrolling the view, which can land after the last row is in
@@ -127,13 +130,15 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(await story.count(), 1);
       assert.match(await story.textContent(), want[lang].story);
       if (process.env.ARTIFACT_DIR) await page.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `${engine}-${lang}-upstream-routing.png`) });
+      await reader.reach(page, page.locator(".rt-req").nth(1));
       await page.locator(".rt-req").nth(1).click();
       await page.waitForTimeout(300);
       assert.equal(await page.locator(".rt-steps li.upstream-said").count(), 0);
 
       // the Usage page's Requests: a request's details name it
       await page.locator('[data-view="usage"]').first().click();
-      await page.locator(":is(#usageTab .opt, .nav-s):visible").nth(1).click();
+      await page.locator(':is(#usageTab .opt, .nav-sub[data-view="usage"] .nav-s):visible')
+        .filter({ hasText: lang === "zh" ? /^请求$/ : /^Requests$/ }).press("Enter");
       const rows = page.locator(".led tbody tr.led-row");
       await rows.nth(1).waitFor();
       const top = () => page.locator("#view-usage").evaluate((v) => v.scrollTop);

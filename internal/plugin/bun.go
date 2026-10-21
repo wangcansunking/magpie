@@ -195,6 +195,43 @@ func Bun(ctx context.Context) (string, error) {
 	return exe, nil
 }
 
+// CachedBun returns an already available runtime, without downloading or running
+// it. A file removed after this check is a launch error, never an install request.
+func CachedBun() string {
+	path, _ := CachedBunContext(context.Background())
+	return path
+}
+
+// CachedBunContext is CachedBun with cancellable acquisition of the shared
+// runtime cache. An independent owner need not wait for another component's
+// download while shutting down. It never downloads or executes a runtime.
+func CachedBunContext(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if b := os.Getenv("MAGPIE_BUN"); b != "" {
+		return b, nil
+	}
+	for !bunMu.TryLock() {
+		timer := time.NewTimer(10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return "", ctx.Err()
+		case <-timer.C:
+		}
+	}
+	defer bunMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	version := inUseLocked()
+	if !haveBun(version) {
+		return "", nil
+	}
+	return bunExeOf(version), nil
+}
+
 // HasBun is whether a Bun is at hand without a download.
 func HasBun() bool {
 	if os.Getenv("MAGPIE_BUN") != "" {

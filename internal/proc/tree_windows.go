@@ -56,9 +56,10 @@ var closed = func() chan struct{} { c := make(chan struct{}); close(c); return c
 // asked to end by, so Stop kills the job at once.
 func (g *group) term(*exec.Cmd) error { return errors.ErrUnsupported }
 
-func (g *group) sweep(*exec.Cmd) {
+func (g *group) sweep(*exec.Cmd) <-chan struct{} {
 	if g.job != 0 {
 		_ = windows.CloseHandle(g.job)
 		g.job = 0
 	}
+	return closed
 }

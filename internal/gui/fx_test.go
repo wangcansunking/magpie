@@ -75,13 +75,18 @@ func TestFXStateDoesNotWait(t *testing.T) {
 		<-release
 		w.Write([]byte(`{"result":"success","rates":{"CNY":7.31}}`))
 	}))
+	restoreURL := fx.SetRateURL(srv.URL)
+	var firstDone chan struct{}
 	t.Cleanup(func() {
 		let()
+		if firstDone != nil {
+			<-firstDone
+		}
 		fx.Settle()
 		srv.Close()
+		restoreURL()
 		fx.Reset()
 	})
-	t.Cleanup(fx.SetRateURL(srv.URL))
 	cache := fx.CachePath()
 	os.MkdirAll(filepath.Dir(cache), 0o755)
 	b, _ := json.Marshal(fx.Rate{CNYPerUSD: 7.25, At: time.Now().Add(-24 * time.Hour)})
@@ -92,7 +97,11 @@ func TestFXStateDoesNotWait(t *testing.T) {
 		t.Fatal(err)
 	}
 	first := make(chan fxJSON, 1)
-	go func() { first <- state().FX }()
+	firstDone = make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		first <- state().FX
+	}()
 	var got fxJSON
 	select {
 	case got = <-first:

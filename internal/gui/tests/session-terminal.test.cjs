@@ -5,6 +5,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { watchSettingsReads, settingsDrawn } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const terminalApps = [
@@ -75,6 +76,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const errors = [], posts = [];
       page.on("pageerror", (error) => errors.push(error.message));
       await page.route("**/*", serve(lang, posts));
+      await watchSettingsReads(page);
       t.after(async () => {
         if (process.env.ARTIFACT_DIR) {
           await fs.mkdir(process.env.ARTIFACT_DIR, { recursive: true });
@@ -85,6 +87,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
       await page.goto("http://magpie.test/");
       await page.locator("#prefs").click();
+      await settingsDrawn(page);
       const row = page.locator("#sessionTerminalRow");
       await row.waitFor({ state: "visible" });
       await reach(page);
@@ -122,18 +125,22 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       // another setting saved (Theme, scrolled away above) keeps the terminal
       await page.locator("#themeSegs .opt").last().evaluate((b) => b.click());
       await page.waitForFunction(() => document.documentElement.dataset.theme === "dark");
+      await page.evaluate(() => prefsQueue);
       assert.equal(posts.at(-1).sessionTerminal, "com.mitchellh.ghostty");
       await page.reload();
       await page.locator("#prefs").click();
+      await settingsDrawn(page);
       await row.waitFor({ state: "visible" });
       await reach(page);
       assert.equal(await select.getAttribute("data-value"), "com.mitchellh.ghostty");
       const savedSystem = page.waitForResponse((response) => response.url().endsWith("/api/settings") && response.request().method() === "POST");
       await choose(lang === "zh" ? "系统默认" : "System default");
       await savedSystem;
+      await page.evaluate(() => prefsQueue); // the response headers alone haven't redrawn the saved choice
       assert.equal(posts.at(-1).sessionTerminal, "");
       await page.reload();
       await page.locator("#prefs").click();
+      await settingsDrawn(page);
       await row.waitFor({ state: "visible" });
       await reach(page);
       assert.equal(await select.getAttribute("data-value"), "system");
@@ -150,8 +157,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await context.addInitScript(() => Object.defineProperty(navigator, "platform", { get: () => "MacIntel" }));
       const page = await context.newPage();
       await page.route("**/*", serve(lang, [], "com.apple.TextEdit"));
+      await watchSettingsReads(page);
       await page.goto("http://magpie.test/");
       await page.locator("#prefs").click();
+      await settingsDrawn(page);
       await page.locator("#sessionTerminalRow").waitFor({ state: "visible" });
       await reach(page);
       await page.locator("#sessionTerminalSelect").click();

@@ -61,7 +61,9 @@ func TestGatewayHeldByAContainer(t *testing.T) {
 			name += ".exe"
 		}
 		bin := filepath.Join(dir, name)
-		if err := os.Link(self, bin); err != nil {
+		// A hard link is still the running parent's executable on Windows,
+		// so killing this child would not let TempDir remove the link.
+		if runtime.GOOS == "windows" || os.Link(self, bin) != nil {
 			b, err := os.ReadFile(self)
 			if err != nil {
 				t.Fatal(err)

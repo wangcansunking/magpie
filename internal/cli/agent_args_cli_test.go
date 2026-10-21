@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/yetone/magpie/internal/agent"
+	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -43,6 +44,7 @@ func cliHome(t *testing.T) {
 func homeFiles(t *testing.T) map[string]string {
 	t.Helper()
 	identities := filepath.Join(filepath.Dir(provider.Path()), "cli-identity.json")
+	loginLock := filepath.Join(filepath.Dir(provider.Path()), "logins.json.lock")
 	m := map[string]string{}
 	for _, root := range []string{os.Getenv("HOME"), os.Getenv("XDG_CONFIG_HOME"), os.Getenv("XDG_CACHE_HOME")} {
 		err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
@@ -56,6 +58,13 @@ func homeFiles(t *testing.T) map[string]string {
 				m[p] = "(folder)"
 				return nil
 			}
+			// This marker synchronizes logins.json; its contents are not
+			// configuration. Windows refuses reads while its byte is locked.
+			// Keep its existence in the snapshot so creation still counts.
+			if p == loginLock {
+				m[p] = "(login lock)"
+				return nil
+			}
 			b, err := os.ReadFile(p)
 			m[p] = string(b)
 			return err
@@ -65,6 +74,24 @@ func homeFiles(t *testing.T) map[string]string {
 		}
 	}
 	return m
+}
+
+func TestHomeFilesRecordsHeldLoginLock(t *testing.T) {
+	cliHome(t)
+	lock := filepath.Join(filepath.Dir(provider.Path()), "logins.json.lock")
+	before := homeFiles(t)
+	unlock, held := filelock.Lock(lock, 0)
+	defer unlock()
+	if !held {
+		t.Fatal("fixture could not hold the login lock")
+	}
+	after := homeFiles(t)
+	if _, ok := after[lock]; !ok {
+		t.Fatal("snapshot lost the held lock's existence")
+	}
+	if _, existed := before[lock]; !existed && !strings.Contains(filesChanged(before, after), "made "+lock) {
+		t.Fatal("snapshot did not report the new lock file")
+	}
 }
 
 // filesChanged names what differs between two homeFiles, "" for nothing.

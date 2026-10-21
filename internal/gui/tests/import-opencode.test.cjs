@@ -54,8 +54,10 @@ for (const engine of engines) {
           assert.deepEqual(errors, []);
         });
         await page.goto("http://magpie.test/?view=providers");
-        await page.waitForFunction(() => typeof openImportApps === "function");
-        await page.evaluate(() => openImportApps());
+        // Wait for the real control: app.js can define openImportApps before
+        // the provider data it needs has arrived.
+        const importLabel = await page.evaluate(() => t("Import…"));
+        await page.locator("#addSheet").getByRole("button", { name: importLabel, exact: true }).click();
         const picker = page.locator("#modal .importapps");
         await picker.locator(".approw").first().waitFor();
         const T = (s, v) => page.evaluate(([s, v]) => t(s, v), [s, v]);

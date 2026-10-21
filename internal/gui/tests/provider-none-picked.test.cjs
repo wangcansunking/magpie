@@ -80,8 +80,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await browser.close();
       });
       page.setDefaultTimeout(5000);
-      const errors = [];
+      const errors = [], requests = [];
       page.on("pageerror", (e) => errors.push(e.message));
+      page.on("request", (r) => { requests.push(r); if (requests.length > 20) requests.shift(); });
       const saves = [];
       await page.route("**/*", serve(lang, saves));
       await page.goto("http://magpie.test/?view=providers");
@@ -148,17 +149,49 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       for (const id of ["glm-5.3-free", "glm-5.2"]) assert.deepEqual(await cls(id), [false, false], id + " after Select none");
       await editor.getByText(w.none, { exact: false }).waitFor();
       assert.equal(await serves(), w.usage);
+      // Save's handler doesn't return providerAction's promise. Capture that
+      // specific action before the real click; its toast can expire or be
+      // replaced while a loaded runner is paused.
+      await page.evaluate(() => {
+        const action = providerAction;
+        providerAction = function (...args) {
+          const pending = action.apply(this, args);
+          if (args[0] === "save" && args[1].id === "router") {
+            providerAction = action;
+            window.providerSaved = { settled: false };
+            pending.then((value) => Object.assign(providerSaved, { settled: true, value }),
+              (error) => Object.assign(providerSaved, { settled: true, error }));
+          }
+          return pending;
+        };
+      });
       await editor.locator(".bar").getByRole("button", { name: w.save, exact: true }).click();
-      for (let i = 0; i < 60 && !saves.length; i++) await page.waitForTimeout(50);
+      await page.waitForFunction(() => window.providerSaved?.settled);
+      assert.equal(await page.evaluate(() => { if (providerSaved.error) throw providerSaved.error; return providerSaved.value; }), true, "the specific Save finished successfully");
       assert.equal(saves.length, 1, "saved");
       assert.equal(saves[0].noModels, true, "noModels sent");
       assert.deepEqual(saves[0].models || [], [], "no picks sent");
-      await page.locator("#modal:not([hidden]) .editor").waitFor({ state: "detached" }).catch(() => {});
+      // The action's state refresh is finished; the modal must finish closing
+      // too. Never swallow a failure before opening the next provider.
+      await page.locator("#modal").waitFor({ state: "hidden" });
 
       // one saved so says so on its card, opens as none, and a pick then
       // clears it
       assert.ok((await page.locator(".row.provider", { hasText: "Watched" }).locator(".sub").innerText()).endsWith(w.card), "the card says usage only");
-      await page.locator(".row.provider", { hasText: "Watched" }).click();
+      try {
+        await page.locator(".row.provider", { hasText: "Watched" }).click();
+      } catch (error) {
+        // The frozen run once stopped at Playwright's stable-element check.
+        // Its cause is not reproduced; retain evidence if it happens again,
+        // without a force click, another attempt, or a longer timeout.
+        console.error("Watched provider click failed", JSON.stringify(await page.evaluate(() => {
+          const row = document.querySelector('.row.provider[data-id="watched"]'), modal = document.querySelector("#modal");
+          return { view, hidden: document.hidden, focused: document.hasFocus(), modal: { hidden: modal.hidden, className: modal.className },
+            row: row && { rect: row.getBoundingClientRect().toJSON(), display: getComputedStyle(row).display },
+            animations: document.getAnimations().map((a) => ({ state: a.playState, time: a.currentTime, target: a.effect?.target?.id || a.effect?.target?.className })) };
+        })), requests.map((r) => ({ url: r.url(), failure: r.failure() })));
+        throw error;
+      }
       await chip("glm-5.2").waitFor();
       assert.equal(await serves(), w.usage);
       for (const id of ["glm-5.3-free", "glm-5.2"]) assert.deepEqual(await cls(id), [false, false], id + " saved as none");

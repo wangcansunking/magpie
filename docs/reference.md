@@ -1671,6 +1671,50 @@ accounts, and an entry with only an access token (a ChatGPT web session)
 is refused, since it would stop working within days with nothing to renew
 it.
 
+### WAN Gateway with Dev Tunnels
+
+WAN Gateway publishes an API-only HTTPS Endpoint without opening the local
+management page. It uses the official Microsoft SDK, not the devtunnel CLI.
+In **WAN Gateway**, install the runtime if prompted, then choose the GitHub
+sign-in action and open the displayed verification page. Authorization is
+through Microsoft's Dev Tunnels GitHub App and is independent of provider
+account discovery. It does not publish a tunnel. Create a named WAN API key,
+then choose **Start** separately. Copy the Endpoint and key into the remote
+client's base URL and API-key fields. For an OpenAI-style client, append
+`/v1` to the Endpoint.
+
+Remembered WAN sign-in uses the current user's Windows Credential Manager;
+where secure persistence is unavailable, use an explicit memory-only session.
+No OAuth token is stored in settings or backups. Expired credentials require
+sign-in again; no automatic refresh is implemented. **Sign out** stops WAN
+before erasing the local login; **Stop** alone keeps the login. The SDK path
+and service-app device authorization still require separately authorized
+real-service verification; offline checks do not establish public operation.
+
+Create a separate key for each device or person so each can be disabled,
+rotated or deleted independently. **A key is not device-bound:** copying it
+lets another device use it too. The name is a management label, not a
+verified hardware identity. No extra client software or device header is
+required.
+
+WAN uses a separate loopback listener that always requires a WAN key.
+Ordinary local/LAN keys cannot open it, and WAN keys are not accepted by
+the ordinary gateway. Management APIs, MCP tools and internal diagnostics
+are not published. Standard model APIs and SSE streaming use the existing
+gateway routing and key restrictions.
+
+**Stop** closes WAN requests and stops hosting; the local gateway keeps
+running. Key revocation affects new requests, not an accepted stream.
+Restarting magpie does not restart the tunnel automatically. The dedicated
+tunnel can keep its Endpoint between starts but may expire or be deleted.
+If another magpie process owns the gateway, this window cannot manage WAN;
+use the window that owns it rather than opening another tunnel.
+
+Microsoft terminates HTTPS at its relay and can process the request and key.
+Dev tunnels is a public-preview service, not a production SLA. Details of
+ownership, supported routes and failure behavior are in
+[WAN gateway](subsystems/wan-gateway.md).
+
 ### Connecting anything else
 
 The gateway listens on `127.0.0.1:3425` (`MAGPIE_ADDR` changes it) and starts

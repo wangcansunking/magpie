@@ -50,7 +50,7 @@ func callerKeyRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/caller-keys", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		access.MigrateLegacyLANKeyBestEffort()
-		keys, err := access.List()
+		keys, err := access.ListLocal()
 		if err != nil {
 			fail(w, err)
 			return
@@ -88,6 +88,7 @@ func callerKeyRoutes(mux *http.ServeMux) {
 		writeJSON(w, map[string]any{"models": out, "accounts": accounts})
 	})
 	mux.HandleFunc("POST /api/caller-keys/{action}", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
 		var in access.Change
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			fail(w, err)
@@ -99,7 +100,7 @@ func callerKeyRoutes(mux *http.ServeMux) {
 			fail(w, err)
 			return
 		}
-		keys, err := access.List()
+		keys, err := access.ListLocal()
 		if err != nil {
 			fail(w, err)
 			return

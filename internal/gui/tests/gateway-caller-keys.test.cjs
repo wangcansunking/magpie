@@ -67,8 +67,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.locator(".sess-menu .pm-item", { hasText: "Laptop" }).click();
       await page.waitForFunction(() => document.querySelectorAll("#ledWrap tbody tr").length === 1);
       assert.match(await page.locator("#ledWrap").textContent(), /Laptop/);
+      const exported = page.waitForResponse((r) => new URL(r.url()).pathname === "/api/usage/requests/export");
       await page.locator("#ledExport").click();
-      await page.waitForTimeout(150);
+      await exported;
       assert(events.some((e) => e.action === "export" && e.query.includes("callerKey=laptop") && !e.query.includes("key=") && !e.query.includes("user=")));
       await page.reload();
       await page.locator("#prefs").click();
@@ -133,7 +134,20 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await tablet.waitFor();
       await confirmKeyAction(page, tablet, w.remove);
       await page.waitForFunction(() => document.querySelectorAll("#gatewayKeys .acc[data-key]").length === 4);
+      await page.evaluate(() => {
+        // Header fitting runs on the frame after resize delivery. Observe
+        // that delivery, not the desired no-overflow result.
+        window.callerHeaderSized = new Promise((resolve) => {
+          const observer = new ResizeObserver(() => {
+            if (innerWidth !== 560) return;
+            observer.disconnect();
+            requestAnimationFrame(resolve);
+          });
+          observer.observe(document.querySelector(".top"));
+        });
+      });
       await page.setViewportSize({ width: 560, height: 740 });
+      await page.evaluate(() => callerHeaderSized);
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth), false);
       assert.deepEqual(errors, []);
       if (process.env.ARTIFACT_DIR) {

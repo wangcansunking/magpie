@@ -77,10 +77,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     });
     for (const lang of ["en", "zh", "zh-TW", "ja", "de"]) {
       for (const width of [1100, 390]) {
-        await t.test(`${lang} ${width}`, async () => {
+        await t.test(`${lang} ${width}`, async (child) => {
           const w = (s) => tr(lang, s);
           const calls = [];
           const ctx = await browser.newContext({ viewport: { width, height: 800 } });
+          child.after(() => ctx.close());
           await ctx.addInitScript(() => { try { localStorage.setItem("magpie.libTab", "mcp"); } catch {} });
           const page = await ctx.newPage();
           page.setDefaultTimeout(5000);
@@ -102,7 +103,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
             assert.equal(await ask.count(), 0, "asked to discard");
           };
           const stopSignIn = async () => {
+            // These cases check the saved form and the server cancellation
+            // payload. Pending-start cancellation has its own held-reply
+            // regression in mcp-signin-cancel-pending.test.cjs.
+            await box.getByText(w("Finish signing in in your browser…"), { exact: true }).waitFor();
+            const canceled = page.waitForResponse(r => new URL(r.url()).pathname === "/api/library/mcp-signin/s1/cancel");
             await box.getByRole("button", { name: w("Cancel"), exact: true }).click();
+            await canceled;
             await box.getByRole("button", { name: w("Sign in"), exact: true }).waitFor();
           };
 
@@ -144,11 +151,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           await ed.locator("input.mono").first().fill(GH + "readonly");
           await ed.locator(".lib-pair .lib-x").click();
           await box.getByRole("button", { name: w("Save and sign in"), exact: true }).click();
-          await box.getByRole("button", { name: w("Cancel"), exact: true }).waitFor();
-          await page.waitForFunction(() => document.querySelector("#modal .lib-editor > .bar button.primary"));
-          await box.getByRole("button", { name: w("Cancel"), exact: true }).click();
-          // saved: the same URL is no other server, so the button says Sign in
-          await box.getByRole("button", { name: w("Sign in"), exact: true }).waitFor();
+          // saved: the same URL is no other server, so Cancel restores Sign in
+          await stopSignIn();
           assert.deepEqual(calls.slice(2), ["save github " + GH + "readonly {}", "start github", "cancel"]);
           await cancel(false);
           await row("github").locator(".sub", { hasText: GH + "readonly" }).waitFor();

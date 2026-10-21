@@ -16,14 +16,20 @@ func desktopFiles(t *testing.T, h string) (string, string) {
 	t.Helper()
 	t.Setenv("APPDATA", filepath.Join(h, "AppData", "Roaming"))
 	t.Setenv("LOCALAPPDATA", filepath.Join(h, "AppData", "Local"))
-	d, _ := os.UserConfigDir()
+	d, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
 	p := filepath.Join(d, "Claude", "claude_desktop_config.json")
 	p3 := filepath.Join(d, "Claude-3p", "claude_desktop_config.json")
 	if runtime.GOOS == "windows" {
 		p3 = filepath.Join(h, "AppData", "Local", "Claude-3p", "claude_desktop_config.json")
 	}
-	if !strings.HasPrefix(p, h) {
-		t.Skip("config dir outside the sandbox: " + p)
+	for _, file := range []string{p, p3} {
+		rel, err := filepath.Rel(h, file)
+		if err != nil || !filepath.IsLocal(rel) {
+			t.Fatalf("config dir outside the sandbox: %s", file)
+		}
 	}
 	return p, p3
 }

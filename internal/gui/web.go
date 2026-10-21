@@ -21,6 +21,7 @@ import (
 
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/update"
+	"github.com/yetone/magpie/internal/wan"
 )
 
 // `magpie web` serves the window's page to a browser, for a computer that
@@ -131,6 +132,7 @@ func (w *Web) ServesGateway() bool { return served.Load() != nil }
 // key, so the page open in the browser finds it where it was.
 func (w *Web) Wait() error {
 	<-w.quit
+	wan.Shutdown()                     // a Unix reexec never returns to the CLI's exit cleanup
 	time.Sleep(200 * time.Millisecond) // the answer to the Quit gets out
 	w.srv.Close()
 	if !webReexec.Load() {

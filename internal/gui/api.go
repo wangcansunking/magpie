@@ -1125,6 +1125,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 	importRoutes(mux)
 	usageRoutes(mux, w)
 	callerKeyRoutes(mux)
+	wanRoutes(mux, wanOwner)
 	sessionRoutes(mux, w)
 	sessionManageRoutes(mux, w)
 	backupRoutes(mux, w)

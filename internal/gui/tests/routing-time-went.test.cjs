@@ -11,6 +11,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const reader = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const now = new Date();
@@ -88,9 +89,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await browser.close();
       });
       await page.goto("http://magpie.test/?view=routing");
-      await page.locator(".rt-day").nth(1).waitFor({ state: "visible", timeout: 15000 });
-      await page.locator(".rt-day").nth(1).click();
+      const historical = page.locator("#view-routing .rt-days .rt-day").nth(1);
+      await historical.waitFor({ state: "visible", timeout: 15000 });
+      await reader.reach(page, historical);
+      await historical.click();
       await page.locator(".rt-req").nth(routes.length - 1).waitFor();
+      await reader.reach(page, page.locator(".rt-req").nth(0));
       await page.locator(".rt-req").nth(0).click();
       const box = page.locator(".rt-steps li.time .rt-time");
       await box.waitFor();
@@ -131,6 +135,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
       // the plugin's try: no network timing, no breakdown, the try's own
       // line still there
+      await reader.reach(page, page.locator(".rt-req").nth(1));
       await page.locator(".rt-req").nth(1).click();
       await page.locator(".rt-req").nth(1).and(page.locator('[aria-pressed="true"]')).waitFor();
       await page.locator(".rt-steps li.ok").first().waitFor();

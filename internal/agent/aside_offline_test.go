@@ -32,6 +32,7 @@ func TestAsideInitialReadOffersStageWithoutWrites(t *testing.T) {
 }
 
 func TestAsideOfflineDisconnectRestoresWithoutDaemon(t *testing.T) {
+	judgeOffWindows(t) // this fixture represents a CLI-only install, not Windows' possible desktop app
 	settings, models := asideHome(t)
 	before := readFile(settings)
 	a := mustFindAside(t)

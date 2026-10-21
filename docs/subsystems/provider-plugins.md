@@ -15,6 +15,19 @@ Some built-in subscriptions are deprecated and have community plugins that provi
 
 The `movers` map assembled in `internal/provider/migrate*.go` is the authoritative subscription-to-plugin mapping. Each mover's `min` is the minimum plugin version required by magpie. The list of moved subscriptions in [AGENTS.md](../../AGENTS.md#built-in-subscriptions-that-a-plugin-serves) is a contributor lookup; confirm the mapping in source when changing it.
 
+The runtime acquisition facility in [`bun.go`](../../internal/plugin/bun.go)
+is also used by the independent [WAN SDK helper](wan-gateway.md). `CachedBun`
+and its cancellable `CachedBunContext` counterpart return an available path
+without executing or downloading a runtime; a file that disappears after
+lookup fails at launch instead of triggering an install. Waiting for the cache
+lock in `CachedBunContext` respects cancellation, so another runtime download
+cannot prevent the WAN owner from shutting down. `Bun` remains the explicitly
+download-capable operation. The helper also reuses `BunCAEnv` in
+[`systemca.go`](../../internal/plugin/systemca.go), which preserves the user's
+extra CA file or exports system-trusted roots without disabling TLS checks.
+This shared facility does not place WAN hosting inside the plugin host or make
+it depend on plugin enablement.
+
 ## Ownership and runtime paths
 
 `provider.Moved(id)` identifies a subscription whose migration state in `migrations.json` is `plugin`. In `/api/providers`, its row exposes `move.state == "plugin"`; the GUI also receives its id in `onPlugins`.

@@ -65,67 +65,88 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         for (const tab of ["instructions", "mcp", "skills", "hooks", "rtk"]) {
           const where = `${web ? "browser" : "window"} ${width}px ${tab}`;
           const context = await browser.newContext({ viewport: { width, height: 700 }, reducedMotion: "reduce" });
-          await context.addInitScript((tb) => { try { localStorage.setItem("magpie.libTab", tb); } catch {} }, tab);
-          const page = await context.newPage();
-          page.setDefaultTimeout(5000);
-          const errors = [];
-          page.on("pageerror", (e) => errors.push(e.message));
-          page.on("console", (m) => { if (/scroll not asked for/.test(m.text())) errors.push(m.text()); });
-          const opened = [];
-          let release;
-          const held = new Promise((r) => { release = r; });
-          await page.route("**/*", serve(lang, web, opened, held));
-          await page.goto("http://magpie.test/?view=library");
-          const v = page.locator("#view-library");
-          const head = v.locator(".lib-head");
-          const back = head.locator(".lib-backups");
+          let release = () => {};
+          try {
+            await context.addInitScript((tb) => { try { localStorage.setItem("magpie.libTab", tb); } catch {} }, tab);
+            const page = await context.newPage();
+            page.setDefaultTimeout(5000);
+            const errors = [], pending = new Map(), failed = [], lifecycle = [];
+            page.on("pageerror", (e) => errors.push(e.message));
+            page.on("console", (m) => { if (/scroll not asked for/.test(m.text())) errors.push(m.text()); });
+            page.on("request", (r) => pending.set(r, { url: r.url(), type: r.resourceType() }));
+            page.on("requestfinished", (r) => pending.delete(r));
+            page.on("requestfailed", (r) => {
+              pending.delete(r);
+              failed.push({ url: r.url(), error: r.failure()?.errorText });
+              if (failed.length > 20) failed.shift();
+            });
+            page.on("domcontentloaded", () => lifecycle.push("domcontentloaded"));
+            page.on("load", () => lifecycle.push("load"));
+            const opened = [];
+            const held = new Promise((r) => { release = r; });
+            await page.route("**/*", serve(lang, web, opened, held));
+            try {
+              await page.goto("http://magpie.test/?view=library");
+            } catch (error) {
+              // The frozen run's navigation timeout has no established cause.
+              // Keep its exact layout and pending resources next time without
+              // a retry, a shorter load condition or a longer timeout.
+              console.error("Library navigation failed", JSON.stringify({ where, url: page.url(), lifecycle, pendingCount: pending.size, pending: [...pending.values()].slice(-30), failed, errors }));
+              throw error;
+            }
+            const v = page.locator("#view-library");
+            const head = v.locator(".lib-head");
+            const back = head.locator(".lib-backups");
 
-          // it waits for the library, as Library folder does
-          await back.waitFor();
-          assert.ok(await back.isDisabled(), `${where}: Backups waits for the library`);
-          release();
-          await head.locator(".lib-backups:not([disabled])").waitFor();
-          await v.locator(".lib-body").first().waitFor({ state: "attached" }).catch((e) => { throw new Error(where + ": " + e.message); });
+            // it waits for the library, as Library folder does
+            await back.waitFor();
+            assert.ok(await back.isDisabled(), `${where}: Backups waits for the library`);
+            release();
+            await head.locator(".lib-backups:not([disabled])").waitFor();
+            await v.locator(".lib-body").first().waitFor({ state: "attached" }).catch((e) => { throw new Error(where + ": " + e.message); });
 
-          const got = await head.evaluate((h) => {
-            const b = h.querySelector(".lib-backups"), f = h.querySelector(".lib-more"), vw = h.closest(".view");
-            const r = b.getBoundingClientRect(), fr = f.getBoundingClientRect();
-            const c = getComputedStyle(b);
-            return {
-              label: b.textContent, title: b.title, after: b.previousElementSibling === f, sameRow: Math.abs(r.top - fr.top) < 2,
-              look: ["fontSize", "height", "color"].every((k) => getComputedStyle(f)[k] === c[k]),
-              inView: r.left >= 0 && r.right <= innerWidth + 0.5 && r.width > 0,
-              wrapped: b.querySelector("span:last-child").getClientRects().length > 1 || b.scrollWidth > b.clientWidth + 1,
-              stripe: c.borderLeftWidth !== c.borderRightWidth || c.borderLeftColor !== c.borderRightColor,
-              side: vw.scrollWidth - vw.clientWidth, pageSide: document.scrollingElement.scrollWidth - innerWidth,
-              foot: document.querySelectorAll("#view-library .lib-foot, #view-library .lib-link").length,
-              icon: !!b.querySelector(".lib-mini svg"),
-            };
-          });
-          assert.equal(got.label, w.backups, where);
-          assert.equal(got.title, w.note + "\n~/.magpie/backups", where);
-          assert(got.after, `${where}: Backups comes right after ${w.folder}`);
-          assert(got.sameRow, `${where}: Backups sits on Library folder's line`);
-          assert(got.look, `${where}: Backups looks like Library folder`);
-          assert(got.icon, `${where}: Backups has its glyph`);
-          assert(got.inView, `${where}: Backups runs out of the window`);
-          assert(!got.wrapped, `${where}: Backups' label wraps`);
-          assert(!got.stripe, `${where}: Backups has a left border`);
-          assert.equal(got.side, 0, `${where}: the view scrolls sideways`);
-          assert(got.pageSide <= 1, `${where}: the page scrolls sideways`);
-          assert.equal(got.foot, 0, `${where}: something is left at the foot`);
-          assert.equal(await head.getByRole("button", { name: w.folder, exact: true }).count(), 1, `${where}: Library folder by its name`);
+            const got = await head.evaluate((h) => {
+              const b = h.querySelector(".lib-backups"), f = h.querySelector(".lib-more"), vw = h.closest(".view");
+              const r = b.getBoundingClientRect(), fr = f.getBoundingClientRect();
+              const c = getComputedStyle(b);
+              return {
+                label: b.textContent, title: b.title, after: b.previousElementSibling === f, sameRow: Math.abs(r.top - fr.top) < 2,
+                look: ["fontSize", "height", "color"].every((k) => getComputedStyle(f)[k] === c[k]),
+                inView: r.left >= 0 && r.right <= innerWidth + 0.5 && r.width > 0,
+                wrapped: b.querySelector("span:last-child").getClientRects().length > 1 || b.scrollWidth > b.clientWidth + 1,
+                stripe: c.borderLeftWidth !== c.borderRightWidth || c.borderLeftColor !== c.borderRightColor,
+                side: vw.scrollWidth - vw.clientWidth, pageSide: document.scrollingElement.scrollWidth - innerWidth,
+                foot: document.querySelectorAll("#view-library .lib-foot, #view-library .lib-link").length,
+                icon: !!b.querySelector(".lib-mini svg"),
+              };
+            });
+            assert.equal(got.label, w.backups, where);
+            assert.equal(got.title, w.note + "\n~/.magpie/backups", where);
+            assert(got.after, `${where}: Backups comes right after ${w.folder}`);
+            assert(got.sameRow, `${where}: Backups sits on Library folder's line`);
+            assert(got.look, `${where}: Backups looks like Library folder`);
+            assert(got.icon, `${where}: Backups has its glyph`);
+            assert(got.inView, `${where}: Backups runs out of the window`);
+            assert(!got.wrapped, `${where}: Backups' label wraps`);
+            assert(!got.stripe, `${where}: Backups has a left border`);
+            assert.equal(got.side, 0, `${where}: the view scrolls sideways`);
+            assert(got.pageSide <= 1, `${where}: the page scrolls sideways`);
+            assert.equal(got.foot, 0, `${where}: something is left at the foot`);
+            assert.equal(await head.getByRole("button", { name: w.folder, exact: true }).count(), 1, `${where}: Library folder by its name`);
 
-          // it opens the backups folder, and the page stays where it was
-          const top = await v.evaluate((e) => e.scrollTop);
-          await Promise.all([
-            page.waitForResponse((r) => new URL(r.url()).pathname === "/api/library/reveal"),
-            head.getByRole("button", { name: w.backups, exact: true }).click(),
-          ]);
-          assert.deepEqual(opened, [{ path: view.backups }], where);
-          assert.equal(await v.evaluate((e) => e.scrollTop), top, `${where}: the click moved the page`);
-          assert.deepEqual(errors, [], where);
-          await context.close();
+            // it opens the backups folder, and the page stays where it was
+            const top = await v.evaluate((e) => e.scrollTop);
+            await Promise.all([
+              page.waitForResponse((r) => new URL(r.url()).pathname === "/api/library/reveal"),
+              head.getByRole("button", { name: w.backups, exact: true }).click(),
+            ]);
+            assert.deepEqual(opened, [{ path: view.backups }], where);
+            assert.equal(await v.evaluate((e) => e.scrollTop), top, `${where}: the click moved the page`);
+            assert.deepEqual(errors, [], where);
+          } finally {
+            release();
+            await context.close();
+          }
         }
       }
     });

@@ -73,30 +73,32 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await t.test(language, async (t) => {
         const context = await browser.newContext({ viewport: { width: 1100, height: 1000 }, reducedMotion: "reduce" });
         t.after(() => context.close());
-        const page = await context.newPage();
-        page.setDefaultTimeout(6000);
-        const errors = [];
-        page.on("pageerror", (e) => errors.push(e.message));
-        const gateway = { running: true, mine: true, window: true, models: 0, calls: [], groups: [] };
-        await page.route("**/*", server(language, gateway));
         const w = words[language];
-        const note = page.locator("#connectNote");
         for (const c of cases) {
-          await t.test(c.name, async () => {
-            Object.assign(gateway, c.gateway);
+          await t.test(c.name, async (t) => {
+            // These are independent gateway states, not a reload test. Give
+            // each its own page so its pending reads retain its own fixture.
+            const page = await context.newPage();
+            t.after(() => page.close());
+            page.setDefaultTimeout(6000);
+            const errors = [];
+            page.on("pageerror", (e) => errors.push(e.message));
+            await page.route("**/*", server(language, { running: true, mine: true, window: true, models: 0, calls: [], groups: [], ...c.gateway }));
+            const note = page.locator("#connectNote");
             await page.goto("http://magpie.test/?view=gateway");
             await note.waitFor();
             assert.equal(await note.textContent(), w[c.note]);
             if (c.noAnyKey) assert.equal(await page.locator("#connect code", { hasText: /^magpie$/ }).count(), 0, "a key-less magpie is offered");
-            if (!c.picks) return;
-            await page.locator("#connectAddress").click();
-            await page.locator(".proto-menu .pm-item", { hasText: network }).click();
-            assert.equal(await note.textContent(), w[c.picks]);
-            const base = await page.locator("#connect .val").first().locator("code").textContent();
-            assert(base.startsWith(network), base);
+            if (c.picks) {
+              await page.locator("#connectAddress").click();
+              await page.locator(".proto-menu .pm-item", { hasText: network }).click();
+              assert.equal(await note.textContent(), w[c.picks]);
+              const base = await page.locator("#connect .val").first().locator("code").textContent();
+              assert(base.startsWith(network), base);
+            }
+            assert.deepEqual(errors, []);
           });
         }
-        assert.deepEqual(errors, []);
       });
     }
   });

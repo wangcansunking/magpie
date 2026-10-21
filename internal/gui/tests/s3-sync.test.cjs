@@ -8,7 +8,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
-const { openPart } = require("./reader.cjs");
+const { openPart, reach, watchSettingsReads, settingsDrawn } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 
@@ -63,8 +63,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await browser.close();
       });
 
+      await watchSettingsReads(page);
       await page.goto("http://magpie.test/");
       await page.locator("#prefs").click();
+      await settingsDrawn(page);
       await openPart(page, "sync");
       const list = page.locator("#syncList");
       const first = list.locator(".row.pref").first();
@@ -73,12 +75,18 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       // real wheel (the page keeps its place from any other scroll)
       const toEnd = async () => {
         await page.mouse.move(450, 300);
-        const left = () => page.locator("#view-settings").evaluate((v) => v.scrollHeight - v.clientHeight - v.scrollTop);
-        for (let i = 0; i < 120 && (await left()) > 0.5; i++) { await page.mouse.wheel(0, 80); await page.waitForTimeout(15); }
-        await page.waitForTimeout(300);
+        const view = page.locator("#view-settings");
+        for (let i = 0; i < 120; i++) {
+          const at = await view.evaluate((v) => ({ top: v.scrollTop, left: v.scrollHeight - v.clientHeight - v.scrollTop }));
+          if (at.left <= 0.5) return;
+          await page.mouse.wheel(0, 80);
+          await page.waitForFunction((top) => document.querySelector("#view-settings").scrollTop > top, at.top);
+        }
+        assert.fail("the reader could not wheel to the form's foot");
       };
       await toEnd();
       assert.equal(await first.locator(".name").textContent(), zh ? "WebDAV / S3 / GitHub 同步" : "WebDAV, S3 or GitHub sync");
+      await reach(page, first.locator(".val button"));
       await first.locator(".val button").click();
 
       const form = list.locator(".sync-form");
@@ -92,13 +100,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const top = () => page.evaluate(() => document.querySelector("#view-settings").scrollTop);
       // at the page's end, then back up by the wheel till the choice is in sight
       await toEnd();
-      const segTop = () => page.evaluate(() => document.querySelector(".sync-form .segs").getBoundingClientRect().top - document.querySelector("#view-settings").getBoundingClientRect().top);
-      for (let i = 0; i < 40 && (await segTop()) < 10; i++) { await page.mouse.wheel(0, -40); await page.waitForTimeout(15); }
-      await page.waitForTimeout(300);
+      await reach(page, form.locator(".segs .opt", { hasText: "S3" }));
       const before = await top();
       assert.ok(before > 0, "the settings page must be scrolled");
       await form.locator(".segs .opt", { hasText: "S3" }).click();
-      await page.waitForTimeout(250);
+      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
       assert.equal(await top(), before, "picking S3 must not scroll the page");
       assert.deepEqual(await labels(), zh
         ? ["同步到", "终结点", "存储桶", "前缀", "区域", "Access Key", "Secret", "口令", "同时同步"]
@@ -114,6 +120,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await box(L.endpoint).fill("https://acct.r2.cloudflarestorage.com");
       await box(L.phrase).fill("correct horse");
       const save = form.locator(".bar .primary");
+      await reach(page, save);
       await save.click();
       assert.equal(await form.locator(".editor-error").textContent(), zh ? "请填写存储桶名称" : "Name the bucket");
       assert.equal(posts.length, 0);
@@ -123,21 +130,20 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await box(L.region).fill("auto");
       await box(L.key).fill("AKIDEXAMPLE");
       await box(L.secret).fill("s3cr3t");
+      await reach(page, form.locator("label.tick").first());
       await form.locator("label.tick").first().click(); // path-style
       // the WebDAV address typed before is still there, and isn't sent;
       // going back and forth, the shorter form too, moves nothing
       // the fields filled scrolled the choice out of sight: wheeled back to it
-      await page.mouse.move(450, 300);
-      for (let i = 0; i < 40 && (await segTop()) < 10; i++) { await page.mouse.wheel(0, -40); await page.waitForTimeout(15); }
-      await page.waitForTimeout(300);
+      await reach(page, form.locator(".segs .opt", { hasText: "WebDAV" }));
       const at = await top();
       assert.ok(at > 0, "the settings page must still be scrolled");
       await form.locator(".segs .opt", { hasText: "WebDAV" }).click();
-      await page.waitForTimeout(250);
+      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
       assert.equal(await top(), at, "picking WebDAV must not scroll the page");
       assert.equal(await form.locator(":scope > div").nth(1).locator("input").inputValue(), "https://dav.example.com/dav/");
       await form.locator(".segs .opt", { hasText: "S3" }).click();
-      await page.waitForTimeout(250);
+      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
       assert.equal(await top(), at, "picking S3 again must not scroll the page");
       await toEnd(); // the save button, at the form's foot, wheeled into sight
       await save.click();
@@ -151,10 +157,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       // editing it again: S3 picked, its fields as saved, the secret kept
       const edit = first.locator(".val button").last();
       await toEnd();
-      // with the page scrolled to its end the row can sit under the sticky
-      // header: wheeled back until it is clear of it
-      const under = () => edit.evaluate((b) => b.getBoundingClientRect().top < document.querySelector("header.top").getBoundingClientRect().bottom + 4);
-      for (let i = 0; i < 40 && (await under()); i++) { await page.mouse.wheel(0, -60); await page.waitForTimeout(30); }
+      // Both the window header and Settings' sticky tabs can cover the row.
+      await reach(page, edit);
       await edit.click();
       await form.waitFor({ state: "visible" });
       assert.equal(await form.locator(".segs .opt.on").textContent(), zh ? "S3 · 使用中" : "S3 · on");

@@ -128,7 +128,11 @@ func viaMagpieFor(agentID, prefix string) []Option {
 
 // isMagpie reports whether a model value is a catalog reference.
 func isMagpie(v string) bool {
-	if pid, _, ok := strings.Cut(v, "/"); ok && dryProviders[pid] {
+	pid, _, ref := strings.Cut(v, "/")
+	if !ref {
+		return false // own model names and effort values never name the gateway
+	}
+	if dryProviders[pid] {
 		return true
 	}
 	if !strings.Contains(v, "/") {

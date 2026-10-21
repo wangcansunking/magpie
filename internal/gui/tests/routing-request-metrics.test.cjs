@@ -6,6 +6,7 @@ const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
 const { reach } = require("./reader.cjs");
+const reader = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const now = new Date();
@@ -73,6 +74,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       page.on("pageerror", (e) => errors.push(e.message));
       await page.route("**/*", serve(lang, feed));
       t.after(async () => { feed.next?.([]); await browser.close(); });
+      const tap = async (loc) => {
+        await reader.reach(page, loc);
+        await loc.click();
+      };
       await page.goto("http://magpie.test/?view=routing");
       const rows = page.locator(".rt-req");
       await rows.nth(fixtures.length - 1).waitFor();
@@ -105,7 +110,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.match(retry, lang === "zh" ? /计费重试.*最终尝试/ : /billable retries.*final attempts/, "retry totals are explained");
       };
       await check();
-      await page.locator(".rt-group-by button").nth(1).click();
+      await tap(page.locator('.rt-group-by [data-label="By session"]'));
       const group = page.locator("button.rt-session").filter({ hasText: /metrics-chat|Request metrics/ });
       await group.waitFor();
       await check();
@@ -117,11 +122,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.match(await group.locator(".speed .v").textContent(), /^133 /, "speed is output divided by summed decode windows, not the mean of individual speeds");
       assert.match(await group.locator(".cache-hit").getAttribute("title"), /9.*11|11.*9/, "unknown and unfinished requests are excluded and coverage is disclosed");
       assert.match(await group.locator(".rt-token-total").getAttribute("title"), /11.*12|12.*11/, "session token breakdown discloses missing records");
-      await group.click();
+      await tap(group);
       assert.equal(await group.getAttribute("aria-expanded"), "false");
       assert.equal(await group.locator(".cache-hit .v").textContent(), "63%", "closed sessions retain their metrics");
-      await group.click();
-      await rows.nth(0).click();
+      await tap(group);
+      await tap(rows.nth(0));
       assert.match(await page.locator(".rt-steps").textContent(), lang === "zh" ? /请求缓存命中率 60%/ : /request cache hit rate 60%/);
       if (lang === "zh") {
         assert.match(await page.locator(".rt-steps").textContent(), /后首响/);
@@ -170,14 +175,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         }
         if (process.env.ARTIFACT_DIR && [1280, 480].includes(width)) {
           await fs.mkdir(process.env.ARTIFACT_DIR, { recursive: true });
-          await page.locator(".rt-filters").evaluate((e) => e.scrollIntoView({ block: "start" }));
+          await reader.reach(page, page.locator(".rt-filters"));
           await page.locator(".rt-reqs").screenshot({ path: path.join(process.env.ARTIFACT_DIR, `${engine}-${lang}-${width}-request-metrics.png`) });
         }
       }
       await page.setViewportSize({ width: 1280, height: 900 });
-      await page.locator(".rt-days .rt-day").nth(1).click();
+      await tap(page.locator("#view-routing .rt-days .rt-day").nth(1));
       await check();
-      await page.locator(".rt-days .rt-day").nth(0).click();
+      await tap(page.locator("#view-routing .rt-days .rt-day").nth(0));
       await check();
       // The row signature must notice rates changing even when total tokens,
       // cost, duration and first-token timing remain unchanged.
@@ -193,7 +198,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.match(updated, /2,080/);
       assert.match(updated, /1,200/);
       assert.match(await group.locator(".rt-token-total").getAttribute("title"), lang === "zh" ? /输出: 4,800/ : /Output: 4,800/, "session tooltip updates even when list token totals do not change");
-      await page.locator("#rtMetrics").click();
+      await tap(page.locator("#rtMetrics"));
       const menu = page.locator(".rt-metric-menu");
       assert.equal(await menu.locator('[role="menuitemcheckbox"]').count(), 6);
       // Keep only cache and speed. Each click updates the list immediately,
@@ -224,7 +229,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.reload();
       await rows.nth(fixtures.length - 1).waitFor();
       assert.equal(await rows.nth(0).locator(".rt-metric").count(), 2, "metric choices survive a reload");
-      await page.locator("#rtMetrics").click();
+      await tap(page.locator("#rtMetrics"));
       assert.equal(await menu.locator('[aria-checked="true"]').count(), 2);
       await menu.getByRole("menuitemcheckbox", { name: lang === "zh" ? "缓存命中率" : "Cache hit rate", exact: true }).click();
       await menu.getByRole("menuitemcheckbox", { name: lang === "zh" ? "输出速度" : "Output speed", exact: true }).click();

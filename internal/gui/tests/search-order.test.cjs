@@ -110,6 +110,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       for (let i = 1; i <= 12; i++) await page.mouse.move(from.x + 10, from.y + from.height / 2 + (to.y + 4 - from.y - from.height / 2) * i / 12);
       await page.mouse.up();
       await page.waitForFunction(() => document.querySelector("#searchList .row.search-api .name")?.textContent === "1. Brave Search");
+      await saved(); // the optimistic order alone does not mean it was posted
       assert.deepEqual(posted.at(-1), { arrange: ["brave", "tavily", "exa"] });
       assert.deepEqual(await names(), ["1. Brave Search", "2. Tavily", "3. Exa"]);
       assert.equal(posted.length, 1, "letting go sent the order once, and clicked nothing");
@@ -120,6 +121,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await units.nth(0).focus();
       await page.keyboard.press("Alt+ArrowDown");
       await page.waitForFunction(() => document.querySelector("#searchList .row.search-api .name")?.textContent === "1. Tavily");
+      await saved();
       assert.deepEqual(posted.at(-1), { arrange: ["tavily", "brave", "exa"] });
       assert.deepEqual(await names(), ["1. Tavily", "2. Brave Search", "3. Exa"]);
       await saved();

@@ -44,6 +44,7 @@ function server(lang, web) {
     if (url.pathname === "/api/library/rtk") return json(rtk);
     if (url.pathname === "/api/groups") return json({ groups: [] });
     if (url.pathname === "/api/providers") return json({ providers: [], gateway: { running: true } });
+    if (url.pathname === "/api/wan" && route.request().method() === "GET") return json({ state: "stopped", endpoint: "", error: "", runtimeAvailable: true, controllable: true, keys: [], auth: { state: "signed_out", error: "", userCode: "", verificationURI: "", expiresAt: "0001-01-01T00:00:00Z", attemptID: 0, storage: "memory", storageAvailable: false } });
     if (url.pathname === "/api/usage/quotas") return json([]);
     if (url.pathname.startsWith("/api/")) return json({});
     const file = path.join(assets, url.pathname === "/" ? "index.html" : url.pathname);
@@ -74,7 +75,7 @@ const sideways = () => {
   };
 };
 
-const VIEWS = ["agents", "providers", "gateway", "routing", "usage", "sessions", "library", "plugins", "settings"];
+const VIEWS = ["agents", "providers", "gateway", "wan", "routing", "usage", "sessions", "library", "plugins", "settings"];
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
   test(engine + ": no page scrolls sideways (#1236)", async (t) => {

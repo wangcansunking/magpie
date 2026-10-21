@@ -15,6 +15,7 @@ const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
 const { watchSettingsReads, settingsDrawn, openPart } = require("./reader.cjs");
+const { watchReplies, repliesConsumed } = require("./lifecycle.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 
@@ -124,6 +125,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", server(lang, ctl));
         await watchSettingsReads(page);
+        await watchReplies(page, ["/api/providers", "/api/update", "/api/whatsnew"]);
+        const settingsReplies = async () => {
+          // Every Settings redraw starts Update outside prefsQueue; the
+          // sidebar's delayed address read exists only in the wide layout.
+          const seen = ["/api/update", "/api/whatsnew"];
+          if (await page.evaluate(() => sideNav())) seen.push("/api/providers");
+          await repliesConsumed(page, seen);
+        };
         await page.goto("http://magpie.test/?view=settings");
         await settingsDrawn(page);
         const aboutTab = async () => {
@@ -143,6 +152,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         let before = await scrolls(page);
         await dl.locator(".opt").nth(0).click();
         await page.waitForFunction(() => document.querySelectorAll(".update-download-row .opt")[0]?.classList.contains("on"));
+        await page.evaluate(() => prefsQueue); // the selected segment is optimistic, not a saved reply
         assert.equal(ctl.saves.at(-1).noAutoDownload, true);
         assert.equal(ctl.saves.at(-1).noAutoUpdate, false);
         assert.equal(ctl.saves.at(-1).updateEvery, 360);
@@ -154,7 +164,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
         // kept after a reload; Check now finds 0.1.401 and only says so
         ctl.state = "found";
+        // Settings can finish before the sidebar's delayed address read. Do
+        // not turn this persistence reload into a race with that startup task.
+        await settingsReplies();
         await page.reload();
+        await settingsDrawn(page);
         await aboutTab();
         await dl.waitFor();
         assert.equal(await dl.locator(".opt").nth(0).evaluate((o) => o.classList.contains("on")), true, "kept off");
@@ -179,7 +193,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await showRow(page, dl);
         await dl.locator(".opt").nth(1).click();
         await page.waitForFunction(() => document.querySelectorAll(".update-download-row .opt")[1]?.classList.contains("on"));
+        await page.evaluate(() => prefsQueue);
         assert.equal(ctl.saves.at(-1).noAutoDownload, false);
+        await settingsReplies();
         assert.deepEqual(errors, []);
         await page.context().close();
       });

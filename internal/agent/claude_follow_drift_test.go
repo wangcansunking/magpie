@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/edit"
@@ -89,17 +90,16 @@ func TestClaudeFollowerOnTheMainModelIsNoDrift(t *testing.T) {
 // stopped: a stopped one reads what was last seen there.
 func TestWSLClaudeFollowerOnTheMainModelIsNoDrift(t *testing.T) {
 	root, home := claudeDistroHome(t, `{"model": "opus"}`)
-	d := distro{Name: "Ubuntu", Root: root, Home: "/home/me", Has: map[string]bool{"dir:.claude": true},
-		Gateway: "172.20.0.1", Mirrored: true, Running: true}
-	// what magpie sees there is kept for when the distro stops
-	seen := d
-	wsl.Lock()
-	if wsl.seen == nil {
-		wsl.seen = map[string]*distro{}
+	// Discovery must agree with the remembered distro. A successful real
+	// or earlier test's list without Ubuntu would otherwise erase its memo.
+	fakeWSL(t, "Ubuntu\r\n", "Ubuntu\r\n", map[string]string{
+		"Ubuntu": "home:/home/me\ndir:.claude\nroute:default via 172.20.0.1 dev eth0\nnet:mirrored\n",
+	}, map[string]string{"Ubuntu": root})
+	ds := wslDistros()
+	if len(ds) != 1 || ds[0].Name != "Ubuntu" || !ds[0].Running {
+		t.Fatalf("fixture distro not discovered: %+v", ds)
 	}
-	wsl.seen["Ubuntu"] = &seen
-	wsl.Unlock()
-	t.Cleanup(func() { wsl.Lock(); delete(wsl.seen, "Ubuntu"); wsl.Unlock() })
+	d := ds[0]
 	a := wslAgent(wslKindOf("claude"), d)
 	path := claudeOpusThenSonnet(t, a, home)
 	sonnetFollowsAsBefore(t, a, path)
@@ -109,8 +109,21 @@ func TestWSLClaudeFollowerOnTheMainModelIsNoDrift(t *testing.T) {
 	if dr := a.Drift(); dr != nil {
 		t.Fatalf("drift on a tier following magpie's model: %+v", *dr)
 	}
-	d.Running = false
-	stopped := wslAgent(wslKindOf("claude"), d)
+	run := wslRun
+	wslRun = func(timeout time.Duration, args ...string) ([]byte, error) {
+		if strings.Join(args, " ") == "-l --running -q" {
+			return utf16le("", true), nil
+		}
+		return run(timeout, args...)
+	}
+	wsl.Lock()
+	wsl.runAt = time.Time{}
+	wsl.Unlock()
+	ds = wslDistros()
+	if len(ds) != 1 || ds[0].Running {
+		t.Fatalf("fixture distro not stopped: %+v", ds)
+	}
+	stopped := wslAgent(wslKindOf("claude"), ds[0])
 	if v := stopped.Values(); v["model"] != "anth/claude-sonnet-5-5[1m]" || v["sonnet"] != "" {
 		t.Fatalf("stopped: not what was last seen: %v", v)
 	}

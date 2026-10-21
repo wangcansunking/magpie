@@ -36,7 +36,13 @@ function fixture() {
     if (url.pathname === "/api/state") return json(state);
     if (url.pathname === "/api/providers") return json(providers);
     if (url.pathname === "/api/groups") return json({ groups: [] });
-    if (url.pathname === "/api/login/usage") return json(Object.fromEntries(logins.map((l, i) => [l.user, { windows: Array.from({ length: i % 3 + 1 }, () => ({ label: "Weekly", used: 10, limit: 100 })) }])));
+    if (url.pathname === "/api/login/usage") {
+      if (f.holdUsage) {
+        f.holdUsage = false;
+        await new Promise(resolve => { f.releaseUsage = resolve; f.usageAsked.resolve(); });
+      }
+      return json(Object.fromEntries(logins.map((l, i) => [l.user, { windows: Array.from({ length: i % 3 + 1 }, () => ({ label: "Weekly", used: 10, limit: 100 })) }])));
+    }
     if (request.method() === "POST" && url.pathname.startsWith("/api/")) {
       const body = request.postDataJSON();
       f.posted.push({ action: url.pathname, body });
@@ -67,9 +73,33 @@ function fixture() {
 const rows = page => page.locator(".accts [data-account-id]");
 const ids = page => rows(page).evaluateAll(rs => rs.map(r => r.dataset.accountId));
 const settled = page => page.waitForFunction(() => !accountArranging && !accountSaving);
-async function open(page, id) {
+async function accountsDrawn(page) {
+  await rows(page).first().waitFor();
+  // Account rows appear before their allowance read. Its finally redraws
+  // the editor, so measuring the first rows can return a detached box.
+  await page.waitForFunction(() => {
+    const a = providers?.providers.find(p => p.id === editing)?.account?.agent;
+    return !a || (loginUsage[a]?.at && !loginUsage[a].loading);
+  });
+}
+async function open(page, id, heldUsage) {
   await page.goto(`http://magpie.test/?view=providers&edit=${id}`);
   await rows(page).first().waitFor();
+  if (heldUsage) {
+    let deadline;
+    try {
+      await Promise.race([heldUsage.usageAsked.promise, new Promise((_, reject) => {
+        deadline = setTimeout(() => reject(new Error("allowance read was not requested")), 5000);
+      })]);
+    } finally { clearTimeout(deadline); }
+    const early = await rows(page).first().locator(".n").elementHandle();
+    assert(await early.boundingBox(), "the provisional name is visible before the usage reply");
+    heldUsage.releaseUsage();
+    await accountsDrawn(page);
+    assert.equal(await early.evaluate(e => e.isConnected), false, "usage completion replaced the provisional name");
+    await early.dispose();
+  }
+  await accountsDrawn(page);
 }
 async function point(row) {
   await row.scrollIntoViewIfNeeded();
@@ -100,9 +130,10 @@ async function checkFirst(page, f, id) {
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
   test(`${engine}: account dragging uses the routing order in every mode`, { timeout: 90000 }, async t => {
     const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
-    t.after(() => browser.close());
+    const f = fixture();
+    t.after(async () => { f.releaseUsage?.(); await browser.close(); });
     const context = await browser.newContext({ viewport: { width: 1000, height: 850 }, reducedMotion: "reduce", hasTouch: true });
-    const page = await context.newPage(), f = fixture(), errors = [];
+    const page = await context.newPage(), errors = [];
     page.setDefaultTimeout(5000);
     page.on("pageerror", e => errors.push(e.message));
     await page.route("**/*", f.route);
@@ -123,7 +154,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.deepEqual(await ids(page), [before[1], before[0], ...before.slice(2)]);
         assert.equal(f.posted.filter(p => p.action === "/api/provider/arrange").length, count + 1);
         await checkFirst(page, f, id);
-        await page.reload(); await rows(page).first().waitFor();
+        await page.reload(); await accountsDrawn(page);
         await checkFirst(page, f, id);
         const wanted = (await ids(page))[1];
         await rows(page).nth(1).getByRole("button", { name: "Make first", exact: true }).click();
@@ -161,10 +192,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     await page.locator(".accts .rename").first().click();
     await page.locator(".rename-in").waitFor(); await page.keyboard.press("Escape");
     await page.evaluate(() => { providers.providers.find(p => p.id === "relay").keyList.length = 1; renderProviders(); });
-    assert.equal(await page.locator(".accts").evaluate(r => r.classList.contains("reorderable")), false);
+    assert.equal(await page.locator(".editor .accts").evaluate(r => r.classList.contains("reorderable")), false);
     // Account text selection must not turn into a drag.
-    await open(page, "antigravity");
+    f.holdUsage = true;
+    f.usageAsked = Promise.withResolvers();
+    await open(page, "antigravity", f);
     const name = await rows(page).first().locator(".n").boundingBox();
+    assert(name, "the name measured after the allowance redraw is visible");
     const prior = await ids(page), count = f.posted.length;
     await page.mouse.move(name.x + 2, name.y + name.height / 2); await page.mouse.down();
     await page.mouse.move(name.x + name.width - 2, name.y + name.height / 2, { steps: 10 }); await page.mouse.up();

@@ -19,6 +19,8 @@ const path = require("node:path");
 const { test } = require("node:test");
 const vm = require("node:vm");
 const { chromium, webkit } = require("playwright");
+const { watchSettingsReads, settingsDrawn } = require("./reader.cjs");
+const { watchReplies, repliesConsumed } = require("./lifecycle.cjs");
 
 const assets = process.env.MAGPIE_QUOTA_ASSETS || path.resolve(__dirname, "../assets");
 const H = 3600e3;
@@ -496,6 +498,8 @@ async function colorblindPage(browser, lang, data, colorblind) {
     }
     return base(route);
   });
+  await watchSettingsReads(page);
+  await watchReplies(page, ["/api/state", "/api/settings", "/api/usage", "/api/update", "/api/whatsnew"]);
   return { page, st, posts, errors };
 }
 
@@ -553,7 +557,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.ok(got.title.startsWith(w.solid), got.title);
       const plainEven = got.evens[0].dash;
 
+      await repliesConsumed(page, ["/api/update", "/api/whatsnew"]);
       await page.goto("http://magpie.test/?view=settings&tab=general");
+      await settingsDrawn(page);
       const row = page.locator("#colorblindRow");
       await row.waitFor();
       assert.equal(await row.locator(".name").innerText(), w.label);
@@ -566,7 +572,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(await page.locator("#view-settings").evaluate((v) => v.scrollTop), scroll0, "toggling colorblind mode never scrolls");
       await page.waitForFunction(() => document.documentElement.dataset.colorblind === "1");
 
-      // a reload takes it from boot.js
+      // a reload takes it from boot.js, after the save and startup's own
+      // asynchronous reads, not just the optimistic colour change.
+      await page.evaluate(() => prefsQueue);
+      await repliesConsumed(page, ["/api/update", "/api/whatsnew"]);
       await page.goto("http://magpie.test/?view=usage");
       await page.locator(codexCurve).first().waitFor();
       for (const theme of ["light", "dark"]) {
@@ -617,9 +626,21 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       // curve drawn already goes back to dots, solid lines and its tooltip
       await page.evaluate(() => { document.documentElement.dataset.theme = "light"; });
       // no state read from before the change may land after it
-      await page.waitForLoadState("networkidle");
+      await repliesConsumed(page, ["/api/state", "/api/update", "/api/whatsnew"]);
       st.colorblind = false;
-      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      await page.evaluate(() => {
+        const read = load;
+        load = function (...args) {
+          load = read; // load reads its own .done flag
+          const pending = read.apply(this, args);
+          if (args[0] === true) {
+            window.focusRead = { settled: false };
+            pending.then(() => { focusRead.settled = true; }, (error) => Object.assign(focusRead, { settled: true, error }));
+          }
+          return pending;
+        };
+        window.dispatchEvent(new Event("focus"));
+      });
       await page.waitForFunction(() => !document.documentElement.dataset.colorblind);
       // the tooltip follows the mode at once, before any redraw
       const now0 = await page.evaluate((sel) => ({ cb: document.documentElement.dataset.colorblind || "", title: document.querySelector(sel).closest(".quota-curve").title }), codexCurve);
@@ -637,9 +658,16 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(got.evens[0].dash, plainEven);
       assert.ok(got.title.startsWith(w.solid), `tooltip back to solid and dashed: ${got.title}`);
 
+      // Focus publishes colorblind mode before awaiting Usage and starting
+      // another Update read. Join that load and its downstream replies, not
+      // only the already-visible curve or an earlier completed Update.
+      await page.waitForFunction(() => window.focusRead?.settled);
+      await page.evaluate(() => { if (focusRead.error) throw focusRead.error; });
+      await repliesConsumed(page, ["/api/usage", "/api/update", "/api/whatsnew"]);
       // and Settings turns it off for good
       st.colorblind = true;
       await page.goto("http://magpie.test/?view=settings&tab=general");
+      await settingsDrawn(page);
       await row.waitFor();
       assert.equal(await page.evaluate(() => document.documentElement.dataset.colorblind), "1", "kept across reload via boot.js");
       assert.equal(await row.locator("#colorblindSegs .opt.on").innerText(), w.on);
@@ -647,6 +675,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       for (let i = 0; i < 50 && posts.at(-1)?.colorblind !== false; i++) await page.waitForTimeout(40);
       assert.equal(posts.at(-1)?.colorblind, false);
       await page.waitForFunction(() => !document.documentElement.dataset.colorblind);
+      await page.evaluate(() => prefsQueue);
+      await repliesConsumed(page, ["/api/update", "/api/whatsnew"]);
       assert.deepEqual(errors, []);
     });
   }

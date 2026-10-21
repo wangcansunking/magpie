@@ -187,8 +187,9 @@ func SetHome(t testing.TB, dir string) {
 
 // tools are the programs a test must never reach for real: the system
 // keychains (macOS' security, Linux's secret-tool), which hold the user's
-// sign-ins outside any home, and the agents' CLIs.
-var tools = []string{"security", "secret-tool", "claude", "codex", "cursor-agent", "devin", "grok", "kiro-cli"}
+// sign-ins outside any home, the agents' CLIs, and WSL, whose distros keep
+// their own homes regardless of the Windows test's HOME.
+var tools = []string{"security", "secret-tool", "claude", "codex", "cursor-agent", "devin", "grok", "kiro-cli", "wsl.exe"}
 
 // inertTools puts a failing stand-in for each of tools first on PATH, in
 // home/bin. Tests can still put their own fakes before it.
@@ -211,7 +212,9 @@ func inertTools(home string) error {
 // extension, so there each also gets a .bat, which comes before the user's
 // own codex.cmd further down PATH: without it the gateway's tests, which
 // make their stand-ins here, read the installed Codex's version (#1827,
-// EdwinDigital: TestCodexPoolSaysTheClientsVersion saw 0.162.0).
+// EdwinDigital: TestCodexPoolSaysTheClientsVersion saw 0.162.0). An exact
+// name such as wsl.exe resolves to the inert file itself: Windows refuses
+// its non-PE bytes rather than trying the real executable later on PATH.
 func StandIns(bin string, names []string) error {
 	for _, name := range names {
 		p := filepath.Join(bin, name)

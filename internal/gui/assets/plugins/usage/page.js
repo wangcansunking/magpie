@@ -203,7 +203,7 @@ function renderUsageLoading() {
     stats.append(tile);
   }
   $("#chart").hidden = true;
-  for (const id of ["usageAgents", "usageAgentsHid", "usageModels", "usageKeys"]) $("#" + id).hidden = true;
+  for (const id of ["usageAgents", "usageAgentsHid", "usageModels", "usageAccounts", "usageKeys"]) $("#" + id).hidden = true;
   // the allowances' head is renderQuotas' alone: the quotas it heads are
   // still there while the period loads (#809, Hu9956: 用量界面红框这行会延迟几秒才会出现)
   for (const h of $$("#view-usage .row-head:not(#quotaHead, .plugin-panel > .row-head)")) h.hidden = true;
@@ -220,7 +220,13 @@ function costHead(c, note, title) {
   cost.replaceChildren();
   cost.title = "";
   if (!c && !note) return;
-  if (c) cost.append(el("b", "", "≈" + c));
+  if (c) {
+    const sum = el("b");
+    // Some fonts and webviews ignore tabular-nums. Equal digit slots keep
+    // a changed figure from nudging the refresh controls beside the sum.
+    for (const ch of "≈" + c) sum.append(/\d/.test(ch) ? el("i", "cost-digit", ch) : document.createTextNode(ch));
+    cost.append(sum);
+  }
   cost.append(el("span", note ? "unpriced" : "", note || t("effective prices")));
   cost.title = title;
 }
@@ -590,15 +596,26 @@ async function countClientAs(client, as) {
 // puts it back: drawn at once, put back if the save fails. Its calls stay
 // in the ledger and in every total.
 async function hideUsageAgent(id, hide) {
-  const prev = state.settings || {};
+  const prev = state.settings || {}, wasOpen = usageHidOpen;
   const cur = (prev.usageAgentsHidden || []).filter((k) => k !== id);
   const agentsHidden = hide ? [...cur, id] : cur;
+  // Unhide replaces its row and inserts one above the hidden line. Hold
+  // that surviving control, not the tall list whose half-height would let
+  // the line move by a whole row when the page was at its top.
+  if (!hide && held?.v === $("#view-usage")) {
+    const i = held.chain.findIndex(([n]) => n === $("#usageAgentsHid .us-hidline"));
+    if (i >= 0) held.chain.unshift(...held.chain.splice(i, 1));
+  }
   state.settings = { ...prev, usageAgentsHidden: agentsHidden };
-  const again = () => {
+  const again = (rollback = false) => {
     if (!usage) return;
     renderUsage();
-    // the focus stays on the list: the row put back, else the hidden line
-    const to = hide ? $("#usageAgentsHid .us-hidline") : $(`#usageAgents .row.stat[data-id="${CSS.escape(id)}"] .us-more`);
+    // The focus follows the row put back, or the hidden line. A failed
+    // save puts it on the restored action so the reader can try again.
+    const hidden = (state.settings?.usageAgentsHidden || []).includes(id);
+    const to = hidden
+      ? (rollback ? $(`#usageAgentsHid .row.stat[data-id="${CSS.escape(id)}"] .us-unhide`) : $("#usageAgentsHid .us-hidline"))
+      : $(`#usageAgents .row.stat[data-id="${CSS.escape(id)}"] .us-more`);
     (to && !to.closest("[hidden]") ? to : null)?.focus({ preventScroll: true });
   };
   again();
@@ -607,7 +624,8 @@ async function hideUsageAgent(id, hide) {
     state.settings = { ...state.settings, usageAgentsHidden: s.usageAgentsHidden || [] };
   } catch (e) {
     state.settings = prev;
-    again();
+    usageHidOpen = wasOpen;
+    again(true);
     status(e.message, "err");
   }
 }

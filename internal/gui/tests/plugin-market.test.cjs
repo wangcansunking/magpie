@@ -116,6 +116,75 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
   test(engine + ": the Plugins tab", async (t) => {
     const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
     t.after(() => browser.close());
+    await t.test("a search response arriving during a card press keeps the click", async () => {
+      const context = await browser.newContext({ viewport: { width: 980, height: 820 }, reducedMotion: "reduce" });
+      const page = await context.newPage();
+      page.setDefaultTimeout(5000);
+      const asked = [], errors = [];
+      page.on("pageerror", (e) => errors.push(e.message));
+      let release, arrived;
+      const held = new Promise((r) => { release = r; });
+      const started = new Promise((r) => { arrived = r; });
+      const fixture = server("en", asked);
+      await page.route("**/*", async (route) => {
+        if (new URL(route.request().url()).pathname === "/api/plugins/search") { arrived(); await held; }
+        await fixture(route);
+      });
+      try {
+        await page.goto("http://magpie.test/?view=plugins");
+        await page.locator(".pm-card").first().waitFor();
+        await page.locator("#view-plugins .pm-find input").fill("copilot");
+        await started;
+        const card = page.locator('.pm-card[data-pkg="opencode-copilot-auth"] .pm-sum');
+        const pressed = await card.elementHandle(), box = await card.boundingBox();
+        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+        await page.mouse.down();
+        release();
+        await page.locator('.pm-card[data-pkg="opencode-copilot-proxy-auth"]').waitFor();
+        assert.equal(await pressed.evaluate((e) => e.isConnected), true, "the search answer must keep the pressed suggested card");
+        await page.mouse.up();
+        await page.locator("#modal .pm-detail .pm-md").waitFor();
+        assert.deepEqual(asked.filter(([k]) => k === "page"), [["page", "opencode-copilot-auth"]], "the original card opens once");
+        assert.deepEqual(errors, []);
+      } finally { release(); await context.close(); }
+    });
+    for (const target of [".pm-name b", ".pm-logo", ".pm-chip.kind", ".pm-act"]) await t.test("metadata arriving during a card press on " + target, async () => {
+      const context = await browser.newContext({ viewport: { width: 980, height: 820 }, reducedMotion: "reduce" });
+      const page = await context.newPage();
+      page.setDefaultTimeout(5000);
+      const asked = [], errors = [];
+      page.on("pageerror", (e) => errors.push(e.message));
+      let release, arrived;
+      const held = new Promise((r) => { release = r; }), started = new Promise((r) => { arrived = r; });
+      const fixture = server("en", asked);
+      await page.route("**/*", async (route) => {
+        if (new URL(route.request().url()).pathname === "/api/plugins/npm") {
+          arrived(); await held;
+          return route.fulfill({ json: { npm: { "@magpie-community/opencode-zed-auth": { version: "9.9.9", weekly: 999 } } } });
+        }
+        await fixture(route);
+      });
+      try {
+        await page.goto("http://magpie.test/?view=plugins");
+        await started;
+        const card = page.locator('.pm-card[data-pkg="@magpie-community/opencode-zed-auth"]');
+        const hit = card.locator(target), pressed = await hit.elementHandle(), box = await hit.boundingBox();
+        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+        await page.mouse.down();
+        release();
+        await card.locator(".pm-ver", { hasText: "9.9.9" }).waitFor();
+        assert.equal(await pressed.evaluate((e) => e.isConnected), true, "metadata preserves the pressed " + target);
+        await page.mouse.up();
+        if (target === ".pm-act") {
+          await page.waitForFunction(() => document.querySelector("#status").classList.contains("ok"));
+          assert.deepEqual(asked.filter(([k]) => k === "add"), [["add", { spec: "@magpie-community/opencode-zed-auth" }]]);
+        } else {
+          await page.locator("#modal .pm-detail .pm-md").waitFor();
+          assert.deepEqual(asked.filter(([k]) => k === "page"), [["page", "@magpie-community/opencode-zed-auth"]]);
+        }
+        assert.deepEqual(errors, []);
+      } finally { release(); await context.close(); }
+    });
     for (const lang of ["en", "zh"]) {
       await t.test(lang, async () => {
         const w = L[lang];

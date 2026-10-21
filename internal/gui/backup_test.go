@@ -27,13 +27,35 @@ func sandboxHome(t *testing.T) string {
 	t.Setenv("USERPROFILE", h)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(h, ".config"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(h, ".cache"))
+	t.Setenv("XDG_DATA_HOME", filepath.Join(h, ".local", "share"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join(h, ".local", "state"))
 	t.Setenv("PATH", "")
 	for _, v := range agentenv.Vars {
 		t.Setenv(v, "")
 	}
-	t.Setenv("APPDATA", "")
-	t.Setenv("LOCALAPPDATA", "")
+	// os.UserConfigDir requires APPDATA on Windows; empty is not a
+	// sandbox there. Both Windows roots belong to this test's home.
+	t.Setenv("APPDATA", filepath.Join(h, "AppData", "Roaming"))
+	t.Setenv("LOCALAPPDATA", filepath.Join(h, "AppData", "Local"))
 	return h
+}
+
+func TestSandboxHomeKeepsEveryFolderLocal(t *testing.T) {
+	home := sandboxHome(t)
+	for _, variable := range []string{"HOME", "USERPROFILE", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "APPDATA", "LOCALAPPDATA"} {
+		value := os.Getenv(variable)
+		rel, err := filepath.Rel(home, value)
+		if value == "" || !filepath.IsAbs(value) || err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			t.Errorf("%s = %q is not inside the test home", variable, value)
+		}
+	}
+	config, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal("test home has no OS config directory:", err)
+	}
+	if rel, err := filepath.Rel(home, config); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		t.Fatalf("OS config directory %q is outside the test home", config)
+	}
 }
 
 // The Settings page's Export and Import carry the library, and leave it

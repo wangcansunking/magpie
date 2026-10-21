@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -95,7 +96,7 @@ func isolatedTests(m *testing.M) (int, error) {
 		if err := os.Mkdir(bin, 0o755); err != nil {
 			return 1, err
 		}
-		if err := testenv.StandIns(bin, []string{"security", "secret-tool", "claude", "codex", "cursor-agent", "devin", "grok", "kiro-cli"}); err != nil {
+		if err := testenv.StandIns(bin, []string{"security", "secret-tool", "claude", "codex", "cursor-agent", "devin", "grok", "kiro-cli", "wsl.exe"}); err != nil {
 			return 1, err
 		}
 		defer testenv.RemovePrograms()
@@ -126,6 +127,21 @@ func isolatedTests(m *testing.M) (int, error) {
 func TestRunsAsAnIsolatedTestBinary(t *testing.T) {
 	if os.Getenv(testenv.Marker) == "" {
 		t.Fatalf("TestMain left %s unset", testenv.Marker)
+	}
+}
+
+// This package makes its own stand-ins instead of testenv.Isolate's. Keep
+// the exact WSL barrier too, without looking on the machine's real PATH.
+func TestWSLStandInInGatewaySandbox(t *testing.T) {
+	bin := os.Getenv(standInsEnv)
+	if bin == "" {
+		t.Fatal("TestMain left no stand-in directory")
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("NoDefaultCurrentDirectoryInExePath", "1")
+	want := filepath.Join(bin, "wsl.exe")
+	if got, err := exec.LookPath("wsl.exe"); err != nil || got != want {
+		t.Fatalf("wsl.exe resolved to %q (%v), want inert file %q", got, err, want)
 	}
 }
 

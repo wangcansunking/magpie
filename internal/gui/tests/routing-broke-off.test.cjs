@@ -11,6 +11,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const reader = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const now = new Date();
@@ -78,8 +79,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.route("**/*", serve(lang));
       t.after(async () => { await browser.close(); });
       await page.goto("http://magpie.test/?view=routing");
-      await page.locator(".rt-day").first().waitFor(); // the view is drawn
-      await page.locator(".rt-day:visible").nth(1).click(); // Live, then the day with the requests
+      const historical = page.locator("#view-routing .rt-days .rt-day").nth(1); // Live, then the fixture's day
+      await reader.reach(page, historical);
+      await historical.click();
       const first = page.locator(".rt-req").nth(1); // the broken-off one, under the newer noted 200
       await first.waitFor();
       // the row is bad, not a green dot that answered (the old rule said "ok": status 200)
@@ -87,6 +89,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert(cls.includes("bad"), `row class ${cls}`);
       assert(!cls.includes("ok") && !cls.includes("moved"), `row class ${cls}`);
       // the stat's click picks it, over the noted 200 that answers and is newer
+      await reader.reach(page, page.locator(".rt-errs"));
       await page.locator(".rt-errs").click();
       await page.waitForTimeout(300);
       assert.equal(await first.getAttribute("aria-pressed"), "true", "the errors stat picks a 200 with a note of its own, not the broken-off request");
@@ -116,8 +119,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.route("**/*", serve(lang));
       t.after(async () => { await browser.close(); });
       await page.goto("http://magpie.test/?view=routing");
-      await page.locator(".rt-day").first().waitFor(); // the view is drawn
-      await page.locator(".rt-day:visible").nth(1).click();
+      const historical = page.locator("#view-routing .rt-days .rt-day").nth(1);
+      await reader.reach(page, historical);
+      await historical.click();
       const first = page.locator(".rt-req").first(); // the noted 200, newer than the broken-off one
       await first.waitFor();
       const cls = await first.getAttribute("class");

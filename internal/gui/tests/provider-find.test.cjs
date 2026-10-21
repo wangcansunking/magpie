@@ -52,6 +52,8 @@ function fixture(lang) {
       providers.providers = order.map((id) => providers.providers.find((p) => p.id === id));
       return json(providers);
     }
+    // The desktop host's title-bar paint is not a provider change.
+    if (url.pathname === "/api/window/titlebar" && request.method() === "POST") return route.fulfill({ status: 204 });
     if (request.method() !== "GET") posted.push(url.pathname);
     if (url.pathname === "/api/providers") return json(providers);
     if (url.pathname === "/api/groups") return json({ groups: [] });
