@@ -102,7 +102,12 @@ func TestMoveToPlugin(t *testing.T) {
 	reset := func(ls ...savedLogin) {
 		t.Helper()
 		_ = plugin.SignOut(ctx, "fakeco", "")
-		os.Remove(migrationsPath())
+		// Use the same atomic write and memo invalidation as the state
+		// writer. A bare, unchecked removal can leave the preceding move
+		// visible while catalog readers still have the file open on Windows.
+		if err := writePrivate(migrationsPath(), []byte("{}\n")); err != nil {
+			t.Fatal(err)
+		}
 		loginsMu.Lock()
 		if err := writeLogins(ls); err != nil {
 			t.Fatal(err)

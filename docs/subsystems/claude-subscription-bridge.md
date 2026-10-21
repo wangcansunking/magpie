@@ -443,7 +443,9 @@ How many may run (`claudeRunsMost`):
   the limit is the least of MemTotal, the cgroup v2 `memory.max` and
   `memory.high` of magpie's cgroup and every one above it, and the cgroup v1
   `memory.limit_in_bytes` (`memLimit`). 512 MiB gives 2, 1 GiB 6, a 964 MiB
-  machine with no cgroup limit 5. It is read once per process.
+  machine with no cgroup limit 5. It is read once per process. The cgroup
+  ancestry uses Linux slash semantics (`path.Dir`), including when fixtures
+  exercise the parser on Windows; the walk terminates at `/`.
 - otherwise no bound: macOS, Windows, and a Linux whose limits can't be
   read. A limit not known is not a small one.
 
