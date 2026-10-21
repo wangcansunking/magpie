@@ -105,8 +105,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
             await head.locator(".lib-backups:not([disabled])").waitFor();
             await v.locator(".lib-body").first().waitFor({ state: "attached" }).catch((e) => { throw new Error(where + ": " + e.message); });
 
-            const got = await head.evaluate((h) => {
-              const b = h.querySelector(".lib-backups"), f = h.querySelector(".lib-more"), vw = h.closest(".view");
+            const got = await v.evaluate((vw) => {
+              // Library redraws its header after a reply. Resolve the header
+              // and its controls together inside the stable view.
+              const h = vw.querySelector(".lib-head");
+              const b = h.querySelector(".lib-backups"), f = h.querySelector(".lib-more");
               const r = b.getBoundingClientRect(), fr = f.getBoundingClientRect();
               const c = getComputedStyle(b);
               return {

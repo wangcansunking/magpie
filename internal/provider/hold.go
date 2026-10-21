@@ -64,6 +64,7 @@ func heldFreshLocked(look bool) {
 		if st := stampOf(path); st != held.roots[i] {
 			held.roots[i] = st
 			held.built = nil
+			held.gen++ // a build started before the external write cannot be published
 			filememo.Look(path)
 		}
 	}
@@ -118,8 +119,10 @@ func Hold() (release func()) {
 		if env := environSum(); env != held.env {
 			held.built, held.env = nil, env
 		}
-		heldFreshLocked(true)
 	}
+	// A streaming request may keep another hold open. Every new request
+	// still checks for changes made by another process before reusing it.
+	heldFreshLocked(true)
 	held.holds++
 	held.Unlock()
 	return sync.OnceFunc(func() {

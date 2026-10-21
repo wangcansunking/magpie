@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -129,6 +130,7 @@ func TestWANRejectsControlAliasesEncodedPathsAndRedirects(t *testing.T) {
 		"/", "/v1", "/v1/", "/api/hello", "/api/wan", "/api/providers", "/api/gateway/keys",
 		"/mcp/tool", SearchMCPPath, VisionMCPPath, ToolsMCPPath, claudeMCPPath + "wan-live-callback",
 		"/v1/magpie/quotas", "/v1/magpie/usage", "/v1/magpie/usage/requests", "/v1/magpie/route", "/v1/magpie/concurrency", "/v1/magpie/limit",
+		HeapPath, CPUPath,
 		provider.RemoteCardsPath, provider.RemoteRefreshPath, CodexPath, CodexPath + "/responses", CodexCatalogPath,
 		"/v1/systemone", "/v1/alpha/search", "/alpha/search", "/responses/compact", "/v1/responses/compact", "/messages/count_tokens",
 		"/v1beta/models/m:delete", "/v1beta/models/m", "/v1beta/models/:generateContent",
@@ -221,11 +223,25 @@ func TestWANIdentitySanitizedRemoteAndHeaderOnly(t *testing.T) {
 	fresh(t)
 	t.Setenv("MAGPIE_TRUST_PROXY", "1")
 	who, secret := newWANCaller(t, "Laptop")
+	var fetched atomic.Int32
+	private := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { fetched.Add(1) }))
+	defer private.Close()
 	var calls int
 	h := wanGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
-		if !reflect.DeepEqual(access.Caller(r.Context()), who) || local(r) || sharedWith(r) || privateFetchAllowed(withPrivateFetch(r.Context(), r)) {
+		if !reflect.DeepEqual(access.Caller(r.Context()), who) || local(r) || sharedWith(r) {
 			t.Error("WAN caller gained local privilege or lost identity")
+		}
+		fetch, err := http.NewRequestWithContext(r.Context(), "GET", private.URL, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := publicClient.Do(fetch)
+		if response != nil {
+			response.Body.Close()
+		}
+		if !errors.Is(err, errPrivateAddress) || fetched.Load() != 0 {
+			t.Error("WAN request reached a private download address", err)
 		}
 		if r.Header.Get("Authorization") != "Bearer "+Token || r.Header.Get("x-api-key") != Token || r.Header.Get("x-goog-api-key") != Token {
 			t.Error("credential was not sanitized")

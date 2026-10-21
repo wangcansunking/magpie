@@ -8,6 +8,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { watchReplies, repliesConsumed } = require("./lifecycle.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const models = () => [
@@ -78,6 +79,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const errors = [];
       page.on("pageerror", (e) => errors.push(e.message));
       const fx = fixture(lang);
+      await watchReplies(page, ["/api/agent-models/codex"]);
       await page.route("**/*", fx.serve);
       t.after(async () => {
         if (process.env.ARTIFACT_DIR) {
@@ -134,7 +136,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.waitForFunction(() => document.querySelector(".ag-chips .ag-hint")?.innerText.includes("24"));
       assert.equal(await hidden(), w.after);
       assert.equal((await chips())[1], "OpenAI 5");
-      await page.waitForTimeout(150);
+      await repliesConsumed(page, ["/api/agent-models/codex"]);
       assert.equal(fx.posts.length, 1);
       assert(fx.posts[0].includes("openai/o4-mini") && fx.posts[0].includes("openrouter/m5"), "the whole list goes");
       assert.equal(await mini.locator(".ck svg").count(), 0);
@@ -168,11 +170,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(await showAll.innerText(), w.showAll);
       const sent = fx.posts.length;
       await hideAll.click();
-      await page.waitForTimeout(150);
+      await repliesConsumed(page, ["/api/agent-models/codex"]);
       assert.equal(fx.posts.length, sent, "a first click changes nothing");
       assert.match(await hideAll.innerText(), w.armHide);
       await hideAll.click();
-      await page.waitForTimeout(150);
+      await repliesConsumed(page, ["/api/agent-models/codex"]);
       assert.equal(await hideAll.innerText(), w.hideAll);
       assert.equal(fx.posts.at(-1).length, 30);
       assert(!fx.posts.at(-1).includes("openai/gpt-5.5"));
@@ -182,11 +184,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
       // back to all shown, at a second click too
       await showAll.click();
-      await page.waitForTimeout(150);
+      await repliesConsumed(page, ["/api/agent-models/codex"]);
       assert.equal(await showAll.innerText(), w.armShow);
       assert.equal(await hidden(), w.one, "a first click changes nothing");
       await showAll.click();
-      await page.waitForTimeout(150);
+      await repliesConsumed(page, ["/api/agent-models/codex"]);
       assert.deepEqual(fx.posts.at(-1), []);
       assert.equal(await hidden(), w.all);
       assert(await showAll.isDisabled());
@@ -208,7 +210,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await hideAll.click();
       assert.match(await hideAll.innerText(), w.armHide);
       await pop.locator(".am-mr", { hasText: "Router model 7" }).click();
-      await page.waitForTimeout(150);
+      await repliesConsumed(page, ["/api/agent-models/codex"]);
       assert.equal(await rail.nth(3).locator(".c").innerText(), "23/24", "the rail counts what's shown");
       assert.equal(await hideAll.innerText(), w.hideAll, "a click in the list takes back the first one");
       assert.equal(fx.posts.length, before + 1, "only the row's own change");

@@ -10,7 +10,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
-const { reach } = require("./reader.cjs");
+const { reach, wheelTo } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 // Run the actual countdown between native down/up, not a DOM replacement
@@ -91,7 +91,7 @@ function liveRestFixture() {
     { ...a, who: "same@x · One", id: "workbuddy-ai", rest: r("seat-one") },
     { ...a, who: "same@x · Two", id: "workbuddy-ai@two", rest: r("seat-two") },
   ];
-  f.data = () => ({ mine: true, now: new Date().toISOString(), seq: f.seq, totals: {}, routes: [{ id: 1, seq: f.seq, time: new Date().toISOString(), agent: "codex", model: "group/g", order: f.seats, tries: [], done: true, status: 200 }] });
+  f.data = () => ({ mine: true, now: new Date().toISOString(), seq: f.seq, totals: {}, routes: [{ id: 1, seq: f.seq, time: new Date().toISOString(), agent: "codex", model: "group/g", provider: "workbuddy-ai", order: f.seats, tries: [], done: true, status: 200 }] });
   const base = serve("en", f.posts);
   f.route = async route => {
     const url = new URL(route.request().url());
@@ -139,6 +139,17 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     page.setDefaultTimeout(5000);
     const f = liveRestFixture(), errors = [];
     page.on("pageerror", e => errors.push(e.message));
+    // This fixture is magpie web: api("open") uses the browser's window,
+    // not the desktop host's /api/open. Observe it without visiting the URL.
+    await page.exposeFunction("fixtureOpen", url => { f.opens.push({ url }); });
+    await page.addInitScript(() => {
+      window.fixtureOpening = null;
+      window.open = (url, target, features) => {
+        window.fixtureOpenOptions = { target, features };
+        window.fixtureOpening = window.fixtureOpen(url);
+        return null;
+      };
+    });
     await watchCountdown(page);
     await page.route("**/*", f.route);
     await page.goto("http://magpie.test/?view=routing");
@@ -197,6 +208,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const connected = await old.evaluate(e => e.isConnected);
       await page.mouse.up();
       await page.evaluate(() => new Promise(resolve => requestAnimationFrame(resolve)));
+      await page.evaluate(() => window.fixtureOpening);
       assert.deepEqual([f.posts.length, f.opens.length], before, "the old press activated no successor");
       assert.equal(connected, false, "a changed target cancels the old press");
       await old.dispose();
@@ -221,10 +233,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       f.seats[0].rest = { why: "verify", key: "seat-two-new", until: rest.until, link: "https://verify.invalid/one" };
     });
     await changeUnderPress(two.locator(".fix button").first(), () => { f.seats[0].rest.link = "https://verify.invalid/two"; });
-    const opening = page.waitForResponse(r => new URL(r.url()).pathname === "/api/open");
     await two.locator(".fix button").first().click();
-    await opening;
+    await page.waitForFunction(() => window.fixtureOpening !== null);
+    await page.evaluate(() => window.fixtureOpening);
     assert.deepEqual(f.opens, [{ url: "https://verify.invalid/two" }]);
+    assert.deepEqual(await page.evaluate(() => window.fixtureOpenOptions), { target: "_blank", features: "noopener" });
 
     // A late failure belongs to the removed old action, not its successor.
     f.hold = true;
@@ -337,11 +350,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // pointer, not the footer
         // Wheel the view, not x=200 (the sidebar in a wide window), and
         // observe each delivered scroll before deciding whether to wheel again.
-        await reach(page, go);
-        assert(await go.evaluate((e) => { const r = e.getBoundingClientRect(); return e.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)); }), "the button can't be reached");
-        const at = await go.boundingBox();
-        await page.mouse.move(at.x + at.width / 2, at.y + at.height / 2);
+        // Keep the native press away from the footer's changing status
+        // line; the countdown test concerns the retained action itself.
+        await wheelTo(page, go, 450);
         const pressed = await go.elementHandle();
+        // WebKit's protocol box can be offset after scrolling. The actual
+        // native click below must activate this node across the countdown.
+        const at = await pressed.evaluate(e => { const r = e.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; });
+        await page.mouse.move(at.x, at.y);
         await page.mouse.down();
         const tick = await pressed.evaluate(e => {
           const row = e.closest(".rt-act"), fix = e.parentElement, before = row.querySelector(".st").textContent;

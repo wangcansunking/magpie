@@ -111,6 +111,13 @@ func Isolate() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Agent overrides can also name shared folders (XDG_STATE_HOME).
+	// Clear the inherited values before assigning the sandbox's folders.
+	for _, k := range append(slices.Clone(agentenv.Vars), agentenv.ClaudeProviders...) {
+		if err := os.Unsetenv(k); err != nil {
+			return "", err
+		}
+	}
 	for k, v := range map[string]string{
 		"HOME": home, "USERPROFILE": home,
 		"XDG_CONFIG_HOME": filepath.Join(home, ".config"),
@@ -122,11 +129,6 @@ func Isolate() (string, error) {
 		Marker:            home,
 	} {
 		if err := os.Setenv(k, v); err != nil {
-			return "", err
-		}
-	}
-	for _, k := range append(slices.Clone(agentenv.Vars), agentenv.ClaudeProviders...) {
-		if err := os.Unsetenv(k); err != nil {
 			return "", err
 		}
 	}

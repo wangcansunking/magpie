@@ -23,6 +23,11 @@ func (folderOnly) OpenFolder(string) error { return nil }
 func sandboxHome(t *testing.T) string {
 	t.Helper()
 	h := t.TempDir()
+	// Clear agent overrides first: some are also shared folder variables
+	// (XDG_STATE_HOME), which must then point into this test's home.
+	for _, v := range agentenv.Vars {
+		t.Setenv(v, "")
+	}
 	t.Setenv("HOME", h)
 	t.Setenv("USERPROFILE", h)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(h, ".config"))
@@ -30,9 +35,6 @@ func sandboxHome(t *testing.T) string {
 	t.Setenv("XDG_DATA_HOME", filepath.Join(h, ".local", "share"))
 	t.Setenv("XDG_STATE_HOME", filepath.Join(h, ".local", "state"))
 	t.Setenv("PATH", "")
-	for _, v := range agentenv.Vars {
-		t.Setenv(v, "")
-	}
 	// os.UserConfigDir requires APPDATA on Windows; empty is not a
 	// sandbox there. Both Windows roots belong to this test's home.
 	t.Setenv("APPDATA", filepath.Join(h, "AppData", "Roaming"))

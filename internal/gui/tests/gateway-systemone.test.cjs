@@ -77,7 +77,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.addInitScript((os) => localStorage.setItem("magpie.snipOS", os), shellOS);
         await page.goto("http://magpie.test/?view=gateway&lang=curl");
         await page.locator("#gwModels .row.model").first().waitFor();
-        assert(await page.getByText(w.five).first().isVisible(), "the head counts five APIs");
+        await page.getByText(w.five).first().waitFor({ state: "visible" });
         const connect = page.locator("#connect");
         const modelCode = () => connect.locator(".val").nth(2).locator("code").textContent();
         const snippet = () => connect.locator("pre.snip").textContent();

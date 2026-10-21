@@ -12,10 +12,11 @@ replies are in [Gateway middleware](gateway-middleware.md). Subscriptions
 served by a plugin are in [Provider and plugin ownership](provider-plugins.md).
 The opt-in public listener and WAN-only key boundary are documented in
 [WAN gateway](wan-gateway.md); they reuse inference handlers without
-publishing the gateway's diagnostics, callbacks or MCP tools. Neither ingress
-adds a process-global provider or file-read hold for the request's lifetime:
-a stream must not make a later request reuse a provider switched off by
-another process (`TestExternalProviderRevocationDuringStream`). After a WAN
+publishing the gateway's diagnostics, callbacks or MCP tools. Both ingress
+paths hold catalog and file reads for lookup reuse. Each new hold checks the
+providers' and settings' file stamps even while an older stream remains
+active (`TestExternalProviderRevocationDuringStream`); reuse and invalidation
+are described in [Providers and accounts](providers-accounts.md). After a WAN
 key authenticates, admission calls `provider.Changed` (including
 `filememo.Forget`) before downstream policy and provider reads. This drops
 snapshots held by an overlapping GUI request so an external provider change
@@ -23,8 +24,7 @@ or unreadable provider file from before admission is not hidden by that
 hold. Each authenticated WAN request can therefore trigger fresh catalog
 builds and file reads, and may invalidate concurrent readers' work. It does not provide a
 request-wide snapshot, cancel an admitted stream, or bind its later lookups
-to immutable credentials. Ordinary ingress and preexisting GUI holds are
-unchanged.
+to immutable credentials.
 
 WorkBuddy and CodeBuddy Code's `X-Conversation-ID` is a native session header
 in `sessionHeaders` (`sessionOf`, `nativeSessionOf`, `conversationID` in

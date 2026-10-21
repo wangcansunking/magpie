@@ -1,21 +1,6 @@
 magpie.strings({
   zh: {
-    "WAN SDK could not create the tunnel": "WAN SDK 无法创建隧道",
-    "WAN SDK could not read the tunnel": "WAN SDK 无法读取隧道",
-    "WAN SDK could not configure the tunnel port": "WAN SDK 无法配置隧道端口",
-    "WAN service returned an unexpected tunnel identity": "WAN 服务返回了不符合预期的隧道标识",
-    "WAN service did not confirm the required HTTP port options": "WAN 服务未确认所需的 HTTP 端口选项",
-    "WAN service did not return the required hosting credential": "WAN 服务未返回所需的托管凭据",
-    "WAN service redirected outside the allowed management hosts": "WAN 服务重定向到了允许范围外的管理主机",
 
-    "WAN service rejected the tunnel request (HTTP 400)": "WAN 服务拒绝了隧道请求（HTTP 400）",
-    "WAN tunnel identity conflicts with the service (HTTP 409)": "WAN 隧道标识与服务冲突（HTTP 409）",
-    "WAN service rate limit reached (HTTP 429); try later": "WAN 服务达到请求频率限制（HTTP 429）；请稍后重试",
-    "WAN tunnel service is temporarily unavailable (HTTP 5xx)": "WAN 隧道服务暂时不可用（HTTP 5xx）",
-    "WAN service connection failed; check DNS, network and proxy settings": "WAN 服务连接失败；请检查 DNS、网络和代理设置",
-    "WAN service TLS verification failed; check trusted certificates": "WAN 服务 TLS 验证失败；请检查受信任证书",
-    "WAN service request timed out; check network and proxy settings": "WAN 服务请求超时；请检查网络和代理设置",
-    "WAN SDK runtime operation failed before a valid service result": "WAN SDK 运行操作失败，尚未获得有效服务结果",
 
     "Connect your clients from anywhere.": "随时随地连接你的客户端。",
     "Connection details": "连接详情",
@@ -68,22 +53,7 @@ magpie.strings({
     "Disabling, rotating or removing a key takes effect on the next request. Streams already started may finish. Stop ends WAN access and its active requests.": "停用、轮换或删除密钥从下一次请求起生效。已开始的流可能继续完成。停止 WAN 会关闭访问并结束正在处理的请求。"
   },
   "zh-TW": {
-    "WAN SDK could not create the tunnel": "WAN SDK 無法建立通道",
-    "WAN SDK could not read the tunnel": "WAN SDK 無法讀取通道",
-    "WAN SDK could not configure the tunnel port": "WAN SDK 無法設定通道連接埠",
-    "WAN service returned an unexpected tunnel identity": "WAN 服務傳回了不符合預期的通道識別碼",
-    "WAN service did not confirm the required HTTP port options": "WAN 服務未確認所需的 HTTP 連接埠選項",
-    "WAN service did not return the required hosting credential": "WAN 服務未傳回所需的託管憑證",
-    "WAN service redirected outside the allowed management hosts": "WAN 服務重新導向至允許範圍外的管理主機",
 
-    "WAN service rejected the tunnel request (HTTP 400)": "WAN 服務拒絕了通道請求（HTTP 400）",
-    "WAN tunnel identity conflicts with the service (HTTP 409)": "WAN 通道識別碼與服務衝突（HTTP 409）",
-    "WAN service rate limit reached (HTTP 429); try later": "WAN 服務達到請求頻率限制（HTTP 429）；請稍後重試",
-    "WAN tunnel service is temporarily unavailable (HTTP 5xx)": "WAN 通道服務暫時無法使用（HTTP 5xx）",
-    "WAN service connection failed; check DNS, network and proxy settings": "WAN 服務連線失敗；請檢查 DNS、網路和代理設定",
-    "WAN service TLS verification failed; check trusted certificates": "WAN 服務 TLS 驗證失敗；請檢查信任憑證",
-    "WAN service request timed out; check network and proxy settings": "WAN 服務請求逾時；請檢查網路和代理設定",
-    "WAN SDK runtime operation failed before a valid service result": "WAN SDK 執行操作失敗，尚未取得有效服務結果",
 
     "Connect your clients from anywhere.": "隨時隨地連接你的用戶端。",
     "Connection details": "連線詳情",
@@ -136,22 +106,7 @@ magpie.strings({
     "Disabling, rotating or removing a key takes effect on the next request. Streams already started may finish. Stop ends WAN access and its active requests.": "停用、輪替或刪除金鑰從下一次請求起生效。已開始的串流可能繼續完成。停止 WAN 會關閉存取並結束正在處理的請求。"
   },
   ja: {
-    "WAN SDK could not create the tunnel": "WAN SDK がトンネルを作成できませんでした",
-    "WAN SDK could not read the tunnel": "WAN SDK がトンネルを読み取れませんでした",
-    "WAN SDK could not configure the tunnel port": "WAN SDK がトンネルポートを設定できませんでした",
-    "WAN service returned an unexpected tunnel identity": "WAN サービスが予期しないトンネル識別子を返しました",
-    "WAN service did not confirm the required HTTP port options": "WAN サービスが必要な HTTP ポート設定を確認できませんでした",
-    "WAN service did not return the required hosting credential": "WAN サービスが必要なホスティング認証情報を返しませんでした",
-    "WAN service redirected outside the allowed management hosts": "WAN サービスが許可された管理ホスト以外へリダイレクトしました",
 
-    "WAN service rejected the tunnel request (HTTP 400)": "WAN サービスがトンネル要求を拒否しました（HTTP 400）",
-    "WAN tunnel identity conflicts with the service (HTTP 409)": "WAN トンネルの識別子がサービスと競合しています（HTTP 409）",
-    "WAN service rate limit reached (HTTP 429); try later": "WAN サービスのレート制限に達しました（HTTP 429）。後で再試行してください",
-    "WAN tunnel service is temporarily unavailable (HTTP 5xx)": "WAN トンネルサービスは一時的に利用できません（HTTP 5xx）",
-    "WAN service connection failed; check DNS, network and proxy settings": "WAN サービスに接続できません。DNS、ネットワーク、プロキシ設定を確認してください",
-    "WAN service TLS verification failed; check trusted certificates": "WAN サービスの TLS 検証に失敗しました。信頼された証明書を確認してください",
-    "WAN service request timed out; check network and proxy settings": "WAN サービスへの要求がタイムアウトしました。ネットワークとプロキシ設定を確認してください",
-    "WAN SDK runtime operation failed before a valid service result": "有効なサービス応答を得る前に WAN SDK の実行に失敗しました",
 
     "Connect your clients from anywhere.": "どこからでもクライアントを接続できます。",
     "Connection details": "接続の詳細",
@@ -204,22 +159,7 @@ magpie.strings({
     "Disabling, rotating or removing a key takes effect on the next request. Streams already started may finish. Stop ends WAN access and its active requests.": "キーの無効化・更新・削除は次のリクエストから有効です。開始済みのストリームは完了する場合があります。WAN を停止するとアクセスと処理中のリクエストを終了します。"
   },
   de: {
-    "WAN SDK could not create the tunnel": "Das WAN-SDK konnte den Tunnel nicht erstellen",
-    "WAN SDK could not read the tunnel": "Das WAN-SDK konnte den Tunnel nicht lesen",
-    "WAN SDK could not configure the tunnel port": "Das WAN-SDK konnte den Tunnelport nicht konfigurieren",
-    "WAN service returned an unexpected tunnel identity": "Der WAN-Dienst hat eine unerwartete Tunnelkennung zurückgegeben",
-    "WAN service did not confirm the required HTTP port options": "Der WAN-Dienst hat die erforderlichen HTTP-Portoptionen nicht bestätigt",
-    "WAN service did not return the required hosting credential": "Der WAN-Dienst hat die erforderlichen Hosting-Zugangsdaten nicht zurückgegeben",
-    "WAN service redirected outside the allowed management hosts": "Der WAN-Dienst hat auf einen nicht erlaubten Verwaltungshost umgeleitet",
 
-    "WAN service rejected the tunnel request (HTTP 400)": "Der WAN-Dienst hat die Tunnelanfrage abgelehnt (HTTP 400)",
-    "WAN tunnel identity conflicts with the service (HTTP 409)": "Die WAN-Tunnelkennung steht im Konflikt mit dem Dienst (HTTP 409)",
-    "WAN service rate limit reached (HTTP 429); try later": "Anfragelimit des WAN-Dienstes erreicht (HTTP 429); später erneut versuchen",
-    "WAN tunnel service is temporarily unavailable (HTTP 5xx)": "Der WAN-Tunneldienst ist vorübergehend nicht verfügbar (HTTP 5xx)",
-    "WAN service connection failed; check DNS, network and proxy settings": "Verbindung zum WAN-Dienst fehlgeschlagen; DNS, Netzwerk und Proxy-Einstellungen prüfen",
-    "WAN service TLS verification failed; check trusted certificates": "TLS-Prüfung des WAN-Dienstes fehlgeschlagen; vertrauenswürdige Zertifikate prüfen",
-    "WAN service request timed out; check network and proxy settings": "Zeitüberschreitung beim WAN-Dienst; Netzwerk und Proxy-Einstellungen prüfen",
-    "WAN SDK runtime operation failed before a valid service result": "WAN-SDK-Laufzeitfehler vor einem gültigen Dienstergebnis",
 
     "Connect your clients from anywhere.": "Verbinde deine Clients von überall.",
     "Connection details": "Verbindungsdetails",

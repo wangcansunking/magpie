@@ -59,6 +59,11 @@ func TestIsolate(t *testing.T) {
 			t.Errorf("%q (%v) is outside %q", p, err, home)
 		}
 	}
+	for _, k := range folderVars {
+		if p := os.Getenv(k); p == "" || !within(p, home) {
+			t.Errorf("%s is %q, not inside the test home %q", k, p, home)
+		}
+	}
 	if _, ok := os.LookupEnv("CODEX_HOME"); ok {
 		t.Error("CODEX_HOME is still set")
 	}

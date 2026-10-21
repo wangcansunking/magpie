@@ -15,6 +15,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { reach } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const curve = (lo, hi, best) => {
@@ -237,13 +238,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const row = page.locator(".ctx-tune-row").nth(0);
         await row.locator(".ctx-tune-pick").waitFor();
         await page.locator(".ctx-none").waitFor(); // the history has answered: the pane is its full length
-        // the reader scrolls to the picker, as a wheel does
-        await page.mouse.move(width / 2, 300);
-        for (let i = 0; i < 20 && (await row.locator(".ctx-tune-pick").boundingBox()).y > height * 0.6; i++) {
-          await page.mouse.wheel(0, 120);
-          await page.waitForTimeout(60);
-        }
-        await page.waitForTimeout(200);
+        // The pane can redraw while its history arrives. Re-query the
+        // picker on each wheel observation instead of keeping a removed box.
+        await reach(page, row.locator(".ctx-tune-pick"));
         assert.equal(await page.locator("select").count(), 0, "no native select");
         const y = await page.evaluate(() => document.querySelector("#view-usage").scrollTop + scrollY);
         await row.locator(".ctx-tune-pick").click();
@@ -266,6 +263,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // picker ticks 250K
         assert.match(await page.locator(".ctx-tune-row").nth(0).locator(".ctx-tune-val.now b").innerText(), /250K/);
         assert.equal(await page.locator(".ctx-tune-row").nth(0).locator("button.primary").count(), 1);
+        await reach(page, row.locator(".ctx-tune-pick"));
         await page.locator(".ctx-tune-row").nth(0).locator(".ctx-tune-pick").click();
         await menu.waitFor();
         assert.match(await item("250K").getAttribute("class"), /\bon\b/);

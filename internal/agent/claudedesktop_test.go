@@ -27,14 +27,16 @@ func desktopSandbox(t *testing.T) (string, desktopPaths) {
 	t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
-	p := desktopPathsOf(desktopDirs(runtime.GOOS, home, os.Getenv))
+	// Windows keeps the signed-in app's config in Data (Roaming), while
+	// deployment mode and Claude-3p live in Local. Use the runtime's paths.
+	p := desktopSets(runtime.GOOS, home, os.Getenv)[0]
 	return home, p
 }
 
 // desktopTree is every file (with its bytes) and folder under Desktop's two.
 func desktopTree(t *testing.T, p desktopPaths) map[string]string {
 	out := map[string]string{}
-	for _, root := range []string{p.dir, p.dir3p} {
+	for _, root := range []string{p.dir, p.dir3p, filepath.Dir(p.app)} {
 		filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return nil
