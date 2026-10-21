@@ -205,7 +205,7 @@ async function actualV1(t, providedPort, exercise) {
     assert.equal(event.isIncoming, false, 'released V1 event does not describe inbound as true');
     assert.equal(event.cancellation, undefined, 'helper lifetime must supply cancellation for V1');
     if (exercise) {
-        await exercise(remote, { abort, host, forwarding });
+        await exercise(remote, { abort, host, forwarding, port });
     } else {
         const payload = Buffer.from('actual released SDK manual stream');
         const echoed = collect(remote, payload.length);
@@ -397,4 +397,62 @@ test('real service omits false inspection while unsafe port settings stay refuse
         assert.throws(() => validatePortOptions({...port, options}, undefined));
     }
     assert.throws(() => validatePortOptions(port, null));
+});
+
+
+test('renewal replaces the real SDK host token only after pinned metadata validates', async t => {
+    const { renewHostCredentials } = require('./host.cjs');
+    const target = { version: 2, id: 'offline-renewal', clusterId: 'use', port: 12345 };
+    const endpoint = 'https://offline-renewal-12345.use.devtunnels.ms';
+    const good = () => ({ tunnelId:target.id, clusterId:target.clusterId,
+        accessTokens:{host:'new-host-access'}, accessControl:{entries:[]},
+        ports:[{portNumber:target.port,protocol:'http',portForwardingUris:[endpoint],
+            options:{isHostHeaderUnchanged:true,isOriginHeaderUnchanged:true,requestTimeoutSeconds:0},
+            accessControl:{entries:[{type:'Anonymous',subjects:[],scopes:['connect']}]}}] });
+    let metadata = good();
+    const management = { getTunnel:async (query,options) => {
+        assert.deepEqual(query,{tunnelId:target.id,clusterId:target.clusterId});
+        assert.equal(options.includeAccessControl,true);
+        assert.deepEqual(options.tokenScopes,['host']);
+        return metadata;
+    }, reportEvent:()=>{}, deleteTunnelEndpoints:async()=>true };
+    const host = new PortHost(management,target.port,()=>true);
+    t.after(()=>host.dispose());
+    const result = await renewHostCredentials(management,host,target,()=>{},endpoint);
+    assert.equal(host.tunnel,result);
+    assert.equal(host.accessToken,'new-host-access','the pinned SDK setter must receive the new host token');
+    const kept = host.tunnel;
+    for(const mutate of [
+        x=>{x.tunnelId='different-tunnel';}, x=>{x.clusterId='usw2';},
+        x=>{x.ports.push({...x.ports[0],portNumber:12346});},
+        x=>{x.ports[0].options.isInspectionEnabled=true;},
+        x=>{x.ports[0].accessControl.entries[0].scopes=['host'];},
+        x=>{x.accessTokens={};}, x=>{x.ports[0].portForwardingUris=['https://different-12345.use.devtunnels.ms'];},
+    ]) {
+        metadata=good();mutate(metadata);
+        await assert.rejects(()=>renewHostCredentials(management,host,target,()=>{},endpoint));
+        assert.equal(host.tunnel,kept,'a refused refresh cannot replace the live host');
+    }
+    metadata=good();
+    await assert.rejects(()=>renewHostCredentials(management,host,target,()=>{throw Error('stopped')},endpoint),/stopped/);
+    assert.equal(host.tunnel,kept);
+});
+
+
+test('actual pinned SDK V1 keeps the same stream connected through host credential renewal', { timeout: 20000 }, async t => {
+    const { renewHostCredentials } = require('./host.cjs');
+    await actualV1(t, undefined, async (remote, { host, port }) => {
+        const echo = async text => {
+            const bytes=Buffer.from(text), received=collect(remote,bytes.length);
+            remote.write(bytes);assert.deepEqual(await received,bytes);
+        };
+        await echo('before renewal');
+        const endpoint='https://offline-contract-fixture-'+port+'.use.devtunnels.ms';
+        const current={tunnelId:'offline-contract-fixture',clusterId:'use',accessTokens:{host:'renewed-host-access'},accessControl:{entries:[]},
+            ports:[{portNumber:port,protocol:'http',portForwardingUris:[endpoint],options:{isHostHeaderUnchanged:true,isOriginHeaderUnchanged:true,requestTimeoutSeconds:0},accessControl:{entries:[{type:'Anonymous',subjects:[],scopes:['connect']}]}}]};
+        await renewHostCredentials({getTunnel:async()=>current},host,{version:2,id:current.tunnelId,clusterId:'use',port},()=>{},endpoint);
+        assert.equal(host.accessToken,'renewed-host-access');
+        assert.equal(host.connectionStatus,sdk.ConnectionStatus.Connected);
+        await echo('after renewal, on the same forwarded stream');
+    });
 });

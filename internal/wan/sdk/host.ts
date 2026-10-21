@@ -47,6 +47,8 @@ class Failure extends Error {
 let phase: Phase = 'new';
 let generation = '';
 let token = '';
+let credentialRevision = 0;
+let credentialUpdating = false;
 let ownedPort = 0;
 let preparedEndpoint = '';
 let config: Config | undefined;
@@ -168,17 +170,17 @@ function parseLine(data: Buffer): Record<string, any> {
     return result;
 }
 
-function identity(value: Tunnel): Config {
+function identity(value: Tunnel, portNumber = ownedPort): Config {
     if (!object(value) || typeof value.tunnelId !== 'string' || !idPattern.test(value.tunnelId) ||
         typeof value.clusterId !== 'string' || !clusterPattern.test(value.clusterId)) throw new Failure('identity');
-    return { version: 2, id: value.tunnelId, clusterId: value.clusterId, port: ownedPort };
+    return { version: 2, id: value.tunnelId, clusterId: value.clusterId, port: portNumber };
 }
 function sameIdentity(value: Tunnel): void {
     const found = identity(value);
     if (!config || found.id !== config.id || found.clusterId !== config.clusterId) throw new Failure('identity');
 }
-function onePort(value: Tunnel): TunnelPort {
-    if (!Array.isArray(value.ports) || value.ports.length !== 1 || !object(value.ports[0]) || value.ports[0].portNumber !== ownedPort) {
+function onePort(value: Tunnel, portNumber = ownedPort): TunnelPort {
+    if (!Array.isArray(value.ports) || value.ports.length !== 1 || !object(value.ports[0]) || value.ports[0].portNumber !== portNumber) {
         throw new Failure('ports');
     }
     return value.ports[0];
@@ -192,15 +194,15 @@ function safeAnonymousACL(value: any): void {
             entry.scopes.some((scope: unknown) => scope !== TunnelAccessScopes.Connect)) throw new Failure('ports');
     }
 }
-function endpoint(value: Tunnel, required: boolean): string {
-    const port = onePort(value);
+function endpoint(value: Tunnel, required: boolean, portNumber = ownedPort): string {
+    const port = onePort(value, portNumber);
     const forwarding = port.portForwardingUris;
     if (forwarding !== undefined && (!Array.isArray(forwarding) || forwarding.length > 16)) throw new Failure('host');
     const uris: unknown[] = [...(forwarding || [])];
     if (Array.isArray(value.endpoints)) {
         if (value.endpoints.length > 16) throw new Failure('host');
         for (const entry of value.endpoints) {
-            if (object(entry) && typeof entry.portUriFormat === 'string') uris.push(entry.portUriFormat.replace('{port}', String(ownedPort)));
+            if (object(entry) && typeof entry.portUriFormat === 'string') uris.push(entry.portUriFormat.replace('{port}', String(portNumber)));
         }
     }
     if (uris.length === 0) {
@@ -217,10 +219,10 @@ function endpoint(value: Tunnel, required: boolean): string {
         if (labels.length !== 4 || labels[2] !== 'devtunnels' || labels[3] !== 'ms' || !/^[a-z0-9]{1,30}$/.test(labels[1])) continue;
         let name = labels[0];
         if (url.port) {
-            if (url.port !== String(ownedPort)) continue;
+            if (url.port !== String(portNumber)) continue;
         } else {
-            if (!name.endsWith('-' + ownedPort)) continue;
-            name = name.slice(0, -(String(ownedPort).length + 1));
+            if (!name.endsWith('-' + portNumber)) continue;
+            name = name.slice(0, -(String(portNumber).length + 1));
         }
         if (!/^[a-z0-9](?:[a-z0-9-]{0,58}[a-z0-9])?$/.test(name)) continue;
         return url.origin;
@@ -435,6 +437,38 @@ export class PortHost extends TunnelRelayTunnelHost {
 export const sdkFixture = { ...require('@microsoft/dev-tunnels-ssh'), ...require('@microsoft/dev-tunnels-ssh-tcp'),
     TunnelRelayTunnelHost, TunnelProtocol, TunnelAccessScopes, ConnectionStatus, ManagementClient, ManagementApiVersions, HttpsProxyAgent, managementOptions };
 export const protocolFixture = { parseLine, endpoint, codeFor };
+// Replacing metadata updates the SDK's host access token without reconnecting
+// existing streams. Revalidate the same boundary as initial preparation.
+export async function renewHostCredentials(management: any, activeHost: any, target: Config, check: () => void, expectedEndpoint: string): Promise<Tunnel> {
+    const current: Tunnel | null = await management.getTunnel({ tunnelId: target.id, clusterId: target.clusterId }, managementOptions(), cancellation.token);
+    check();
+    if (!current) throw new Failure('not_found');
+    const actual = identity(current, target.port);
+    if (actual.id !== target.id || actual.clusterId !== target.clusterId || actual.port !== target.port) throw new Failure('identity');
+    const port = onePort(current, target.port);
+    validatePortOptions(port, current.options);
+    safeAnonymousACL(current.accessControl);
+    safeAnonymousACL(port.accessControl);
+    if (!port.accessControl?.entries.some(entry => entry.type === TunnelAccessControlEntryType.Anonymous && !entry.isDeny && !entry.isInverse && entry.scopes.length === 1 && entry.scopes[0] === TunnelAccessScopes.Connect)) throw new Failure('ports');
+    if (!object(current.accessTokens) || typeof current.accessTokens[TunnelAccessScopes.Host] !== 'string' || !current.accessTokens[TunnelAccessScopes.Host]) throw new Failure('host_token');
+    const url = endpoint(current, true, target.port);
+    if (url !== expectedEndpoint) throw new Failure('host');
+    activeHost.tunnel = current;
+    return current;
+}
+
+async function updateCredentials(message: Record<string, any>): Promise<void> {
+    keys(message, ['version', 'generation', 'op', 'token', 'revision']);
+    if (typeof message.token !== 'string' || !/^[\x21-\x7e]{1,4096}$/.test(message.token) || !Number.isSafeInteger(message.revision) || message.revision !== credentialRevision + 1) throw new Failure('protocol');
+    token = message.token;
+    message.token = '';
+    tunnel = await renewHostCredentials(client, host, config!, live, preparedEndpoint);
+    live();
+    credentialRevision = message.revision;
+    credentialUpdating = false;
+    emit('credentials', { revision: credentialRevision });
+}
+
 async function startHost(): Promise<void> {
     live();
     if (!client || !tunnel || !config) throw new Failure('protocol');
@@ -458,6 +492,7 @@ async function startHost(): Promise<void> {
     sameIdentity(current);
     const url = endpoint(current, true);
     if (preparedEndpoint && preparedEndpoint !== url) throw new Failure('host');
+    preparedEndpoint = url;
     phase = 'running';
     emit('ready', { endpoint: url });
 }
@@ -499,6 +534,10 @@ function receive(message: Record<string, any>): void {
         keys(message, ['version', 'generation', 'op']);
         phase = 'hosting';
         currentOperation = startHost();
+        void currentOperation.catch(error => fail(codeFor(error, 'host')));
+    } else if (message.op === 'credentials' && phase === 'running' && !credentialUpdating) {
+        credentialUpdating = true;
+        currentOperation = updateCredentials(message);
         void currentOperation.catch(error => fail(codeFor(error, 'host')));
     } else {
         throw new Failure('protocol');

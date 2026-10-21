@@ -225,7 +225,7 @@ func TestWANAuthWaitsForPollingAndHonorsSlowDown(t *testing.T) {
 		case 3:
 			return `{"error":"slow_down","interval":30}`, nil
 		default:
-			return `{"access_token":"fake-wan-token","token_type":"bearer","expires_in":3600,"refresh_token":"DISCARDED-REFRESH"}`, nil
+			return `{"access_token":"fake-wan-token","token_type":"bearer","expires_in":3600}`, nil
 		}
 	})
 	startAuth(t, a, false)
@@ -353,7 +353,7 @@ func TestWANAuthPersistenceIsCommittedBeforeUse(t *testing.T) {
 		if r.URL.Path == "/login/device/code" {
 			return deviceResponse(), nil
 		}
-		return `{"access_token":"fake-persisted","token_type":"bearer","refresh_token":"NEVER-SAVED"}`, nil
+		return `{"access_token":"fake-persisted","token_type":"bearer"}`, nil
 	})
 	var once sync.Once
 	t.Cleanup(func() { once.Do(func() { close(store.saveOut) }) })

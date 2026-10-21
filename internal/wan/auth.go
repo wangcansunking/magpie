@@ -36,24 +36,27 @@ type authAttempt struct {
 // remain responsive when the OS vault is stalled. Every commit rechecks its
 // generation, and a canceled write is erased before releasing the commit gate.
 type auth struct {
-	mu         sync.Mutex
-	commit     sync.Mutex
-	workers    sync.WaitGroup
-	owner      context.Context
-	cancel     context.CancelFunc
-	clientID   string
-	store      credentialStore
-	status     AuthStatus
-	credential savedCredential
-	current    *authAttempt
-	rejection  uint64 // owns pending erasure of a rejected remembered credential
-	next       uint64
-	closed     bool
-	blocked    bool
-	github     githubDeviceClient
-	now        func() time.Time
-	wait       func(context.Context, time.Duration) error
-	deadline   func(context.Context, time.Duration) (context.Context, context.CancelFunc)
+	mu            sync.Mutex
+	commit        sync.Mutex
+	workers       sync.WaitGroup
+	owner         context.Context
+	cancel        context.CancelFunc
+	clientID      string
+	store         credentialStore
+	status        AuthStatus
+	credential    savedCredential
+	current       *authAttempt
+	refreshCancel context.CancelFunc
+	changed       chan struct{}
+	refreshWait   func(context.Context, time.Duration) error
+	rejection     uint64 // owns pending erasure of a rejected remembered credential
+	next          uint64
+	closed        bool
+	blocked       bool
+	github        githubDeviceClient
+	now           func() time.Time
+	wait          func(context.Context, time.Duration) error
+	deadline      func(context.Context, time.Duration) (context.Context, context.CancelFunc)
 }
 
 // newAuth does not request a code, borrow another login, install a runtime or
@@ -71,7 +74,7 @@ func newAuth(owner context.Context, clientID string, store credentialStore) *aut
 	ctx, cancel := context.WithCancel(owner)
 	a := &auth{
 		owner: ctx, cancel: cancel, clientID: clientID, store: store,
-		github: newGitHubDeviceClient(), now: time.Now,
+		github: newGitHubDeviceClient(), now: time.Now, changed: make(chan struct{}), refreshWait: waitAuth,
 		wait: waitAuth, deadline: context.WithTimeout,
 		status: AuthStatus{State: "signed_out", Storage: "memory", StorageAvailable: store.available()},
 	}
@@ -115,18 +118,28 @@ func (a *auth) restore() {
 	}
 	a.status.Storage = "system"
 	a.status.ExpiresAt = record.ExpiresAt
-	if !record.ExpiresAt.IsZero() && !a.now().Before(record.ExpiresAt) {
+	if !record.ExpiresAt.IsZero() && !a.now().Before(record.ExpiresAt) && record.Refresh == "" {
 		a.status.State, a.status.Error = "expired", "WAN sign-in expired; sign in again"
 		return
 	}
 	a.credential = record
 	a.status.State = "signed_in"
+	if !record.ExpiresAt.IsZero() && !a.now().Before(record.ExpiresAt) {
+		a.status.State = "loading"
+	}
+	a.signalLocked()
+	a.startRefreshLocked()
 }
 
 func (a *auth) expireLocked() {
 	if a.status.State == "signed_in" && !a.credential.ExpiresAt.IsZero() && !a.now().Before(a.credential.ExpiresAt) {
-		a.credential = savedCredential{}
-		a.status.State, a.status.Error = "expired", "WAN sign-in expired; sign in again"
+		if a.credential.Refresh == "" {
+			a.credential = savedCredential{}
+			a.status.State, a.status.Error = "expired", "WAN sign-in expired; sign in again"
+		} else {
+			a.status.State, a.status.Error = "loading", ""
+		}
+		a.signalLocked()
 	}
 }
 
@@ -157,6 +170,7 @@ func (a *auth) Start(remember bool) (AuthStatus, error) {
 	if remember && !a.status.StorageAvailable {
 		return a.status, errVaultUnavailable
 	}
+	a.stopRefreshLocked()
 	if a.current != nil {
 		a.current.cancel()
 	}
@@ -164,6 +178,7 @@ func (a *auth) Start(remember bool) (AuthStatus, error) {
 	ctx, cancel := context.WithCancel(a.owner)
 	r := &authAttempt{id: a.next, ctx: ctx, cancel: cancel, remember: remember}
 	a.current, a.credential = r, savedCredential{}
+	a.signalLocked()
 	a.status = AuthStatus{State: "requesting_code", AttemptID: r.id, Storage: "memory", StorageAvailable: a.status.StorageAvailable}
 	if remember {
 		a.status.Storage = "system"
@@ -282,6 +297,9 @@ func (a *auth) run(r *authAttempt) {
 		if grant.ExpiresIn > 0 {
 			record.ExpiresAt = polled.Add(time.Duration(grant.ExpiresIn) * time.Second)
 		}
+		if grant.Refresh != "" && grant.ExpiresIn > 0 && grant.RefreshExpiresIn > grant.ExpiresIn && grant.RefreshExpiresIn <= 2*366*24*60*60 {
+			record = rotatingCredential(a.clientID, grant, polled)
+		}
 		a.accept(r, record)
 		return
 	}
@@ -354,6 +372,8 @@ func (a *auth) accept(r *authAttempt, record savedCredential) {
 	a.status.State, a.status.Error = "signed_in", ""
 	a.status.UserCode, a.status.VerificationURI = "", ""
 	a.status.ExpiresAt = record.ExpiresAt
+	a.signalLocked()
+	a.startRefreshLocked()
 	a.mu.Unlock()
 }
 
@@ -363,6 +383,8 @@ func (a *auth) storageFailed() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.blocked = true
+	a.stopRefreshLocked()
+	a.signalLocked()
 	a.credential = savedCredential{}
 	a.status.State, a.status.Error = "error", "Could not erase saved WAN sign-in; retry sign out"
 	a.status.UserCode, a.status.VerificationURI = "", ""
@@ -395,9 +417,11 @@ func (a *auth) Cancel(attemptID uint64) bool {
 func (a *auth) Reject(snapshotToken string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.closed || a.blocked || a.owner.Err() != nil || a.status.State != "signed_in" || snapshotToken == "" || a.credential.Access != snapshotToken {
+	if a.closed || a.blocked || a.owner.Err() != nil || (a.status.State != "signed_in" && a.status.State != "expired" && !(a.status.State == "loading" && a.credential.Refresh != "")) || snapshotToken == "" || a.credential.Access != snapshotToken {
 		return false
 	}
+	a.stopRefreshLocked()
+	a.signalLocked()
 	remembered := a.status.Storage == "system"
 	a.credential = savedCredential{}
 	a.status.State, a.status.Error = "error", "GitHub refused WAN sign-in; sign in again"
@@ -445,7 +469,9 @@ func (a *auth) eraseRejected(id uint64) {
 func (a *auth) Logout() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.stopRefreshLocked()
 	a.blocked = true
+	a.signalLocked()
 	a.rejection = 0 // Explicit logout takes over any pending rejected-token erase.
 	if a.current != nil {
 		a.current.cancel()
@@ -511,6 +537,7 @@ func (a *auth) tokenExpires() time.Time {
 func (a *auth) CancelJoin() {
 	a.mu.Lock()
 	a.closed = true
+	a.signalLocked()
 	a.cancel()
 	if a.current != nil {
 		a.current.cancel()

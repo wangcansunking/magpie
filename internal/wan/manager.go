@@ -325,6 +325,7 @@ func (m *Manager) Stop() {
 func (m *Manager) run(r *hosting) {
 	var failure error
 	var authOwner *auth
+	var lease *credentialLease
 	var snapshotToken string
 	var listener *heldListener
 	var server *http.Server
@@ -345,6 +346,9 @@ func (m *Manager) run(r *hosting) {
 		m.mu.Unlock()
 		r.revoke()
 		r.cancel()
+		if lease != nil {
+			snapshotToken = lease.stop()
+		}
 		if child != nil {
 			if child.output.authWasRejected() && authOwner != nil {
 				authOwner.Reject(snapshotToken)
@@ -397,7 +401,7 @@ func (m *Manager) run(r *hosting) {
 	m.mu.Lock()
 	a, clientID := m.auth, m.clientID
 	m.mu.Unlock()
-	token, expires, err := a.tokenSnapshot()
+	token, expires, err := a.hostToken(startup)
 	if err != nil {
 		failure = err
 		return
@@ -443,11 +447,6 @@ func (m *Manager) run(r *hosting) {
 	listener = &heldListener{TCPListener: raw.(*net.TCPListener)}
 	config.Port = raw.Addr().(*net.TCPAddr).Port
 	requests := r.requests
-	if !expires.IsZero() {
-		var cancelRequests context.CancelFunc
-		requests, cancelRequests = context.WithDeadline(requests, expires)
-		defer cancelRequests()
-	}
 	server = &http.Server{
 		Handler: m.admission(requests, &r.admitted), BaseContext: func(net.Listener) context.Context { return requests },
 		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 64 << 10,
@@ -554,6 +553,18 @@ func (m *Manager) run(r *hosting) {
 		failure = errors.New("WAN listener stopped unexpectedly")
 		return
 	}
+	lease = keepCredentials(r.ctx, a, child, request.Generation, snapshotToken, expires, r.revoke)
+	select {
+	case err := <-lease.ready:
+		if err != nil {
+			failure = err
+			return
+		}
+	case <-startup.Done():
+		failure = errors.New("WAN gateway startup deadline expired")
+		return
+	}
+	expires = a.tokenExpires()
 	child.output.mu.Lock()
 	m.mu.Lock()
 	if child.output.failed != nil || startup.Err() != nil || proxy.ctx.Err() != nil || r.requests.Err() != nil || m.status.State == "stopping" || !expires.IsZero() && !time.Now().Before(expires) {
@@ -581,8 +592,8 @@ func (m *Manager) run(r *hosting) {
 	case <-proxy.done:
 		failure = errors.New("WAN proxy stopped unexpectedly; WAN gateway is offline")
 		return
-	case <-expired:
-		failure = errors.New("WAN sign-in expired; sign in again")
+	case err := <-lease.failed:
+		failure = err
 	case err := <-served:
 		served <- err
 		failure = errors.New("WAN listener stopped unexpectedly")

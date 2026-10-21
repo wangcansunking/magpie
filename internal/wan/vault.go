@@ -21,13 +21,16 @@ var (
 const vaultSandbox = "MAGPIE_TEST_SANDBOX"
 
 // savedCredential belongs only to WAN and the explicit OAuth application. Refresh
-// tokens are deliberately discarded: an expired access token needs a new sign-in.
+// tokens rotate together with access tokens inside this secure record only.
 // This record never enters settings, backups, status or the helper's diagnostics.
 type savedCredential struct {
-	Version   int       `json:"version"`
-	ClientID  string    `json:"clientID"`
-	Access    string    `json:"access"`
-	ExpiresAt time.Time `json:"expiresAt,omitempty"`
+	Version          int       `json:"version"`
+	ClientID         string    `json:"clientID"`
+	Access           string    `json:"access"`
+	ExpiresAt        time.Time `json:"expiresAt,omitempty"`
+	Refresh          string    `json:"refresh,omitempty"`
+	RefreshExpiresAt time.Time `json:"refreshExpiresAt,omitzero"`
+	RefreshAfter     time.Time `json:"refreshAfter,omitzero"`
 }
 
 type credentialStore interface {
@@ -99,8 +102,16 @@ func (s systemCredentialStore) delete() error {
 }
 
 func validSavedCredential(record savedCredential) bool {
-	return record.Version == 1 && oauthText(record.ClientID, 128) && oauthText(record.Access, 4096) &&
-		(record.ExpiresAt.IsZero() || record.ExpiresAt.Year() >= 2020 && record.ExpiresAt.Year() <= 9999)
+	validTime := func(t time.Time) bool { return t.IsZero() || t.Year() >= 2020 && t.Year() <= 9999 }
+	if !oauthText(record.ClientID, 128) || !oauthText(record.Access, 4096) || !validTime(record.ExpiresAt) {
+		return false
+	}
+	if record.Version == 1 {
+		return record.Refresh == "" && record.RefreshExpiresAt.IsZero() && record.RefreshAfter.IsZero()
+	}
+	return record.Version == 2 && oauthText(record.Refresh, 4096) && !record.ExpiresAt.IsZero() &&
+		!record.RefreshExpiresAt.IsZero() && validTime(record.RefreshExpiresAt) && !record.RefreshAfter.IsZero() &&
+		validTime(record.RefreshAfter) && record.RefreshAfter.Before(record.ExpiresAt) && record.ExpiresAt.Before(record.RefreshExpiresAt)
 }
 
 // A distinct settings directory gets a distinct credential. The target contains

@@ -120,6 +120,34 @@ func TestFakeSDK(t *testing.T) {
 	if mode == "exit" {
 		os.Exit(29)
 	}
+	if strings.HasPrefix(mode, "credentials") {
+		var revision uint64
+		for {
+			line, err := input.ReadBytes('\n')
+			if err != nil {
+				break
+			}
+			var update sdkCredential
+			if strictJSON(line, &update) != nil || update.Version != 1 || update.Revision != revision+1 || update.Op != "credentials" || update.Generation != prepare.Generation || !strings.HasPrefix(update.Token, "fake-renewed-") {
+				os.Exit(34)
+			}
+			revision = update.Revision
+			fmt.Fprintln(calls, "credentials", update.Revision)
+			if mode == "credentials-hold" {
+				continue
+			}
+			ack := sdkEvent{Version: 1, Generation: prepare.Generation, Event: "credentials", Revision: update.Revision}
+			if mode == "credentials-bad-ack" {
+				ack.Revision++
+			}
+			if mode == "credentials-auth" {
+				ack = sdkEvent{Version: 1, Generation: prepare.Generation, Event: "error", Code: "auth"}
+			}
+			data, _ := json.Marshal(ack)
+			fmt.Printf("%s\n", data)
+		}
+		os.Exit(0)
+	}
 	// EOF is the helper dispose request. The parent also kills/joins the tree.
 	io.Copy(io.Discard, input)
 	if mode == "cleanup-connect" {

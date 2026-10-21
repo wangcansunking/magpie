@@ -13,7 +13,7 @@ import (
 	"github.com/yetone/magpie/internal/netproxy"
 )
 
-// githubDeviceClient speaks only the device grant protocol. Its construction
+// githubDeviceClient speaks the device and refresh grant protocols. Its construction
 // does not request a code, discover an account or start a browser or tunnel.
 // The auth owner must check its attempt again before committing a returned token.
 type githubDeviceClient struct {
@@ -118,10 +118,41 @@ func (c githubDeviceClient) poll(ctx context.Context, clientID, deviceCode strin
 	if !oauthText(out.Access, 4096) || !strings.EqualFold(out.Type, "bearer") ||
 		len(out.Scope) > 4096 || strings.ContainsAny(out.Scope, "\r\n\x00") ||
 		out.ExpiresIn < 0 || out.RefreshExpiresIn < 0 ||
-		(out.Refresh != "" && !oauthText(out.Refresh, 4096)) {
+		(out.Refresh != "" && (!oauthText(out.Refresh, 4096) || out.ExpiresIn <= 0 || out.RefreshExpiresIn <= out.ExpiresIn || out.RefreshExpiresIn > 2*366*24*60*60)) {
 		return githubGrant{}, errors.New("GitHub returned an unsupported WAN token response")
 	}
 	return out, nil
+}
+
+var errRefreshRejected = errors.New("WAN refresh credential was rejected")
+
+type githubHTTPError struct{ status int }
+
+func (*githubHTTPError) Error() string { return "GitHub refused the WAN authorization request" }
+
+// Device-flow grants refresh without a client secret. Never retry a known
+// successful rotation whose replacement credentials are incomplete.
+func (c githubDeviceClient) refresh(ctx context.Context, clientID, refresh string) (githubGrant, error) {
+	if !oauthText(clientID, 128) || !oauthText(refresh, 4096) {
+		return githubGrant{}, errRefreshRejected
+	}
+	var grant githubGrant
+	if err := c.post(ctx, "/login/oauth/access_token", url.Values{
+		"client_id": {clientID}, "grant_type": {"refresh_token"}, "refresh_token": {refresh},
+	}, &grant); err != nil {
+		var status *githubHTTPError
+		if errors.As(err, &status) && (status.status == 400 || status.status == 401 || status.status == 403) {
+			return githubGrant{}, errRefreshRejected
+		}
+		return githubGrant{}, err
+	}
+	if grant.Error != "" || !oauthText(grant.Access, 4096) || !strings.EqualFold(grant.Type, "bearer") ||
+		!oauthText(grant.Refresh, 4096) || grant.ExpiresIn <= 0 || grant.ExpiresIn > 366*24*60*60 ||
+		grant.RefreshExpiresIn <= grant.ExpiresIn || grant.RefreshExpiresIn > 2*366*24*60*60 ||
+		len(grant.Scope) > 4096 || strings.ContainsAny(grant.Scope, "\r\n\x00") {
+		return githubGrant{}, errRefreshRejected
+	}
+	return grant, nil
 }
 
 func (c githubDeviceClient) post(ctx context.Context, path string, values url.Values, out any) error {
@@ -144,7 +175,7 @@ func (c githubDeviceClient) post(ctx context.Context, path string, values url.Va
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return errors.New("GitHub refused the WAN authorization request")
+		return &githubHTTPError{status: resp.StatusCode}
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, (32<<10)+1))
 	if ctx.Err() != nil {

@@ -6,6 +6,15 @@ embedded by `../sdk.go`; end users do not install npm packages. The SDK owns
 relay, SSH and tunnel-management protocols. This directory does not download
 or start a tunnel as part of a build.
 
+While running, the parent can send a `credentials` operation containing the
+current generation, protocol version 1, a new GitHub access token and the next
+positive `revision`. Refresh tokens never enter this protocol. The helper
+fetches host credentials and revalidates the pinned tunnel metadata, then
+updates the SDK host without reconnecting streams and emits a `credentials`
+event carrying that revision. Concurrent, duplicate or out-of-order updates
+fail closed. The parent extends its credential lease only after the matching
+ACK; Stop and EOF join an outstanding update before disposal.
+
 ## Fixed inputs
 
 `package-lock.json` pins every archive, including nested versions. The main

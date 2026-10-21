@@ -70,6 +70,29 @@ func TestWANDeviceGrantUsesOnlyItsOwnClientID(t *testing.T) {
 	}
 }
 
+func TestWANRefreshGrantRefusalsAndRotationShape(t *testing.T) {
+	for _, body := range []string{
+		`{"error":"bad_refresh_token","error_description":"SECRET"}`,
+		`{"access_token":"SECRET","token_type":"bearer","expires_in":3600}`,
+		`{"access_token":"SECRET","refresh_token":"SECRET","token_type":"bearer","expires_in":-1,"refresh_token_expires_in":86400}`,
+		`{"access_token":"SECRET","refresh_token":"SECRET","token_type":"bearer","expires_in":3600,"refresh_token_expires_in":3000}`,
+		`{"access_token":"SECRET","refresh_token":"SECRET","token_type":"bearer","expires_in":2147483647,"refresh_token_expires_in":2147483647}`,
+	} {
+		c := localGitHub(t, func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, body) })
+		grant, err := c.refresh(context.Background(), "own-app-id", "old-refresh")
+		if !errors.Is(err, errRefreshRejected) || grant.Access != "" || grant.Refresh != "" || strings.Contains(err.Error(), "SECRET") {
+			t.Fatal("bad refresh response was accepted or leaked")
+		}
+	}
+	for _, status := range []int{400, 401, 403, 429, 500} {
+		c := localGitHub(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(status); fmt.Fprint(w, "SECRET") })
+		_, err := c.refresh(context.Background(), "own-app-id", "old-refresh")
+		if err == nil || strings.Contains(err.Error(), "SECRET") || errors.Is(err, errRefreshRejected) != (status < 429) {
+			t.Fatal("refresh HTTP failure classification", status, err)
+		}
+	}
+}
+
 func TestWANDeviceCodeClassifiesInitialRefusal(t *testing.T) {
 	for code, message := range map[string]string{
 		"device_flow_disabled":         "unavailable",

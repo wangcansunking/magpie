@@ -112,6 +112,39 @@ func TestWANVaultRoundTripAndByteBuffersAreCleared(t *testing.T) {
 	}
 }
 
+func TestWANVaultRotatingPairRoundTripsWithoutPlaintextFiles(t *testing.T) {
+	root := t.TempDir()
+	vault := &fakeCredentialVault{}
+	store := systemCredentialStore{target: credentialTarget(root, false), vault: vault}
+	record := rotatingCredential("wan-app", githubGrant{Access: "fake-access", Refresh: "fake-refresh", ExpiresIn: 3600, RefreshExpiresIn: 86400}, time.Now().UTC())
+	if err := store.save(record); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.load()
+	if err != nil || got != record {
+		t.Fatal("secure pair did not round trip", err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil || len(entries) != 0 {
+		t.Fatal("credential was persisted as a settings file")
+	}
+	for _, buffer := range [][]byte{vault.writeBuffer, vault.readBuffer} {
+		for _, b := range buffer {
+			if b != 0 {
+				t.Fatal("vault serialization buffer retained credential bytes")
+			}
+		}
+	}
+	for _, bad := range []savedCredential{
+		{Version: 2, ClientID: "wan-app", Access: "fake-access"},
+		{Version: 1, ClientID: "wan-app", Access: "fake-access", Refresh: "fake-refresh"},
+	} {
+		if validSavedCredential(bad) {
+			t.Fatal("incomplete rotation record was accepted")
+		}
+	}
+}
+
 func TestWANVaultUnreadableRecordIsUnknownNotMissing(t *testing.T) {
 	for _, data := range []string{
 		"", "null", "{", `{"version":9,"clientID":"test","access":"fake"}`,

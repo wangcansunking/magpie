@@ -46,6 +46,7 @@ type sdkEvent struct {
 	Config     *tunnelConfig `json:"config,omitempty"`
 	Endpoint   string        `json:"endpoint,omitempty"`
 	Code       string        `json:"code,omitempty"`
+	Revision   uint64        `json:"revision,omitempty"`
 }
 
 // availableRuntime never installs a runtime. InstallRuntime is the only WAN
@@ -171,6 +172,8 @@ func (p *sdkProcess) send(ctx context.Context, msg any) error {
 	if err != nil || len(data)+1 > sdkLineLimit {
 		return errors.New("WAN helper request is invalid")
 	}
+	data = append(data, '\n')
+	defer clear(data)
 	// Pipe writes are cancellable by closing the pipe. Always join the writer
 	// before returning, so neither a token buffer nor a goroutine outlives it.
 	done := make(chan error, 1)
@@ -181,7 +184,7 @@ func (p *sdkProcess) send(ctx context.Context, msg any) error {
 			done <- ctx.Err()
 			return
 		}
-		_, err := p.stdin.Write(append(data, '\n'))
+		_, err := p.stdin.Write(data)
 		done <- err
 	}()
 	select {
@@ -222,18 +225,21 @@ func (p *sdkProcess) stop() {
 // Notifications are published only after the entire write has been checked.
 // A ready message followed by malformed output in one write never admits work.
 type sdkOutput struct {
-	mu           sync.Mutex
-	generation   string
-	expected     tunnelConfig
-	endpoint     string
-	phase        int // 0 prepare, 1 prepared, 2 host requested, 3 ready
-	line         []byte
-	failed       error
-	authRejected bool
-	prepared     chan sdkEvent
-	ready        chan string
-	bad          chan struct{}
-	revoke       func()
+	mu              sync.Mutex
+	generation      string
+	expected        tunnelConfig
+	endpoint        string
+	phase           int // 0 prepare, 1 prepared, 2 host requested, 3 ready
+	line            []byte
+	failed          error
+	authRejected    bool
+	pendingRevision uint64
+	ackRevision     uint64
+	refreshed       chan struct{}
+	prepared        chan sdkEvent
+	ready           chan string
+	bad             chan struct{}
+	revoke          func()
 }
 
 func (o *sdkOutput) closeAdmission() {
@@ -281,11 +287,25 @@ func (o *sdkOutput) host() error {
 	return nil
 }
 
+func (o *sdkOutput) credentials(revision uint64) (<-chan struct{}, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.failed != nil {
+		return nil, o.failed
+	}
+	if o.phase != 3 || o.pendingRevision != 0 || revision != o.ackRevision+1 {
+		return nil, sdkError("protocol")
+	}
+	o.pendingRevision, o.refreshed = revision, make(chan struct{}, 1)
+	return o.refreshed, nil
+}
+
 func (o *sdkOutput) Write(p []byte) (int, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	var prepared *sdkEvent
 	var ready string
+	var refreshed bool
 	for _, b := range p {
 		if o.failed != nil {
 			break
@@ -299,6 +319,8 @@ func (o *sdkOutput) Write(p []byte) (int, error) {
 			}
 			if event.Event == "prepared" {
 				prepared = &event
+			} else if event.Event == "credentials" {
+				refreshed = true
 			} else if event.Event == "ready" {
 				ready = event.Endpoint
 			}
@@ -314,6 +336,9 @@ func (o *sdkOutput) Write(p []byte) (int, error) {
 		}
 		if ready != "" {
 			o.ready <- ready
+		}
+		if refreshed {
+			o.refreshed <- struct{}{}
 		}
 	}
 	return len(p), nil
@@ -354,6 +379,11 @@ func (o *sdkOutput) consume(line []byte) (sdkEvent, error) {
 			return event, bad
 		}
 		o.phase = 3
+	case "credentials":
+		if o.phase != 3 || event.Revision == 0 || event.Revision != o.pendingRevision {
+			return event, bad
+		}
+		o.ackRevision, o.pendingRevision = event.Revision, 0
 	case "disconnected", "error":
 		if event.Config != nil || event.Endpoint != "" {
 			return event, bad
@@ -377,6 +407,8 @@ func validEventFields(data []byte, event string) bool {
 		allowed["config"], allowed["endpoint"] = true, true
 	case "ready":
 		allowed["endpoint"] = true
+	case "credentials":
+		allowed["revision"] = true
 	case "error", "disconnected":
 		allowed["code"] = true
 	default:

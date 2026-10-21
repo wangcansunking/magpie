@@ -25,7 +25,10 @@ and administrative page keep their existing addresses and authentication rules.
   lifetime. `wan.json` contains a versioned tunnel identity and port, not a
   credential or an instruction to start automatically.
 - [`auth.go`](../../internal/wan/auth.go) owns GitHub device authorization,
-  expiry, cancellation and the credential commit barrier.
+  expiry, background renewal, cancellation and the credential commit barrier.
+  [`refresh.go`](../../internal/wan/refresh.go) rotates token pairs under that
+  barrier; [`credentials.go`](../../internal/wan/credentials.go) leases the
+  running helper only after its revision-bound acknowledgement.
   [`github.go`](../../internal/wan/github.go) makes bounded, cancellable
   requests without following redirects. Neither uses provider sign-in,
   account discovery, existing CLI tokens or a browser-owned lifetime.
@@ -71,10 +74,28 @@ an account the user replaced. Failed reads and erases are unknown and block
 sign-in until explicit sign-out succeeds; they are not empty stores. An
 unreadable Windows vault requires a usable Windows user session; it does not
 silently downgrade to memory, which could restore an old account on the next
-normal launch. No token,
-refresh token or login intent enters settings, backup or sync. Refresh tokens
-are not retained in this version: an expiring access token requires a new
-sign-in, and hosting is bounded by that expiry.
+normal launch. Neither access nor refresh tokens enter settings, backup, sync,
+status, command arguments, environment or logs. A remembered version-2 secure
+record contains the rotating pair and its access/refresh deadlines. Version-1
+access-only records still load; they require one fresh device sign-in to acquire
+a refresh token. Non-expiring access-only grants retain their existing behavior.
+
+The gateway owner renews independently of the page, before access expiry (up to
+five minutes early, or one quarter of a short grant's lifetime). Each successful
+GitHub refresh invalidates both old tokens, so the replacement pair is saved as
+one secure record before publication. Failed/unknown vault writes clear the
+session and block further sign-in until explicit sign-out; there is no plaintext
+fallback. Cancellation, replacement and logout join the credential commit gate;
+a late write is erased and cannot resurrect a signed-out account. Transient
+network/service failures retry with bounded backoff without extending the last
+access deadline. A refused or expired refresh token erases remembered credentials
+and requires a fresh device sign-in. Device-flow refresh needs the client ID and
+refresh token, never a client secret ([GitHub refresh contract](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/refreshing-user-access-tokens)).
+
+On restart, an expired access token with a usable saved refresh token is renewed
+in the background; the page shows loading while access is unavailable. Restoring
+or renewing sign-in never hosts a tunnel. A memory session renews only until the
+owner exits and is never remembered implicitly.
 
 Login does not host. Stop does not sign out. Replacing a sign-in while hosting
 is refused until Stop. Sign out invalidates authentication and blocks Start,
@@ -128,6 +149,18 @@ has been verified as part of the offline checks.
    joins the child tree, closes the server, then releases socket and lock.
    A disconnect or child failure takes the offline cleanup path; it does not
    automatically reopen admission or create another tunnel.
+
+Running credential rotation uses a strictly ordered, generation-bound private
+pipe command. The helper switches the management credential, requests fresh host
+access metadata, validates the canonical identity, sole port, ACLs, inspection
+and forwarding options, and unchanged public endpoint, then replaces the SDK
+host's tunnel metadata without reconnecting existing streams. Only a matching
+revision acknowledgement extends the hosting lease. Unknown, duplicate or stale
+acknowledgements fail closed. Credentials remain on stdin; stdout carries only
+the revision. The original access deadline is not a fixed deadline on accepted
+streams: the lease revokes admission and request contexts if renewal or helper
+update fails, the current deadline expires, or Stop occurs. Stop cancels and
+joins the update writer before disposing the child.
 
 `wan.json` version 2 stores canonical `id`, `clusterId` and `port`. A legacy
 `{id,port}` is resolved only on an explicitly authenticated Start. Successful
@@ -254,9 +287,12 @@ real GitHub/Microsoft login, public tunnel or provider account is permitted.
 Run the repository's sandboxed Go runner with `-timeout 45m`, then the full
 checks in [code standards](../code-standards.md). Tests of the former CLI do
 not prove the SDK path. GUI source cases cover both engines and five
-languages, but historical interrupted-browser containment must be resolved
-before launching further browser tasks. Current full GUI acceptance is not
-green and must not be inferred from focused backend checks.
+languages. The full browser sweep and repaired-file passes are recorded in
+[the prior acceptance report](../design/wan-gateway-acceptance.md); focused backend
+checks alone are not a browser acceptance result. Renewal tests use injected
+clocks, fake secure stores and fake helper children; the SDK fixture exercises
+its actual host-token setter and rejects changed metadata. Run renewal and
+lifecycle regressions with `-race -count=20` as well as the complete WAN package.
 
 A real-tunnel check requires separate approval: publish only an isolated
 gateway with a fake upstream, then check Endpoint+Key clients, SSE, revoked
