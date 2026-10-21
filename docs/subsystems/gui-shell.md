@@ -46,6 +46,12 @@ Direct initial/font fitting remains synchronous.
 
 ## Constraints and failure behavior
 
+Routing rest actions mark their removable action line with `data-unrolls`, so
+the shell holds the account row when a successful Try now removes that line.
+Holding a child whose line shrinks instead moved the page by 20px.
+`rest-try-now.test.cjs` checks both the scroll offset and the account row
+position in both browser engines, all five languages and both widths.
+
 ### Allowance card refreshes
 
 A card refresh applies only the requested account from the API's full

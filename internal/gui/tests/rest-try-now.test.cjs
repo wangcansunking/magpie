@@ -10,6 +10,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
+const { reach: reachView } = require("./reader.cjs");
 const { chromium, webkit } = require("playwright");
 
 const assets = path.resolve(__dirname, "../assets");
@@ -126,14 +127,17 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await go.waitFor();
         assert.equal(await row.locator(".fix button").count(), 1, "a quota's rest has nothing to verify");
         assert(!(await sideways(page)), "the page scrolls sideways");
-        await reach(page, go);
+        await reachView(page, go);
         const sc = await scrolled(page);
+        const rowTop = await row.evaluate(e => e.getBoundingClientRect().top);
         await go.click();
         assert.deepEqual(await posted(lifted), [{ key: rest.key }]);
         // the row no longer says it rests, though the kept request does
         await row.locator(".st.rest").waitFor({ state: "detached" });
         assert.equal(await row.locator(".fix").count(), 0);
+        await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
         assert.equal(await scrolled(page), sc, "the click scrolled");
+        assert(Math.abs((await row.evaluate(e => e.getBoundingClientRect().top)) - rowTop) < .5, "the current row keeps its screen position");
         assert.deepEqual(errors, []);
       });
 

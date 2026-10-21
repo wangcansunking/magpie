@@ -3089,6 +3089,8 @@ function routingPage(part) {
       let kept = actRows.get(identity);
       if (!kept) {
         kept = { row: el("div", "rt-act"), fix: el("div", "fix"), actions: new Map() };
+        // Lifting removes this line; keep the account row in place, not its shrinking last line.
+        kept.fix.dataset.unrolls = "";
         actRows.set(identity, kept);
       }
       const row = el("div", "rt-act");
