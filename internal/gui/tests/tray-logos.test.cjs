@@ -113,8 +113,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const refused = [], tops = [];
         page.on("console", (m) => { if (/refused/.test(m.text())) refused.push(m.text()); });
         const pick = page.locator("#trayUsagePick button");
-        await pick.hover();
+        await pick.scrollIntoViewIfNeeded();
         const at = await pick.boundingBox();
+        await page.mouse.move(at.x + at.width / 2, at.y + at.height / 2);
         for (let i = 0; i < 20 && !(await view(page)); i++) { await page.mouse.wheel(0, 120); await page.waitForTimeout(20); tops.push(await view(page)); }
         await row.scrollIntoViewIfNeeded();
         await page.waitForTimeout(300);

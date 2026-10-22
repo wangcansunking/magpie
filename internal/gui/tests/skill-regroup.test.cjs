@@ -30,7 +30,7 @@ function server(lang, state, posts) {
     if (url.pathname === "/api/library") return json(state.lib);
     if (url.pathname === "/api/library/skills/regroup") {
       posts.push(req.method());
-      await new Promise((r) => { state.answer = r; });
+      await state.regroupReady;
       let n = 0;
       for (const s of state.lib.skills) if (!s.repo) { s.repo = "mattpocock/skills"; n++; }
       return json({ ...state.lib, regrouped: n });
@@ -61,7 +61,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     t.after(() => browser.close());
     for (const lang of Object.keys(L)) {
       for (const width of [1100, 440]) {
-        await t.test(lang + " " + width, async () => {
+        await t.test(lang + " " + width, async (sub) => {
           const w = L[lang];
           const state = {
             lib: {
@@ -71,8 +71,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
               skills: [...NAMES.slice(0, 20).map(copy("mattpocock/skills")), ...NAMES.slice(20).map(copy(""))],
             },
           };
+          // The held reply exists before the UI can become optimistically
+          // busy; arrival order cannot leave its release undefined.
+          state.regroupReady = new Promise((resolve) => { state.answer = resolve; });
           const posts = [];
           const ctx = await browser.newContext({ viewport: { width, height: 760 }, reducedMotion: "reduce" });
+          sub.after(async () => { state.answer(); await ctx.close(); });
           await ctx.addInitScript(() => { try { localStorage.setItem("magpie.libTab", "skills"); } catch {} });
           const page = await ctx.newPage();
           page.setDefaultTimeout(5000);
@@ -97,7 +101,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           assert.ok(box && box.x >= 0 && box.x + box.width <= width, `button at ${JSON.stringify(box)} in ${width}`);
           assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true);
 
-          await b.click();
+          await Promise.all([
+            page.waitForRequest(r => new URL(r.url()).pathname === "/api/library/skills/regroup" && r.method() === "POST"),
+            b.click(),
+          ]);
           // busy while magpie fetches the repositories
           await page.waitForFunction(() => document.querySelector(".lib-regroup")?.disabled);
           assert.equal((await v.locator(".lib-regroup").textContent()).trim(), w.busy);
@@ -112,7 +119,6 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           assert.equal(await v.locator(".lib-regroup").isDisabled(), false);
           assert.deepEqual(posts, ["POST"]);
           assert.deepEqual(errors, []);
-          await ctx.close();
         });
       }
     }

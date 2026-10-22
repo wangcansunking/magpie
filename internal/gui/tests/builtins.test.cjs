@@ -215,9 +215,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // Its row and Usage's can be below the fold: the reader scrolls to
         // them with the wheel, since the page puts back a scroll that isn't
         // the reader's (scrollOnPurpose), a click's own too
-        // Check both edges and the actual hit point. Another unconditional
-        // 400px for Usage could overshoot it above the header, while its
-        // bottom alone still satisfied the old check.
+        // Wait for actual wheel movement and check both edges and the hit
+        // point. A fixed 400px step and a bottom-edge check don't establish
+        // that the switch is clear before Playwright presses it.
         const wheelTo = (id) => reach(page, page.locator(`#builtinList [data-id="${id}"] [role="switch"]`));
         await wheelTo("routing");
         await page.locator('#builtinList [data-id="routing"] [role="switch"]').click();

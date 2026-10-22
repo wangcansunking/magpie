@@ -32,7 +32,7 @@ const INSTALLED = HERE
   .map((repo) => GH.repos.find((r) => r.repo === repo))
   .map((r) => ({ spec: r.spec, package: r.package, providers: [], version: "1.0.0", moved: [] }));
 
-function server(lang, fetched, installed = INSTALLED, metadata = Promise.resolve()) {
+function server(lang, fetched, installed = INSTALLED, metadata = Promise.resolve(), githubReady = Promise.resolve()) {
   return async (route) => {
     const url = new URL(route.request().url());
     const json = (data) => route.fulfill({ json: data });
@@ -46,7 +46,7 @@ function server(lang, fetched, installed = INSTALLED, metadata = Promise.resolve
     if (url.pathname === "/api/plugins/listings") return json({ listings: [{ package: "@magpie-community/opencode-zed-auth", name: "Zed", community: true }] });
     // The fixture decides when metadata arrives, not the runner's speed.
     if (url.pathname === "/api/plugins/npm") { await metadata; return json({ npm: { "@magpie-community/opencode-zed-auth": { version: "9.9.9" } } }); }
-    if (url.pathname === "/api/plugins/github") return json(GH);
+    if (url.pathname === "/api/plugins/github") { await githubReady; return json(GH); }
     if (url.pathname === "/api/plugins/search") return json({ hits: [] });
     if (url.pathname.startsWith("/api/")) return json({});
     if (url.host !== "magpie.test" || !/^\/[\w./-]*$/.test(url.pathname)) { fetched.push(url.href); return route.fulfill({ status: 404, body: "" }); }
@@ -112,17 +112,22 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       page.setDefaultTimeout(6000);
       const errors = [], fetched = [];
       page.on("pageerror", (e) => errors.push(e.message));
-      await page.route("**/*", server("en", fetched, []));
+      let releaseGitHub;
+      const githubReady = new Promise((resolve) => { releaseGitHub = resolve; });
+      await page.route("**/*", server("en", fetched, [], Promise.resolve(), githubReady));
       try {
         await page.goto("http://magpie.test/?view=plugins");
         const sec = page.locator("#view-plugins .pm-ghsec");
-        await sec.locator(".pm-card").first().waitFor();
+        await sec.locator(".pm-card.ghost").first().waitFor();
+        assert.equal(await sec.locator(".pm-ghkinds").count(), 0, "GitHub is still held; these cards are placeholders");
+        releaseGitHub();
+        await sec.locator(".pm-card[data-pkg]").first().waitFor();
         assert.equal(await sec.locator(".pm-ghkinds").count(), 1);
         assert.equal(await sec.locator(".pm-ghhave").count(), 0);
         assert.equal(await sec.locator(".pm-card").count(), GH.repos.length);
         assert.deepEqual(errors, []);
       } finally {
-        await ctx.close();
+        releaseGitHub(); await ctx.close();
       }
     });
     for (const lang of ["en", "zh", "zh-TW", "ja", "de"]) for (const width of [1100, 980, 420]) {

@@ -27,7 +27,7 @@ function settingsPayload(over) {
   };
 }
 
-function server(lang, posted) {
+function server(lang, posted, onReady) {
   let cur = settingsPayload({ lang });
   return async (route) => {
     const req = route.request(), url = new URL(req.url());
@@ -37,6 +37,7 @@ function server(lang, posted) {
     if (url.pathname === "/api/state") return json({ agents: [], profiles: [], settings: { lang, theme: "light" }, fx: cur.fx });
     if (url.pathname === "/api/settings/plain-names") {
       const body = req.postDataJSON();
+      if (body.mode === "on") await onReady;
       posted.push(["plain-names", body]);
       cur = { ...cur, plainNames: body.mode === "off", plainOwnNames: body.mode === "own" };
       return json(cur);
@@ -74,7 +75,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       page.setDefaultTimeout(5000);
       const errors = [], posted = [];
       page.on("pageerror", (e) => errors.push(e.message));
-      await page.route("**/*", server(lang, posted));
+      let releaseOn;
+      const onReady = new Promise((resolve) => { releaseOn = resolve; });
+      t.after(releaseOn);
+      await page.route("**/*", server(lang, posted, onReady));
       t.after(async () => {
         if (process.env.ARTIFACT_DIR) {
           await fs.mkdir(process.env.ARTIFACT_DIR, { recursive: true });
@@ -104,6 +108,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert(before > 0, "the settings list must scroll to the row");
       await segs.nth(0).click();
       await page.locator("#plainNamesSegs .opt.on", { hasText: want[lang].off }).waitFor();
+      await page.waitForFunction(() => document.querySelector("#plainNamesSegs .suffix-segs")?.dataset.mode === "off");
       await page.waitForTimeout(400);
       assert.equal(await view(page), before, "the click scrolled the page");
       assert.deepEqual(posted, [["plain-names", { mode: "off" }]]);
@@ -111,6 +116,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       // back on
       await segs.nth(2).click();
       await page.locator("#plainNamesSegs .opt.on", { hasText: want[lang].on }).waitFor();
+      // The segmented control lights optimistically, before its API save.
+      // Keep the request held so reading the old posted value is inevitable
+      // until released, then wait for the confirmed mode on the returned row.
+      assert.deepEqual(posted.at(-1), ["plain-names", { mode: "off" }], "the On save is still held");
+      releaseOn();
+      await page.waitForFunction(() => document.querySelector("#plainNamesSegs .suffix-segs")?.dataset.mode === "on");
       assert.deepEqual(posted.at(-1), ["plain-names", { mode: "on" }]);
       assert.equal(await view(page), before, "the click scrolled the page");
       assert.deepEqual(errors, []);

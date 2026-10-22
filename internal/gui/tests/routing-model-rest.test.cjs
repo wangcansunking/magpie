@@ -50,7 +50,7 @@ function routes() {
   return [{ id: 1, seq: 1, time, agent: "codex", model: "group/g", provider: "antigravity", order, tries, done: true, status: 200, ms: 2000 }];
 }
 
-function serve(lang, lifted) {
+function serve(lang, lifted, liftReady = Promise.resolve()) {
   return async (route) => {
     const url = new URL(route.request().url());
     const json = (data) => route.fulfill({ json: data });
@@ -64,6 +64,7 @@ function serve(lang, lifted) {
     }
     if (url.pathname === "/api/gateway/history") return json({ cut: false, days: [], routes: [] });
     if (url.pathname === "/api/gateway/unrest") {
+      await liftReady;
       lifted.push(JSON.parse(route.request().postData() || "{}"));
       return json({ lifted: true });
     }
@@ -77,10 +78,6 @@ function serve(lang, lifted) {
 }
 
 const go = { en: "Try now", zh: "立即重试", "zh-TW": "立即重試", ja: "今すぐ試す", de: "Jetzt versuchen" };
-const posted = async (lifted) => {
-  for (let i = 0; i < 60 && !lifted.length; i++) await new Promise((r) => setTimeout(r, 50));
-  return lifted;
-};
 const sideways = (page) => page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
 
 // Force a redraw between locator resolution and evaluation, not by hoping the
@@ -132,9 +129,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const page = await context.newPage();
         page.setDefaultTimeout(5000);
         const errors = [], lifted = [];
+        let releaseLift;
+        const liftReady = new Promise((resolve) => { releaseLift = resolve; });
         page.on("pageerror", (e) => errors.push(e.message));
-        await page.route("**/*", serve(lang, lifted));
+        await page.route("**/*", serve(lang, lifted, liftReady));
         t.after(async () => {
+          releaseLift();
           if (process.env.ARTIFACT_DIR) {
             await fs.mkdir(process.env.ARTIFACT_DIR, { recursive: true });
             await page.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `${engine}-${lang}-${width}-model-rest.png`), fullPage: true });
@@ -184,8 +184,19 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const row = page.locator(".rt-act", { hasText: "me@x.test" });
         const btn = row.locator(".fix button", { hasText: go[lang] });
         await reader.reach(page, btn);
-        await btn.click();
-        assert.deepEqual(await posted(lifted), [{ key: opusRest.key }]);
+        const [response] = await Promise.all([
+          page.waitForResponse(r => new URL(r.url()).pathname === "/api/gateway/unrest" && r.request().method() === "POST"),
+          (async () => {
+            await Promise.all([
+              page.waitForRequest(r => new URL(r.url()).pathname === "/api/gateway/unrest" && r.method() === "POST"),
+              btn.click(),
+            ]);
+            assert.deepEqual(lifted, [], "the request is held before the fixture records its lift");
+            releaseLift();
+          })(),
+        ]);
+        assert.equal(response.ok(), true, "the lift completed");
+        assert.deepEqual(lifted, [{ key: opusRest.key }]);
         await row.locator(".st.part").waitFor({ state: "detached" });
         assert.deepEqual(errors, []);
       });

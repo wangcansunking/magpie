@@ -13,7 +13,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
-const { openPart } = require("./reader.cjs");
+const { openPart, watchSettingsReads, settingsDrawn } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const at = (h) => new Date(Date.now() + h * 3600e3).toISOString();
@@ -83,7 +83,10 @@ async function open(browser, lang, width, over = {}, posts = [], platform = "Mac
   const page = await context.newPage();
   page.setDefaultTimeout(5000);
   await page.route("**/*", serve(lang, posts, over));
-  await page.goto("http://magpie.test/?view=usage");
+  await watchSettingsReads(page);
+  // Callers wait for their card/setting. Unrelated image loads need not
+  // finish before the app's DOM and deferred scripts can be used.
+  await page.goto("http://magpie.test/?view=usage", { waitUntil: "domcontentloaded" });
   return { context, page };
 }
 
@@ -142,6 +145,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     t.after(() => browser.close());
     const prefs = async (page) => {
       await page.locator("#prefs").click();
+      await settingsDrawn(page);
       await openPart(page, "usage");
       await page.locator("#trayUsagePick button").waitFor();
     };

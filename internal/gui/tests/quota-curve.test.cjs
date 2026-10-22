@@ -449,8 +449,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await win.route("http://magpie.test/blank", (r) => r.fulfill({ contentType: "text/html", body: "<!doctype html><title>blank</title>" }));
       await win.goto("http://magpie.test/blank");
       await win.evaluate(() => localStorage.setItem("magpie.quotaRange", "off"));
-      await panel.waitForFunction(() => !document.querySelector(".pq-spark"));
+      // The new window has the foreground; background Chromium can withhold
+      // animation frames even after the storage handler changed this DOM.
+      await panel.waitForFunction(() => !document.querySelector(".pq-spark"), null, { polling: 50 });
       assert.ok(await pcard.locator(".pq-dial").count() > 0, "the card is still there");
+      await panel.bringToFront();
       await panel.reload();
       await panel.locator('#ptabs [data-ptab="usage"]').click();
       await pcard.locator(".pq-dial").first().waitFor();

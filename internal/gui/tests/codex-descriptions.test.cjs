@@ -12,7 +12,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
-const { watchSettingsReads, wheelTo, agentRow, openAgentSettings } = require("./reader.cjs");
+const { watchSettingsReads, wheelTo, agentRow, openAgentSettings, pointerClick } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 
@@ -73,22 +73,6 @@ const want = {
   zh: { name: "Codex 会话描述", own: "Codex 自带（ChatGPT）" },
 };
 const view = (page) => page.locator("#view-agents").evaluate((v) => v.scrollTop);
-
-// This test checks the reader's pointer, without Playwright's implicit
-// scrollIntoView. The picker was explicitly wheeled clear above; a hidden
-// or covered target fails here rather than forcing a click through it.
-async function pointerClick(page, locator) {
-  await locator.waitFor({ state: "visible" });
-  const at = await locator.evaluateAll((es) => {
-    if (es.length !== 1) return null;
-    const e = es[0], b = e.getBoundingClientRect();
-    const x = b.left + b.width / 2, y = b.top + b.height / 2;
-    const hit = document.elementFromPoint(x, y);
-    return !e.matches(":disabled") && hit && (hit === e || e.contains(hit)) ? { x, y } : null;
-  });
-  assert(at, "the pointer target is enabled and uncovered");
-  await page.mouse.click(at.x, at.y);
-}
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
   for (const lang of ["en", "zh"]) {

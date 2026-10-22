@@ -189,6 +189,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       // opened while it answers: agnes-key-09's own row is lit, its fold's too, the resting dashed
       await fold.click();
       await keyRow("agnes-key-09").waitFor();
+      // Opening creates the row before the next frame paints its state,
+      // just as ready() above waits for the initial stage's state.
+      await page.waitForFunction(() => [...document.querySelectorAll(".rt-accts li")].some(li => li.querySelector(".who")?.textContent === "agnes-key-09" && li.classList.contains("on")));
       assert.equal(await keyRow("agnes-key-09").evaluate((li) => li.classList.contains("on")), true);
       assert.equal((await keyRow("agnes-key-09").locator("em").textContent()).trim(), answering);
       assert.equal(await keyRow("agnes-key-08").evaluate((li) => li.classList.contains("rest")), true);

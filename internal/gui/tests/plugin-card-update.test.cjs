@@ -59,7 +59,16 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", server(lang));
-        await page.goto("http://magpie.test/?view=plugins");
+        // A known update opens Plugins on Installed. Arrange that ordering
+        // deliberately, then choose Discover: this test is about its card,
+        // not whichever tab won the startup update-dot race.
+        await page.goto("http://magpie.test/?view=agents");
+        await page.waitForFunction(() => pluginUpdates === 1);
+        await page.locator('#nav [data-view="plugins"]').press("Enter");
+        const tabs = page.locator("#view-plugins .lib-tabs .opt");
+        await tabs.nth(2).waitFor();
+        assert.equal(await tabs.nth(2).evaluate(b => b.classList.contains("on")), true, "known updates open Installed");
+        await tabs.nth(1).press("Enter");
         const card = page.locator('#view-plugins .pm-card[data-pkg="opencode-copilot-auth"]').first();
         const up = card.locator("button.pm-act.pm-up");
         await up.waitFor();

@@ -40,7 +40,7 @@ const quotas = (used) => [
   { key: "tvly-…cccc", known: false, used: 0, limit: 0, err: "401 Unauthorized" },
 ];
 
-function serve(lang, posted) {
+function serve(lang, posted, turnsReady = Promise.resolve()) {
   let pick = "";
   let reads = 0;
   const settings = () => ({
@@ -59,6 +59,7 @@ function serve(lang, posted) {
     if (url.pathname === "/api/settings") return json(settings());
     if (url.pathname === "/api/settings/search-api") {
       const b = JSON.parse(r.request().postData());
+      if (b.pick === "turns") await turnsReady;
       posted.push(b);
       if (b.pick) pick = b.pick === "turns" ? "" : b.pick;
       return json(settings());
@@ -82,14 +83,16 @@ function serve(lang, posted) {
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
   for (const lang of LANGS) for (const width of [1100, 420]) {
     test(`${engine} ${lang} ${width}px: a search API's keys take turns and say what each has used`, async (t) => {
+      let releaseTurns;
+      const turnsReady = new Promise((resolve) => { releaseTurns = resolve; });
       const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
-      t.after(() => browser.close());
+      t.after(() => { releaseTurns(); return browser.close(); });
       const page = await (await browser.newContext({ viewport: { width, height: 1400 }, reducedMotion: "reduce" })).newPage();
       page.setDefaultTimeout(5000);
       const errors = [];
       page.on("pageerror", (e) => errors.push(e.message));
       const posted = [];
-      await page.route("**/*", serve(lang, posted));
+      await page.route("**/*", serve(lang, posted, turnsReady));
       await watchSettingsReads(page);
       await watchReplies(page, ["/api/settings/search-api"]);
       await page.goto("http://magpie.test/?view=settings&tab=models");
@@ -150,6 +153,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.deepEqual(posted.filter((p) => p.pick), [{ vendor: "tavily", pick: "order" }]);
       await click(keys.locator(".segs .opt").nth(0));
       await page.waitForFunction(() => document.querySelectorAll("#searchList .search-keys .segs .opt")[0]?.getAttribute("aria-pressed") === "true");
+      assert.deepEqual(posted.filter((p) => p.pick), [{ vendor: "tavily", pick: "order" }], "In turn is optimistic while its save is held");
+      releaseTurns();
+      await page.waitForFunction(() => __apiReplies.length >= 2);
+      await repliesConsumed(page, ["/api/settings/search-api"]);
       assert.deepEqual(posted.filter((p) => p.pick), [{ vendor: "tavily", pick: "order" }, { vendor: "tavily", pick: "turns" }]);
       // redrawn with the same keys, it isn't read again
       assert.equal(posted.filter((p) => p.quota).length, 2);
