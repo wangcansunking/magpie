@@ -21,6 +21,10 @@ async function resizeWAN(page, width) {
   });
   await page.setViewportSize({ width, height: 900 });
   await page.waitForFunction(w => wanResizeSeen && innerWidth === w && innerHeight === 900, width);
+  if (width <= 600) {
+    const small = await page.locator("#view-wan button:visible").evaluateAll(es => es.map(e => ({ text: e.textContent.trim(), height: e.getBoundingClientRect().height })).filter(e => e.height < 44));
+    assert.deepEqual(small, [], "narrow WAN buttons have at least 44px touch targets");
+  }
 }
 const { I18N } = strings();
 const engines = process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"];

@@ -2245,6 +2245,10 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 
 #view-wan .wan-storage-choice { padding: 12px 0; }
 #view-wan .wan-storage-choice .name { margin-bottom: 8px; }
+#view-wan .wan-storage-choice button, #view-wan #wanCopyCode { min-height: 36px; }
+@media (max-width: 600px) {
+  #view-wan button, #view-wan .wan-storage-choice button, #view-wan #wanCopyCode { min-height: 44px; }
+}
 #view-wan .wan-storage-choice [role="radio"][aria-checked="true"] { background: var(--accent); color: var(--accent-fg); }
 #view-wan .wan-device-code { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 8px; }
 #view-wan .wan-device-code code { font-size: 22px; letter-spacing: .12em; font-weight: 600; }
