@@ -6,6 +6,7 @@ Provider sheet completion fix: `92856e5f`.
 Modal horizontal-scroll anchor fix: `9d929e79`.
 Queued Settings redraw fix: `0111f959`.
 Final fixture repairs: `acea4016` and `6bbc4a53`.
+Usability follow-up UI: `d9e935be`, `a7827da8` and `3f102890`.
 The user approved [this concept](wan-gateway-v2-20261022.png). The implementation
 uses magpie's existing shell/theme, menus and translations; the concept's sample
 running state and timestamps are not live service observations.
@@ -164,8 +165,8 @@ WAN relay was exercised. Native Credential Manager and live Claude Code were
 not invoked. Browser screenshots and command requests use test data. Dev and
 the public WAN remain stopped; restarting/restoring sign-in still does not host.
 
-Final Windows candidate built from source/test commit `6bbc4a53` (the following
-fixture/acceptance-only commits do not change executable inputs):
+Initial v2 Windows candidate built from `6bbc4a53`, superseded by the
+follow-up artifact below:
 
 - `dist/magpie-windows-amd64-wan-gateway-6bbc4a53.exe`
 - `--version`: `magpie wan-gateway-6bbc4a53`
@@ -181,3 +182,79 @@ single all-green run of final HEAD. Acceptance combines its complete repository
 coverage with the final passing affected-file matrices above. The new modal and
 pointer regression files were added after glob expansion and passed separately.
 No failing case is waived or skipped.
+
+## Follow-up usability review
+
+The follow-up reviews WAN interactions rather than only its signed-in screenshot.
+
+| Journey | Review and change |
+| --- | --- |
+| First visit | No implicit installation, login or hosting. At narrow widths authentication/setup appears before the long client examples. Empty key lists omit their table headings. |
+| Runtime | An installed runtime is a quiet status with a green indicator and no empty disclosure. Missing runtime shows its install action and download explanation; the existing busy/error controls remain. |
+| Storage choice | Replace the small checkbox with explicit memory/remember choices. Memory remains the default; the entire button is clickable, checked state is announced, arrow/Home/End keys select and move focus without scrolling. Text explains the selected choice in future tense. Unavailable secure storage still fails closed to the existing explicit memory-only behavior. |
+| GitHub authorization | Keep the code selectable; add Copy with the shared clipboard success/fallback behavior. Show its validity deadline beside authorization, not inside signed-in credential management. Open GitHub is the primary external action and remains explicit. Cancel stays available during a held request. |
+| Session management | Waiting authorization does not show Sign out or credential/renewal details. Signed-in management is visible outside the credential disclosure, with its stop/erase explanation. Once polling confirms sign-in, management is available even if an older auth/start reply is held; sign-out must reject that late reply. Renewal state is ignored outside session/recovery states. Empty metadata groups have no border or space. |
+| Start and stop | Disabled actions retain the existing owner/auth/key-read safeguards. Start alone publishes; Stop leaves sign-in intact. Starting can be interrupted; refresh/hide/remount cannot resurrect old action results. |
+| Client connection | Claude/OpenAI and shell/model choices remain explicit. Copy address/example uses the selected protocol and shell. Examples contain placeholders, never an implicit key read. |
+| Key management | Named separate keys, masked values, explicit copy/enable/disable, and confirmed rotate/remove remain. Failed reads retain prior rows and lock writes rather than claiming an empty list. |
+| Recovery and accessibility | Existing retry/required renewal states, unknown-status locking, keyboard menus, hit-tested input, focus/scroll preservation, browser remount and narrow layout remain in the regression matrix. |
+
+Preview and tests use fixtures; this is not a claim that every possible user or
+real-service condition has been exercised. Scoped verification results follow.
+
+Follow-up previews (fixture data only): [authorization](wan-gateway-v2-authorization-usability-20261022.png) and [narrow setup](wan-gateway-v2-setup-usability-20261022.png).
+
+The 300 no-key and 100 populated-key responsive-state combinations passed in
+`wan-v2-usability-layout-matrix-20261022` and
+`wan-v2-usability-key-layout-20261022`. The old UI fails code-copy availability,
+explicit storage choices and empty-runtime-disclosure checks in both engines;
+the new UI passes (`wan-v2-usability-counterexamples-20261022`).
+
+### Follow-up verification and artifact
+
+- GUI Go package: PASS, `wan-v2-usability-go-20261022`.
+- Final embedded asset budget/registry and WAN API checks: PASS,
+  `wan-v2-usability-final-assets-20261022`.
+- WAN/i18n/menu matrix: 93 PASS, zero failed/cancelled/skipped,
+  `wan-v2-usability-final-snapshot-20261022`.
+- Final storage/authorization/touch/held-logout actions: 12 PASS,
+  `wan-v2-usability-touch-controls-20261022`. These assert selected-storage help
+  after expiry, unknown-validity disclosure suppression, safe clearing,
+  clipboard request completion and actual >=44px narrow button targets.
+- Old pre-touch CSS (`98b13a85`) fails the 44px geometry check in both engines;
+  final CSS passes (`wan-v2-usability-touch-counterexamples-20261022`).
+- The preceding WAN iteration retained one WebKit German resize-measurement
+  failure. The viewport helper now waits for the requested resize event and
+  frame before measuring; it does not wait for overflow to disappear or relax
+  the <=1px assertion. The final 93-case matrix passed.
+- The 832-file GUI run was stopped at the user's request. It is incomplete
+  and is not an acceptance requirement; original logs and failures remain in
+  `wan-v2-usability-full-20261022`. No full-suite pass is claimed.
+- Final copy-feedback smoke: 4 PASS (Chromium/WebKit, English/Chinese),
+  `wan-v2-usability-copy-feedback-20261022`. Verifies localized success text,
+  copied code and accessible description for the final two-line UI adjustment.
+
+The current executable is built from the final UI source commit `3f102890`:
+
+- `dist/magpie-windows-amd64-wan-gateway-3f102890.exe`
+- `--version`: `magpie wan-gateway-3f102890`
+- 59,246,592 bytes; x64 GUI PE with embedded Windows resources.
+- SHA-256: `0aa07c1afc47f4cb5a629ff88bf391edc2649fb8cbf63f656763becf34754555`
+- Build evidence: `wan-v2-usability-copy-release-exe-20261022/build-status.json`.
+
+Known broad-run failures so far are three fixture issues (live account-row
+measurement and two context wait/keyboard flows) and two loopback permission
+failures. The repaired account file passed 12 cases
+(`wan-v2-usability-account-models-20261022`), the context files passed 112
+(`wan-v2-usability-context-fixtures-20261022`), and the unchanged real streaming
+reply tests passed both engines with loopback permitted
+(`wan-v2-usability-lifecycle-loopback-20261022`). No tests were skipped, no
+geometry/animation/content tolerances were relaxed, and the real HTTP streaming
+test was not replaced by route interception. Syntax/whitespace audit of all six
+changed JavaScript files passed at `a8eb354f`
+(`wan-v2-usability-source-audit-20261022`); this follow-up changes no Go source.
+
+Final acceptance scope follows the user's instruction: validate our changes,
+without completing full-repository tests. The final WAN script passes syntax
+and whitespace checks. The final executable passes PE/resource validation and
+an isolated --version smoke; no dev server or public WAN was started.
