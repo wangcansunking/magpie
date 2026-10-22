@@ -74,6 +74,22 @@ const want = {
 };
 const view = (page) => page.locator("#view-agents").evaluate((v) => v.scrollTop);
 
+// This test checks the reader's pointer, without Playwright's implicit
+// scrollIntoView. The picker was explicitly wheeled clear above; a hidden
+// or covered target fails here rather than forcing a click through it.
+async function pointerClick(page, locator) {
+  await locator.waitFor({ state: "visible" });
+  const at = await locator.evaluateAll((es) => {
+    if (es.length !== 1) return null;
+    const e = es[0], b = e.getBoundingClientRect();
+    const x = b.left + b.width / 2, y = b.top + b.height / 2;
+    const hit = document.elementFromPoint(x, y);
+    return !e.matches(":disabled") && hit && (hit === e || e.contains(hit)) ? { x, y } : null;
+  });
+  assert(at, "the pointer target is enabled and uncovered");
+  await page.mouse.click(at.x, at.y);
+}
+
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
   for (const lang of ["en", "zh"]) {
     test(`${engine} ${lang}: Codex's description requests go where Codex's settings say`, async (t) => {
@@ -111,7 +127,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert(before > 0, "the agents list must scroll to the row");
 
       // the app's menu: Codex's own and magpie's models
-      await pick.click();
+      await pointerClick(page, pick);
       await page.locator("#pop:not([hidden]) #list li").first().waitFor();
       const items = (await page.locator("#list li:not(.group)").allTextContents()).join("|");
       for (const s of [want[lang].own, "DeepSeek V4 Flash", "cheap"]) assert(items.includes(s), `${s} in ${items}`);
@@ -119,9 +135,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.locator("#pop:not([hidden])").waitFor({ state: "hidden" });
 
       // a model of magpie's
-      await pick.click();
+      await pointerClick(page, pick);
       await page.locator("#pop:not([hidden]) #list li").first().waitFor();
-      await page.locator("#list li:not(.group)").filter({ hasText: "DeepSeek V4 Flash" }).first().click();
+      await pointerClick(page, page.locator("#list li:not(.group)").filter({ hasText: "DeepSeek V4 Flash" }).first());
       await page.locator("#codexDescriptionsPick button", { hasText: "DeepSeek V4 Flash" }).waitFor();
       assert.deepEqual(posted, [["codex-descriptions", { model: "deepseek/deepseek-v4-flash" }]]);
       assert.equal((await page.locator("#codexTitlesPick button").textContent()).trim(), want[lang].own, "the titles' setting is its own");
@@ -130,9 +146,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(await row.locator(".sub").count(), 0);
 
       // and back to Codex's own
-      await pick.click();
+      await pointerClick(page, pick);
       await page.locator("#pop:not([hidden]) #list li").first().waitFor();
-      await page.locator("#list li:not(.group)").filter({ hasText: want[lang].own }).first().click();
+      await pointerClick(page, page.locator("#list li:not(.group)").filter({ hasText: want[lang].own }).first());
       await page.locator("#codexDescriptionsPick button", { hasText: want[lang].own }).waitFor();
       assert.deepEqual(posted.at(-1), ["codex-descriptions", { model: "" }]);
       await page.waitForTimeout(300);

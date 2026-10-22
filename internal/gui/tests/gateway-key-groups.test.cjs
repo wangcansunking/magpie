@@ -15,7 +15,15 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       page.setDefaultTimeout(6000);
       const events = [], errors = [];
       page.on("pageerror", (e) => errors.push(e.message));
-      await page.route("**/*", fixture(lang, "light", events, { lan: true, groups: true, limits: { server: { models: ["group/fast"] } } }));
+      const serve = fixture(lang, "light", events, { lan: true, groups: true, limits: { server: { models: ["group/fast"] } } });
+      let releaseWork;
+      const workReady = new Promise((resolve) => { releaseWork = resolve; });
+      t.after(releaseWork);
+      await page.route("**/*", async (route) => {
+        const req = route.request();
+        if (new URL(req.url()).pathname === "/api/caller-keys/models-key" && req.postDataJSON().key === "work") await workReady;
+        return serve(route);
+      });
       const zh = lang === "zh";
       const w = zh
         ? { label: "此密钥可用的模型", all: "全部模型", groups: "全部路由组", relay: "Relay 的全部模型" }
@@ -46,6 +54,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await menu.locator(".pm-item", { hasText: "GPT-5" }).click();
       await page.keyboard.press("Escape");
       await menu.waitFor({ state: "detached" });
+      // Closing the menu starts a save; it does not finish it. Keep that
+      // request held to exercise the gap, then observe the returned badge
+      // before opening another key's menu (gatewayKeyAction is serialized).
+      assert.deepEqual(events.filter((e) => e.action === "models-key"), [], "the save is still held");
+      releaseWork();
+      await page.waitForFunction(() => document.querySelector('#gatewayKeys .acc[data-key="work"] .key-models')?.title.includes("openai/gpt-5"));
       assert.deepEqual(events.filter((e) => e.action === "models-key").map((e) => e.body), [{ key: "work", models: ["group/coding", "openai/gpt-5"] }]);
       // the key held to group/fast has it ticked; Every routing group picks group/*
       await badge("server").click();
@@ -54,6 +68,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await menu.locator(".pm-item", { hasText: w.groups }).click();
       await page.keyboard.press("Escape");
       await menu.waitFor({ state: "detached" });
+      await page.waitForFunction(() => document.querySelector('#gatewayKeys .acc[data-key="server"] .key-models')?.title.includes("group/*"));
       assert.deepEqual(events.filter((e) => e.action === "models-key").at(-1).body, { key: "server", models: ["group/*", "group/fast"] });
       assert.deepEqual(await scrolled(), at, "a click moved the page");
       // A red here under load (#1974) could not be made again: every rule

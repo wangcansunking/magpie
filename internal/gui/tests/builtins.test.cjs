@@ -14,6 +14,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { reach } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 
@@ -214,12 +215,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // Its row and Usage's can be below the fold: the reader scrolls to
         // them with the wheel, since the page puts back a scroll that isn't
         // the reader's (scrollOnPurpose), a click's own too
-        const wheelTo = async (id) => {
-          const list = await page.locator("#builtinList").boundingBox();
-          await page.mouse.move(list.x + 20, list.y + 20);
-          await page.mouse.wheel(0, 400);
-          await page.waitForFunction((id) => { const r = document.querySelector(`#builtinList [data-id="${id}"] [role="switch"]`).getBoundingClientRect(), foot = document.querySelector("footer.foot"); return r.bottom <= Math.min(document.getElementById("view-plugins").getBoundingClientRect().bottom, foot && foot.offsetParent ? foot.getBoundingClientRect().top : Infinity); }, id);
-        };
+        // Check both edges and the actual hit point. Another unconditional
+        // 400px for Usage could overshoot it above the header, while its
+        // bottom alone still satisfied the old check.
+        const wheelTo = (id) => reach(page, page.locator(`#builtinList [data-id="${id}"] [role="switch"]`));
         await wheelTo("routing");
         await page.locator('#builtinList [data-id="routing"] [role="switch"]').click();
         await page.waitForSelector('#builtinList [data-id="routing"] [aria-checked="false"]');
