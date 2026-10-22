@@ -30,6 +30,7 @@ function serve(lang, st, ctl) {
     if (url.pathname === "/wails/runtime.js") return r.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
     if (url.pathname === "/api/state") return json({ agents: [], profiles: [], settings: settings() });
     if (url.pathname === "/api/settings" && r.request().method() === "POST") {
+      if (ctl.gate) await ctl.gate;
       await new Promise((ok) => setTimeout(ok, ctl.hold));
       if (ctl.refuse) return json({ error: "refused" }, 500);
       Object.assign(st, JSON.parse(r.request().postData()));
@@ -124,8 +125,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
   for (const lang of ["en", "zh", "zh-TW", "ja", "de"]) {
     for (const width of [900, 440]) {
       test(`${engine} ${lang} ${width}px: a thumb glides once, one way, and no other thumb moves`, async (t) => {
+        const st = { lightweight: false }, ctl = { hold: 0, refuse: false, gate: null, release: null };
         const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
-        t.after(() => browser.close());
+        t.after(() => { ctl.release?.(); return browser.close(); });
         const page = await (await browser.newContext({ viewport: { width, height: 1000 } })).newPage();
         page.setDefaultTimeout(5000);
         if (process.env.THROTTLE && engine === "chromium") await (await page.context().newCDPSession(page)).send("Emulation.setCPUThrottlingRate", { rate: +process.env.THROTTLE });
@@ -133,7 +135,6 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // WebKit's notice of a ResizeObserver loop is no error of the page's
         page.on("pageerror", (e) => { if (!/ResizeObserver loop/.test(e.message)) errors.push(e.message); });
         // turned off by the user, so On is a glide away
-        const st = { lightweight: false }, ctl = { hold: 0, refuse: false };
         await page.route("**/*", serve(lang, st, ctl));
         // opened on another tab: General is drawn while hidden
         await watchSettingsReads(page);
@@ -158,14 +159,23 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.waitForTimeout(700);
         oneWay(await stop(page), "lightweightSegs", "answer mid-glide");
         assert.equal(st.lightweight, true);
+        await page.waitForFunction(() => prefsQueued === 0);
         await underPicks(page, "after On");
 
-        // the answer at once, then the page drawn twice more on the way
+        // Draw twice while the Off save is held: a response that happened
+        // to arrive before an arbitrary sleep must not hide a reversal.
         ctl.hold = 0;
+        ctl.gate = new Promise((resolve) => { ctl.release = resolve; });
         await record(page);
-        await opt(0).click();
+        await Promise.all([
+          page.waitForRequest(r => new URL(r.url()).pathname === "/api/settings" && r.method() === "POST"),
+          opt(0).click(),
+        ]);
         await page.waitForTimeout(60);
         await page.evaluate(() => renderSettings());
+        assert.equal(await opt(0).evaluate(b => b.classList.contains("on")), true, "a pending Off choice survives unrelated redraws");
+        ctl.release(); ctl.gate = null;
+        await page.waitForFunction(() => prefsQueued === 0);
         await page.waitForTimeout(60);
         await page.evaluate(() => renderSettings());
         await page.waitForTimeout(600);
@@ -179,6 +189,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await record(page);
         await opt(1).click();
         await page.waitForTimeout(1000);
+        await page.waitForFunction(() => prefsQueued === 0);
         const frames = await stop(page);
         const lw = frames.map((f) => f.find((c) => c.id === "lightweightSegs")).filter(Boolean);
         assert.ok(lw.some((p) => p.x > lw[0].x + 8), "it went towards On first");

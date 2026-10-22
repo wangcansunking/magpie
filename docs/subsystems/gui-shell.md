@@ -46,6 +46,13 @@ Direct initial/font fitting remains synchronous.
 
 ## Constraints and failure behavior
 
+General preference writes are serialized by `savePrefs`. While any such write
+is queued, `renderSettings` defers unrelated redraws so the optimistic selection
+and its thumb remain in place. The last reply redraws the committed settings,
+including rollback after failure. `segs-glide.test.cjs` holds a save while
+requesting redraws, then checks the choice, monotonic glide and failure rollback;
+`segs-press-redraw.test.cjs` still exercises real replacements under a press.
+
 `closeAddSheet` commits the dismissed provider selection before starting its
 closing animation. Completion redraws/focuses the idle Providers page only;
 it cannot clear or replace an editor, import or page opened in the meantime.

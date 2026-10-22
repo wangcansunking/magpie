@@ -19403,6 +19403,9 @@ function renderUpdateMirror(r, s) {
 }
 
 function renderSettings() {
+  // General saves own their optimistic controls until the last queued
+  // reply. An unrelated redraw must not send their thumbs back to prefs.
+  if (prefsQueued) return;
   const s = prefs;
   const keep = prefsKeep(s);
   prefsBase = keep;
