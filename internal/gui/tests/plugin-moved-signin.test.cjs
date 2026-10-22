@@ -74,7 +74,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     for (const lang of ["en", "zh"]) {
       await t.test(lang, async () => {
         const w = L[lang];
-        const page = await (await browser.newContext({ viewport: { width: 900, height: 800 } })).newPage();
+        const page = await (await browser.newContext({ viewport: { width: 900, height: 800 }, reducedMotion: "no-preference" })).newPage();
         page.setDefaultTimeout(5000);
         const errors = [], asked = [];
         page.on("pageerror", (e) => errors.push(e.message));
@@ -122,12 +122,32 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await box.locator(".devcode code", { hasText: "ABCD-EFGH" }).waitFor();
         if (process.env.ARTIFACT_DIR) await box.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `plugin-moved-code-${engine}-${lang}.png`) });
         assert.deepEqual(asked.filter(([k]) => k === "signin").map(([, b]) => b), [{ provider: "factory", method: 0, inputs: {} }]);
+        // Let the close animation finish visually, but hold its completion
+        // callback. A real row remains clickable while this is in flight;
+        // its new editor must not be cleared when the old sheet finishes.
+        await page.evaluate(() => {
+          const sheet = document.getElementById("addSheet"), animate = sheet.animate.bind(sheet);
+          sheet.animate = (frames, options) => {
+            const a = animate(frames, options);
+            if (!Array.isArray(frames) || frames.at(-1).height !== "0px") return a;
+            a.finish();
+            const finished = new Promise((resolve) => { window.__finishSheetClose = resolve; });
+            window.__sheetCloseStarted = true;
+            return { finished, cancel: () => a.cancel() };
+          };
+        });
         await page.keyboard.press("Escape");
+        await page.waitForFunction(() => __sheetCloseStarted);
 
         // Cursor's editor: as many accounts as the plugin keeps
         await page.locator(".row.provider", { hasText: "Cursor" }).click();
         const ed = page.locator("#modal .editor");
         await ed.locator(".accts").waitFor();
+        await page.evaluate(async () => { __finishSheetClose(); await new Promise((resolve) => setTimeout(resolve)); });
+        assert.equal(await page.evaluate(() => editing), "cursor", "the previous sheet's close completion must keep the new editor's owner");
+        assert.equal(await page.locator("#modal").evaluate(e => e.classList.contains("out")), false, "the new editor must not start closing");
+        assert.equal(await ed.locator(".accts").isVisible(), true, "the previous sheet's close completion must keep the new Cursor editor");
+        assert.equal(await page.locator("#addSheet").isHidden(), true, "the previous sheet is closed");
         assert.ok(!(await ed.innerText()).includes(w.single), "the editor says Cursor keeps one account");
         assert.deepEqual(errors, []);
       });

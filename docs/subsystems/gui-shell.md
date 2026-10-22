@@ -46,6 +46,14 @@ Direct initial/font fitting remains synchronous.
 
 ## Constraints and failure behavior
 
+`closeAddSheet` commits the dismissed provider selection before starting its
+closing animation. Completion redraws/focuses the idle Providers page only;
+it cannot clear or replace an editor, import or page opened in the meantime.
+`plugin-moved-signin.test.cjs` holds the animation's completion while opening
+Cursor's plugin-owned account editor, then checks that both its owner and its
+open modal survive. `signin-closes-sheet.test.cjs` covers sign-in completion
+putting the sheet away without leaving blank space.
+
 Routing rest actions mark their removable action line with `data-unrolls`, so
 the shell holds the account row when a successful Try now removes that line.
 Holding a child whose line shrinks instead moved the page by 20px.

@@ -15189,18 +15189,22 @@ new IntersectionObserver(([en]) => {
 // it did before the sheet opened. Held, the view kept the sheet's height as
 // empty room under the list (the blank #433 was about).
 function closeAddSheet() {
-  const view = $("#view-providers"), sheet = $("#addSheet");
+  const pane = $("#view-providers"), sheet = $("#addSheet");
   if (!adding) return;
-  if (held?.v === view) held = null;
-  setRoom(view, 0);
+  const closedIn = view;
+  if (held?.v === pane) held = null;
+  setRoom(pane, 0);
   addReturnPick = null;
+  // Closing owns the selection it dismisses, not an editor opened while
+  // the animation runs. Settle that state now, before another row can act.
+  adding = false; editing = null; draft = null; presetQuery = "";
   rollUpSheet(sheet, () => {
-    adding = false; editing = null; draft = null; presetQuery = "";
+    if (adding || editing !== null || importing || importingApps || view !== closedIn) return;
     renderProviders();
-    setRoom(view, 0);
+    setRoom(pane, 0);
     // back from stepping aside now, not when the observer next looks, so it
     // can take the focus
-    view.querySelector(".after-list").classList.remove("away");
+    pane.querySelector(".after-list").classList.remove("away");
     $("#addProvider").focus({ preventScroll: true });
   });
 }
