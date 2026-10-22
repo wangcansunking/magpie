@@ -106,7 +106,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         page.on("pageerror", (e) => errors.push(e.message));
         const posts = [];
         await page.route("**/*", serve(lang, posts));
-        await page.goto("http://magpie.test/?view=usage");
+        await page.goto("http://magpie.test/?view=usage", { waitUntil: "domcontentloaded" });
         const rows = page.locator(".ctx-tune-row");
         await rows.first().waitFor();
         assert.equal(await page.getByText(heading[lang], { exact: true }).count(), 1, "the heading in " + lang);
@@ -196,7 +196,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await base(r);
       if (p === "/api/tune") tuned();
     });
-    await page.goto("http://magpie.test/?view=usage");
+    await page.goto("http://magpie.test/?view=usage", { waitUntil: "domcontentloaded" });
     await page.locator(".ctx-tune-chart svg").first().waitFor();
     const charts = await page.locator(".ctx-tune-chart svg").count();
     assert.ok(charts > 0);
@@ -234,7 +234,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         page.on("pageerror", (e) => errors.push(e.message));
         const posts = [];
         await page.route("**/*", serve(lang, posts));
-        await page.goto("http://magpie.test/?view=usage");
+        await page.goto("http://magpie.test/?view=usage", { waitUntil: "domcontentloaded" });
         const row = page.locator(".ctx-tune-row").nth(0);
         await row.locator(".ctx-tune-pick").waitFor();
         await page.locator(".ctx-none").waitFor(); // the history has answered: the pane is its full length
@@ -307,7 +307,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       page.on("pageerror", (e) => errors.push(e.message));
       const base = serve(lang, []);
       await page.route("**/*", (r) => new URL(r.request().url()).pathname === "/api/tune" ? r.fulfill({ json: close }) : base(r));
-      await page.goto("http://magpie.test/?view=usage");
+      await page.goto("http://magpie.test/?view=usage", { waitUntil: "domcontentloaded" });
       await page.locator(".ctx-tune-chart").nth(2).waitFor();
       const axes = await page.locator(".ctx-tc-x").evaluateAll((all) => all.map((a) => [...a.children].map((s) => {
         const r = s.getBoundingClientRect();
@@ -403,7 +403,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         page.on("pageerror", (e) => errors.push(e.message));
         const base = serve(lang, []);
         await page.route("**/*", (r) => new URL(r.request().url()).pathname === "/api/tune" ? r.fulfill({ json: timedTune }) : base(r));
-        await page.goto("http://magpie.test/?view=usage");
+        await page.goto("http://magpie.test/?view=usage", { waitUntil: "domcontentloaded" });
         const row = page.locator(".ctx-tune-row").nth(0);
         await row.locator(".ctx-tune-pick").waitFor();
         await page.locator(".ctx-none").waitFor();
@@ -504,7 +504,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           }
           return base(r);
         });
-        await page.goto("http://magpie.test/?view=usage");
+        await page.goto("http://magpie.test/?view=usage", { waitUntil: "domcontentloaded" });
         const row = page.locator(".ctx-tune-row").nth(0);
         await row.locator(".ctx-tune-pick").waitFor();
         const chip = row.locator(".ctx-tune-foot .ctx-chip");

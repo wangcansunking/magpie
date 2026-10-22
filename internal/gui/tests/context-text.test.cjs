@@ -212,7 +212,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await chat.focus();
         await page.keyboard.press("Enter");
         await view.waitFor();
-        await view.locator(".ctx-vi-head").first().click();
+        // This leg exercises keyboard activation, without waiting for
+        // pointer stability frames while the modal is animating.
+        await view.locator(".ctx-vi-head").first().press("Enter");
         await view.locator(".ctx-text", { hasText: "port the parser" }).waitFor();
         assert.equal(await view.locator(".ctx-vi.open .ctx-piece").count(), 3);
         assert.equal(await view.locator(".ctx-vi.open .ctx-piece-note").count(), 1, "the sealed reasoning is named");
