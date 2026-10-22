@@ -8694,8 +8694,15 @@ function holdModal(later) {
   new MutationObserver(later).observe(d, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["class", "hidden", "open"] });
   m.addEventListener("pointerdown", (e) => modalMark(e.target), true);
   m.addEventListener("focusin", (e) => modalMark(e.target), true);
-  // a scroll moves the marked element, not the dialog
-  m.addEventListener("scroll", () => modalMark(modalHold.at), true);
+  // Only vertical scrolling rebases the vertical anchor. WebKit can clamp
+  // horizontal overflow while content above it reflows; accepting that as
+  // a new depth discards the movement holdModal still needs to compensate.
+  const scrollTops = new WeakMap();
+  m.addEventListener("scroll", (e) => {
+    const top = e.target.scrollTop || 0, before = scrollTops.get(e.target) || 0;
+    scrollTops.set(e.target, top);
+    if (top !== before) modalMark(modalHold.at);
+  }, true);
 }
 function openModal(content) {
   const m = $("#modal"), d = m.firstElementChild;

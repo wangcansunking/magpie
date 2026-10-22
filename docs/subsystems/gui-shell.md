@@ -54,6 +54,13 @@ Cursor's plugin-owned account editor, then checks that both its owner and its
 open modal survive. `signin-closes-sheet.test.cjs` covers sign-in completion
 putting the sheet away without leaving blank space.
 
+Modal placement holds the last pressed/focused control's vertical depth while
+content reflows. Only a change in a scroller's `scrollTop` rebases that depth;
+a horizontal scroll, including WebKit clamping overflow during reflow, leaves
+the pending vertical compensation intact. `modal-horizontal-anchor.test.cjs`
+orders a fractional reflow and horizontal scroll before the fit, including at
+a nonzero vertical offset, and checks vertical scrolling back to zero too.
+
 Routing rest actions mark their removable action line with `data-unrolls`, so
 the shell holds the account row when a successful Try now removes that line.
 Holding a child whose line shrinks instead moved the page by 20px.
