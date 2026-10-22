@@ -134,6 +134,10 @@ func TestWANRefreshTransientFailureRetriesButDoesNotExtendExpiry(t *testing.T) {
 	clock.nanos.Store(old.RefreshAfter.UnixNano())
 	close(step.release)
 	retry := nextAuthWait(t, clock, 30*time.Second)
+	status := a.Status()
+	if status.Renewal == nil || status.Renewal.State != "retrying" || !status.Renewal.NextAttemptAt.Equal(a.now().Add(30*time.Second)) {
+		t.Fatal("transient retry did not publish its actual next attempt")
+	}
 	if a.tokenExpires() != old.ExpiresAt {
 		t.Fatal("failed refresh extended the access deadline")
 	}
@@ -155,6 +159,9 @@ func TestWANRefreshRejectionErasesRememberedPair(t *testing.T) {
 	clock.nanos.Store(old.RefreshAfter.UnixNano())
 	close(step.release)
 	status := awaitAuth(t, a, func(s AuthStatus) bool { return s.State == "error" })
+	if status.Renewal == nil || status.Renewal.State != "required" || !status.Renewal.NextAttemptAt.IsZero() {
+		t.Fatal("rejected refresh did not require a fresh sign-in")
+	}
 	if strings.Contains(status.Error, "SECRET") {
 		t.Fatal("OAuth error detail leaked")
 	}
@@ -246,5 +253,61 @@ func TestWANRefreshTerminalExpiryErasesAnAlreadyExpiredSession(t *testing.T) {
 	a.CancelJoin()
 	if saved, _, _ := store.snapshot(); saved.Access != "" {
 		t.Fatal("expired pair survived restart")
+	}
+}
+
+func TestWANRenewalStatusTracksScheduledAndInFlightWork(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	store := &authTestStore{}
+	a, clock := fakeAuth(t, store, func(r *http.Request) (string, error) {
+		close(entered)
+		select {
+		case <-release:
+			return refreshedGrant, nil
+		case <-r.Context().Done():
+			return "", r.Context().Err()
+		}
+	})
+	old := seedRefresh(t, a, clock, store, false)
+	step := nextAuthWait(t, clock, 55*time.Minute)
+	before := a.Status()
+	if before.Renewal == nil || before.Renewal.State != "scheduled" || before.Renewal.NextAttemptAt != old.RefreshAfter {
+		t.Fatal("saved renewal schedule was not exposed")
+	}
+	before.Renewal.State = "caller mutation"
+	if a.Status().Renewal.State != "scheduled" {
+		t.Fatal("status returned mutable owner state")
+	}
+	clock.nanos.Store(old.RefreshAfter.UnixNano())
+	close(step.release)
+	waitDone(t, entered)
+	during := a.Status()
+	if during.Renewal == nil || during.Renewal.State != "refreshing" || !during.Renewal.NextAttemptAt.IsZero() {
+		t.Fatal("in-flight renewal was reported as a future scheduled attempt")
+	}
+	close(release)
+	nextAuthWait(t, clock, 55*time.Minute)
+	after := a.Status()
+	if after.Renewal == nil || after.Renewal.State != "scheduled" || !after.Renewal.NextAttemptAt.After(old.RefreshAfter) {
+		t.Fatal("rotation did not replace the published schedule")
+	}
+	data, _ := json.Marshal(after)
+	if strings.Contains(string(data), "wan-access") || strings.Contains(string(data), "wan-refresh") {
+		t.Fatal("renewal metadata exposed a credential")
+	}
+	a.Logout()
+	if a.Status().Renewal != nil {
+		t.Fatal("logout retained scheduled renewal metadata")
+	}
+}
+
+func TestWANAccessOnlyLoginNeverClaimsAutomaticRenewal(t *testing.T) {
+	a, _ := fakeAuth(t, &authTestStore{}, func(*http.Request) (string, error) { return "", nil })
+	a.mu.Lock()
+	a.credential = savedCredential{Version: 1, ClientID: a.clientID, Access: "legacy-access", ExpiresAt: a.now().Add(time.Hour)}
+	a.status.State = "signed_in"
+	a.mu.Unlock()
+	if a.Status().Renewal != nil {
+		t.Fatal("legacy access-only credential claimed a refresh worker")
 	}
 }

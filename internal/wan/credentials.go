@@ -51,7 +51,12 @@ func keepCredentials(owner context.Context, a *auth, child *sdkProcess, generati
 		for {
 			next, deadline, changed, err := a.credentialWatch()
 			if err != nil {
-				fail(errors.New("WAN sign-in expired; sign in again"))
+				status := a.Status()
+				if status.Renewal != nil && status.Renewal.State != "required" {
+					fail(errors.New("Credentials expired before WAN renewal; start WAN again after sign-in recovers"))
+				} else {
+					fail(errors.New("WAN sign-in expired; sign in again"))
+				}
 				return
 			}
 			if next != token {

@@ -340,11 +340,13 @@ function envSnippet(vars) {
 }
 
 // every exposed model, as the ids agents use
-function gatewayModels() {
+function gatewayModels(state = providers) {
+  // WAN supplies its own cancellable read; the Gateway page keeps using the
+  // shell's snapshot. Both offer the same enabled models and routing groups.
   // the routing groups first, as the agents' pickers list them
   // a group's lists may come as null (#1585): one such group mustn't take
   // every model off the list
-  const out = (providers.gateway.groups || []).filter((g) => g && typeof g.id === "string").map((g) => ({ id: g.id, name: g.name || g.id, icons: g.icons || [], group: true,
+  const out = (state.gateway.groups || []).filter((g) => g && typeof g.id === "string").map((g) => ({ id: g.id, name: g.name || g.id, icons: g.icons || [], group: true,
     provider: { name: [t("routing group"), (g.providers || []).join(", ")].filter(Boolean).join(" · ") },
     efforts: g.efforts || [], images: !!g.images, context: g.context, output: g.output, members: g.members || [] }));
   // a provider switched off is skipped: the gateway refuses its models, so
@@ -355,7 +357,7 @@ function gatewayModels() {
   // the levels agents are offered: those kept, else all it has; one whose
   // levels aren't known (given) offers only those it was given
   const offered = (m) => m.kept?.length || m.given ? m.kept || [] : m.efforts || [];
-  for (const p of providers.providers) { if (p.off) continue; for (const m of p.models) if (m.on) out.push({ id: `${p.id}/${m.id}`, name: m.name, provider: p, context: m.context, output: m.output, efforts: offered(m), images: !!m.images }); }
+  for (const p of state.providers) { if (p.off) continue; for (const m of p.models) if (m.on) out.push({ id: `${p.id}/${m.id}`, name: m.name, provider: p, context: m.context, output: m.output, efforts: offered(m), images: !!m.images }); }
   return out;
 }
 

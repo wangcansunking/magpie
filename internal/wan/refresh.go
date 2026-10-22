@@ -27,6 +27,7 @@ func (a *auth) stopRefreshLocked() {
 		a.refreshCancel()
 		a.refreshCancel = nil
 	}
+	a.renewal = AuthRenewal{}
 }
 
 func (a *auth) startRefreshLocked() {
@@ -37,6 +38,11 @@ func (a *auth) startRefreshLocked() {
 	ctx, cancel := context.WithCancel(a.owner)
 	a.refreshCancel = cancel
 	record, remember := a.credential, a.status.Storage == "system"
+	next := record.RefreshAfter
+	if next.Before(a.now()) {
+		next = a.now()
+	}
+	a.renewal = AuthRenewal{State: "scheduled", NextAttemptAt: next}
 	a.workers.Add(1)
 	go a.refreshLoop(ctx, record, remember)
 }
@@ -44,6 +50,16 @@ func (a *auth) startRefreshLocked() {
 func (a *auth) refreshActiveLocked(ctx context.Context, record savedCredential) bool {
 	return ctx.Err() == nil && !a.closed && !a.blocked && a.owner.Err() == nil &&
 		a.credential.Access == record.Access && a.credential.Refresh == record.Refresh
+}
+
+func (a *auth) publishRenewal(ctx context.Context, record savedCredential, state string, next time.Time) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.refreshActiveLocked(ctx, record) {
+		return false
+	}
+	a.renewal = AuthRenewal{State: state, NextAttemptAt: next}
+	return true
 }
 
 func (a *auth) refreshLoop(ctx context.Context, record savedCredential, remember bool) {
@@ -59,6 +75,9 @@ func (a *auth) refreshLoop(ctx context.Context, record savedCredential, remember
 			return
 		}
 		issued := a.now()
+		if !a.publishRenewal(ctx, record, "refreshing", time.Time{}) {
+			return
+		}
 		grant, err := a.github.refresh(ctx, a.clientID, record.Refresh)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -72,6 +91,9 @@ func (a *auth) refreshLoop(ctx context.Context, record savedCredential, remember
 			// closes if that deadline passes; network trouble never extends it.
 			retry = min(5*time.Minute, max(30*time.Second, retry*2))
 			delay = min(retry, max(time.Duration(0), record.RefreshExpiresAt.Sub(a.now())))
+			if !a.publishRenewal(ctx, record, "retrying", a.now().Add(delay)) {
+				return
+			}
 			continue
 		}
 		next := rotatingCredential(a.clientID, grant, issued)
@@ -115,6 +137,7 @@ func (a *auth) commitRefresh(ctx context.Context, old, next savedCredential, rem
 	active = a.refreshActiveLocked(ctx, old)
 	if active {
 		a.credential = next
+		a.renewal = AuthRenewal{State: "scheduled", NextAttemptAt: next.RefreshAfter}
 		a.status.State, a.status.Error, a.status.ExpiresAt = "signed_in", "", next.ExpiresAt
 		a.signalLocked()
 	}

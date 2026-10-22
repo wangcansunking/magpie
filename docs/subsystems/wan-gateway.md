@@ -97,6 +97,23 @@ in the background; the page shows loading while access is unavailable. Restoring
 or renewing sign-in never hosts a tunnel. A memory session renews only until the
 owner exits and is never remembered implicitly.
 
+`AuthStatus.renewal` is an optional, credential-free snapshot of the owner's
+actual work. Its states are `scheduled`, `refreshing`, `retrying` and `required`.
+`nextAttemptAt` is present for scheduled work and transient retries, and absent
+while a request is in flight or a fresh login is required. It is not calculated
+by the browser from access expiry. Status returns a value copy; reading it does
+no I/O. Access-only credentials have no renewal worker and no renewal snapshot.
+Logout/replacement clears the snapshot; a refused rotating credential reports
+`required`. An expired access token that is still being renewed stops hosting
+with a recovery/restart message rather than asking for another device login.
+
+The login card makes renewal health primary, with next planned attempt and
+memory/system storage shown separately. Access-token expiry and remaining time
+are secondary details with an explicit local time zone, not a fixed login-session
+deadline. The backend's zero signed-in expiry means a non-expiring access-only
+grant; invalid or missing dates remain unknown. The page does not invent a
+refresh-token lifetime or show healthy renewal from `signed_in` alone.
+
 Login does not host. Stop does not sign out. Replacing a sign-in while hosting
 is refused until Stop. Sign out invalidates authentication and blocks Start,
 then stops and joins hosting before erasing the local credential. Local sign
@@ -302,14 +319,29 @@ connectivity, native platform behavior or service authentication.
 
 ## Client setup page
 
-The WAN page groups runtime and GitHub readiness together, followed by the
-public Endpoint and independently managed WAN keys. Connection lifecycle
-notes live in an expandable details section. The Claude Code Linux/macOS
-example uses the running Endpoint only while status is fresh, otherwise a
-placeholder. Its key and model are always placeholders; no key is retained
-in the example or automatically copied. Clients replace them with a WAN
-key and a provider model ID. [UX concept](../design/wan-gateway-ux.png) is a
-visual reference; runtime state and available controls come from the API.
+The WAN page puts service state first, then client connection beside sign-in
+health, followed by independent WAN keys. Installed runtime details collapse;
+new installs and device authorization remain explicit. Provider sign-in supplies
+models; the separate GitHub login owns the tunnel. Stop/sign-out effects and
+public-relay details remain available without dominating the working view.
+[The approved v2 concept](../design/wan-gateway-v2-20261022.png) is a visual
+reference, not a record of a live running tunnel.
+
+Client tabs distinguish Claude Code's root Endpoint from an OpenAI-compatible
+`/v1` base. PowerShell/Bash examples quote values literally. An explicit model
+picker uses a separately cancellable `GET /api/providers` read and the existing
+Gateway plugin's `gatewayModels(state)` eligibility rules. Only public model IDs
+and labels are retained, not the account snapshot. Empty and unreadable model
+lists are different; failures and held reads cannot block Stop or sign-out.
+Changing/hiding/remounting the page invalidates late model reads. The kernel's
+error placeholder is not a mounted WAN view and cannot receive async renders.
+
+Examples always contain `YOUR_WAN_KEY`; they never fetch a secret implicitly.
+The selected model must remain eligible, and copying a runnable example requires
+a fresh running Endpoint. A missing address/model remains a placeholder. Key
+copying stays explicit, while rotate/remove move into a per-key menu and retain
+their existing confirmations. Unknown key reads close menus and lock mutations;
+copy completion cannot re-enable controls after a returned key-read error.
 
 SDK startup failures return fixed HTTP/network/TLS/timeout/runtime categories.
 No exception message, remote response body, headers, URL or credential enters

@@ -458,6 +458,11 @@ snapped before the existing one-pixel hold threshold, while fractional
 baselines and real subpixel layout remain unchanged. `group-member-weight.test.cjs`
 covers active-click ordering, transform recovery and reader movement.
 
+`openProtoMenu` and `openSessCombo` return focus with `preventScroll` when Escape
+closes the menu. An anchor moved below its scroller during a redraw is focused
+without being revealed. `menu-focus.test.cjs` holds that layout change explicitly
+and checks both menu types in Chromium and WebKit.
+
 `openModal` makes the background inert when an editor opens fresh, leaving
 confirmations and menus interactive through redraws. `closeModal` releases
 that background as soon as the close animation starts, so clicks reach the

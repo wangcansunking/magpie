@@ -14751,7 +14751,7 @@ function openProtoMenu(anchor, opts, value, choose, head = "Protocol this key sp
   const keys = (e) => {
     const shown = filter ? items.filter((b) => !b.hidden) : items;
     const i = shown.indexOf(document.activeElement);
-    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeProtoMenu(); anchor.focus(); }
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeProtoMenu(); anchor.focus({ preventScroll: true }); }
     else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault(); e.stopPropagation();
       const n = shown.length, from = i < 0 ? (e.key === "ArrowDown" ? n - 1 : 0) : i;
@@ -18717,7 +18717,7 @@ function openSessCombo(anchor, all, opts, value, choose, head) {
   const scroll = (e) => { if (scrollCloses(box, e)) closeProtoMenu(); };
   const keys = (e) => {
     const i = items.indexOf(document.activeElement);
-    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeProtoMenu(); anchor.focus(); }
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeProtoMenu(); anchor.focus({ preventScroll: true }); }
     else if ((e.key === "ArrowDown" || e.key === "ArrowUp") && items.length) {
       e.preventDefault(); e.stopPropagation();
       const n = items.length, from = i < 0 ? (e.key === "ArrowDown" ? n - 1 : 0) : i;

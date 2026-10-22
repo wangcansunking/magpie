@@ -14,14 +14,22 @@ import (
 // A zero signed-in deadline means GitHub issued a non-expiring access token.
 // Storage describes this session; StorageAvailable separately enables Remember.
 type AuthStatus struct {
-	State            string    `json:"state"`
-	Error            string    `json:"error"`
-	UserCode         string    `json:"userCode"`
-	VerificationURI  string    `json:"verificationURI"`
-	ExpiresAt        time.Time `json:"expiresAt"`
-	AttemptID        uint64    `json:"attemptID"`
-	Storage          string    `json:"storage"`
-	StorageAvailable bool      `json:"storageAvailable"`
+	State            string       `json:"state"`
+	Error            string       `json:"error"`
+	UserCode         string       `json:"userCode"`
+	VerificationURI  string       `json:"verificationURI"`
+	ExpiresAt        time.Time    `json:"expiresAt"`
+	AttemptID        uint64       `json:"attemptID"`
+	Storage          string       `json:"storage"`
+	StorageAvailable bool         `json:"storageAvailable"`
+	Renewal          *AuthRenewal `json:"renewal,omitempty"`
+}
+
+// AuthRenewal describes the owner's actual scheduled work, not a browser's
+// estimate from access expiry. Transient retries keep their own next attempt.
+type AuthRenewal struct {
+	State         string    `json:"state"`
+	NextAttemptAt time.Time `json:"nextAttemptAt,omitzero"`
 }
 
 type authAttempt struct {
@@ -47,6 +55,7 @@ type auth struct {
 	credential    savedCredential
 	current       *authAttempt
 	refreshCancel context.CancelFunc
+	renewal       AuthRenewal
 	changed       chan struct{}
 	refreshWait   func(context.Context, time.Duration) error
 	rejection     uint64 // owns pending erasure of a rejected remembered credential
@@ -149,7 +158,12 @@ func (a *auth) Status() AuthStatus {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.expireLocked()
-	return a.status
+	out := a.status
+	if !a.closed && a.renewal.State != "" {
+		renewal := a.renewal
+		out.Renewal = &renewal
+	}
+	return out
 }
 
 // Start registers the attempt before any request and returns immediately. The
@@ -420,7 +434,11 @@ func (a *auth) Reject(snapshotToken string) bool {
 	if a.closed || a.blocked || a.owner.Err() != nil || (a.status.State != "signed_in" && a.status.State != "expired" && !(a.status.State == "loading" && a.credential.Refresh != "")) || snapshotToken == "" || a.credential.Access != snapshotToken {
 		return false
 	}
+	renewable := a.credential.Refresh != ""
 	a.stopRefreshLocked()
+	if renewable {
+		a.renewal = AuthRenewal{State: "required"}
+	}
 	a.signalLocked()
 	remembered := a.status.Storage == "system"
 	a.credential = savedCredential{}

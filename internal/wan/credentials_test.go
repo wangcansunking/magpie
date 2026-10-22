@@ -130,3 +130,29 @@ func TestWANCredentialUpdateFailureClosesAdmissionAndStopJoinsWriter(t *testing.
 		})
 	}
 }
+
+func TestWANRenewalRecoveryDoesNotAskForAnotherDeviceLogin(t *testing.T) {
+	m, _ := fakeManager(t, "credentials", http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	if err := m.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	m.auth.mu.Lock()
+	m.auth.credential.Refresh = "fake-ongoing-refresh"
+	m.auth.credential.ExpiresAt = time.Now().Add(-time.Second)
+	m.auth.renewal = AuthRenewal{State: "retrying", NextAttemptAt: time.Now().Add(time.Minute)}
+	m.auth.signalLocked()
+	m.auth.mu.Unlock()
+	deadline := time.NewTimer(20 * time.Second)
+	defer deadline.Stop()
+	for m.Status().State != "failed" {
+		select {
+		case <-deadline.C:
+			t.Fatal("expired credential kept hosting")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if message := m.Status().Error; !strings.Contains(message, "after sign-in recovers") || strings.Contains(message, "sign in again") {
+		t.Fatal("recoverable renewal incorrectly requested another device login", message)
+	}
+}

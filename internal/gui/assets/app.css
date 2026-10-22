@@ -2221,21 +2221,78 @@ body.window .ag-sk-icon { width: 22px; height: 22px; border-radius: 6px; }
 #view-wan > * { flex-shrink: 0; }
 #view-wan .wan-intro { padding: 0 2px 14px; }
 #view-wan .wan-status-card { margin-bottom: 16px; }
-#view-wan .wan-setup { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 16px; align-items: start; }
-#view-wan .wan-setup-card { min-width: 0; border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+#view-wan .wan-workspace { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 16px; }
+#view-wan .wan-client-card, #view-wan .wan-session-card, #view-wan .wan-keys-card { min-width: 0; border: 1px solid var(--line); border-radius: 10px; padding: 18px; background: var(--card); }
+#view-wan .wan-client-card { flex: 2 1 420px; }
+#view-wan .wan-session-card { flex: 1 1 280px; }
+#view-wan .wan-keys-card { margin-top: 16px; }
+#view-wan .wan-client-card > .row-head, #view-wan .wan-keys-card > .row-head { margin-top: 0; }
+#view-wan .wan-client-card > .row-head .label, #view-wan .wan-session-card > .row-head .label, #view-wan .wan-keys-card > .row-head .label { color: var(--fg); font-size: 15px; font-weight: 600; letter-spacing: 0; text-transform: none; }
+#view-wan #addWANKey { padding: 7px 10px; border-radius: 6px; background: var(--accent); color: var(--accent-fg); }
+#view-wan #wanStatus { flex-wrap: wrap; gap: 10px; }
+#view-wan #wanStatus .who { flex: 1 1 220px; }
+#view-wan .wan-restart-note { flex: 0 1 200px; }
 #view-wan .wan-setup-card > .row-head { margin-top: 0; }
 #view-wan .wan-setup-card > .list { border: 0; background: transparent; margin: 0; }
 #view-wan .wan-setup-card .row { min-height: 32px; padding: 6px 0; }
 #view-wan .wan-setup-card > .usage-note { margin: 8px 0 0; }
+#view-wan .wan-auth-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; padding: 4px 0 10px; }
+#view-wan .wan-auth-status { display: flex; align-items: center; gap: 9px; min-width: 0; }
+#view-wan .wan-auth-dot { width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--faint); }
+#view-wan #wanAuth[data-state="signed_in"] .wan-auth-dot { background: var(--green); box-shadow: 0 0 0 3px var(--green-soft); }
+#view-wan #wanAuth[data-state="expired"] .wan-auth-dot, #view-wan #wanAuth[data-state="error"] .wan-auth-dot { background: var(--amber); }
+#view-wan #wanLogout { color: var(--fg-2); font-size: 12px; }
+#view-wan .wan-auth-summary { margin: 12px 0; }
+#view-wan .wan-auth-summary dt { color: var(--fg-2); font-size: 12px; margin-bottom: 7px; }
+#view-wan .wan-auth-summary dd { margin: 0; }
+#view-wan .wan-auth-summary time, #view-wan #wanAuthRemaining { display: block; margin-top: 5px; color: var(--fg-2); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+#view-wan .wan-renewal { padding: 8px 0 16px; }
+#view-wan .wan-renewal-title { display: flex; align-items: center; gap: 10px; font-size: 17px; }
+#view-wan .wan-renewal-mark { display: grid; place-items: center; flex: none; width: 34px; height: 34px; background: var(--pill); border-radius: 50%; font-size: 22px; }
+#view-wan #wanRenewal[data-state="scheduled"] .wan-renewal-title { color: var(--green); }
+#view-wan #wanRenewal[data-state="scheduled"] .wan-renewal-mark { background: var(--green-soft); }
+#view-wan #wanRenewal[data-state="retrying"] .wan-renewal-title, #view-wan #wanRenewal[data-state="required"] .wan-renewal-title { color: var(--amber); }
+#view-wan .wan-renewal .usage-note { margin: 8px 0 0; }
+#view-wan .wan-session-meta { margin: 0; padding: 8px 0; border-top: 1px solid var(--line); }
+#view-wan .wan-session-meta > div { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 12px; padding: 7px 0; font-size: 12px; line-height: 1.5; }
+#view-wan .wan-session-meta dt { color: var(--fg-2); }
+#view-wan .wan-session-meta dd { margin: 0; overflow-wrap: anywhere; }
+#view-wan .wan-credential-details, #view-wan .wan-runtime-details { border-top: 1px solid var(--line); padding-top: 12px; margin-top: 8px; font-size: 12px; }
+#view-wan .wan-credential-details summary, #view-wan .wan-runtime-details summary { cursor: pointer; line-height: 1.6; }
+#view-wan .wan-credential-details .usage-note { margin: 10px 0; }
+#view-wan #wanLogout { margin-top: 8px; }
+#view-wan .wan-client-tabs { display: inline-flex; flex-wrap: wrap; gap: 3px; padding: 3px; border: 1px solid var(--line); border-radius: 8px; max-width: 100%; }
+#view-wan .wan-client-tabs .text { padding: 6px 9px; border-radius: 5px; overflow-wrap: anywhere; }
+#view-wan .wan-client-tabs [aria-pressed="true"] { background: var(--accent); color: var(--accent-fg); }
+#view-wan .wan-example-options { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; }
+#view-wan .wan-model-picker { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 0 1 240px; font-size: 12px; }
+#view-wan #wanPickModel { border: 1px solid var(--line); border-radius: 6px; padding: 7px 9px; min-width: 0; flex: 1; text-align: left; overflow-wrap: anywhere; }
+#view-wan .wan-key-head, #view-wan .wan-key-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 120px), 1fr)); align-items: center; gap: 10px; }
+#view-wan .wan-key-head { color: var(--fg-2); font-size: 11px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+#view-wan .wan-key-row { padding: 12px 0; }
+#view-wan .wan-key-row > * { min-width: 0; }
+#view-wan .wan-key-row .rename { text-align: left; justify-self: start; max-width: 100%; }
+#view-wan .wan-key-state { justify-self: start; color: var(--green); background: var(--green-soft); border-radius: 20px; padding: 4px 9px; font-size: 12px; }
+#view-wan .off .wan-key-state { color: var(--fg-2); background: var(--pill); }
+#view-wan .wan-key-mask.plan { overflow-wrap: anywhere; font-size: 12px; color: var(--fg-2); background: none; padding: 0; }
+#view-wan .wan-key-actions { display: flex; align-items: center; gap: 8px; }
+#view-wan .wan-key-actions .copy { display: flex; align-items: center; gap: 5px; width: auto; height: 30px; padding: 0 8px; border: 1px solid var(--line); border-radius: 6px; font-size: 12px; }
+#view-wan .wan-key-more { font-size: 20px; }
 #view-wan .usage-note { color: var(--fg-2); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 #view-wan .usage-note.warn { color: var(--red); }
 #view-wan .wan-details { padding: 12px 4px; font-size: 12px; color: var(--fg-2); }
 #view-wan .wan-details summary { cursor: pointer; }
-#view-wan .wan-client-example { border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-top: 10px; min-width: 0; }
-#view-wan .wan-client-example pre { background: var(--pill); padding: 12px; border-radius: 7px; margin: 10px 0; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; font-size: 12px; }
+#view-wan .wan-info-footer { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 0 20px; }
+#view-wan .wan-info-footer > p { flex: 0 1 600px; margin: 12px 0; }
+#view-wan .wan-client-example { border: 1px solid var(--line); border-radius: 8px; margin-top: 12px; min-width: 0; background: var(--card-2); }
+#view-wan .wan-example-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+#view-wan .wan-client-example pre { padding: 12px; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; font-size: 12px; line-height: 1.7; }
 #view-wan #wanUserCode { display: block; font-size: 22px; letter-spacing: 2px; padding-top: 10px; user-select: text; -webkit-user-select: text; }
-#view-wan #wanConnect .val { height: auto; min-height: 32px; }
+#view-wan #wanConnect { display: block; border: 0; background: none; padding: 14px 0 0; }
+#view-wan #wanConnect label { display: block; text-align: left; margin-bottom: 7px; }
+#view-wan #wanConnect .val { display: flex; justify-content: space-between; height: auto; min-height: 38px; padding: 7px 9px; }
 #view-wan #wanConnect .val code { white-space: normal; overflow-wrap: anywhere; }
+#view-wan #wanConnect .copy { display: flex; align-items: center; gap: 5px; flex: none; width: auto; height: 28px; padding: 0 7px; font-size: 12px; }
 #view-usage .row-head.quota-head { margin: 6px 0 6px; }
 #view-gateway .row-head .note { font-size: 11px; color: var(--faint); }
 /* providers switched off, folded below the ones on */

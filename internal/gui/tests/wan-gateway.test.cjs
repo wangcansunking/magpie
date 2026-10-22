@@ -4,26 +4,34 @@ const { chromium, webkit } = require("playwright");
 const { fixture } = require("./fixtures/caller-keys.cjs");
 const { strings } = require("./strings.cjs");
 const { reach } = require("./reader.cjs");
-async function click(page, locator) { await reach(page, locator); await locator.click(); }
+async function click(page, locator) {
+  const closed = locator.locator('xpath=ancestor::details[not(@open)]');
+  for (const detail of await closed.all()) await detail.locator(':scope > summary').click();
+  await reach(page, locator); await locator.click();
+}
 const { I18N } = strings();
 const engines = process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"];
 const endpoint = "https://wan-fixture.example.invalid";
-const assignment = "Give each device its own key. The name is an assignment label, not device enforcement: anyone with a copied Endpoint and key can share it across devices. No IP or hardware tracking is used.";
+const assignment = "Use separate WAN keys for different clients. Names are labels, not device binding.";
 
 function wanFixture(lang, events) {
   const ordinary = fixture(lang, "light", events);
   const state = { state: "stopped", endpoint: "", error: "", runtimeAvailable: false, controllable: true, keys: [],
     auth: { state: "signed_out", error: "", userCode: "", verificationURI: "", expiresAt: "0001-01-01T00:00:00Z", attemptID: 0, storage: "memory", storageAvailable: true } };
-  let serial = 0, attempt = 0, failure = "";
+  let serial = 0, attempt = 0, failure = "", modelFailure = false, modelState;
   const secrets = new Map();
   return {
     state,
-    ready() { state.runtimeAvailable = true; state.auth.state = "signed_in"; },
+    ready() { state.runtimeAvailable = true; this.signedIn(); },
     code() { Object.assign(state.auth, { state: "awaiting_authorization", userCode: "ABCD-EFGH", verificationURI: "https://github.com/login/device", expiresAt: new Date(Date.now() + 900000).toISOString() }); },
-    signedIn() { Object.assign(state.auth, { state: "signed_in", userCode: "", verificationURI: "", expiresAt: new Date(Date.now() + 28800000).toISOString() }); },
+    signedIn() { Object.assign(state.auth, { state: "signed_in", userCode: "", verificationURI: "", expiresAt: new Date(Date.now() + 28800000).toISOString(), renewal: { state: "scheduled", nextAttemptAt: new Date(Date.now() + 28500000).toISOString() } }); },
     fail(message) { failure = message; },
+    models(value) { modelState = value; modelFailure = false; },
+    failModels() { modelFailure = true; },
     route: async (route) => {
       const request = route.request(), path = new URL(request.url()).pathname;
+      if (path === "/api/providers" && modelFailure) return route.fulfill({ status: 500, json: { error: "fixture model read failed" } });
+      if (path === "/api/providers" && modelState !== undefined) return route.fulfill({ json: modelState });
       if (path === "/api/open") { events.push({ action: "open", body: request.postDataJSON() }); return route.fulfill({ json: {} }); }
       if (!path.startsWith("/api/wan")) return ordinary(route);
       const action = path.slice("/api/wan/".length), body = request.method() === "POST" ? request.postDataJSON() : undefined;
@@ -183,20 +191,24 @@ for (const engine of engines) for (const lang of ["en", "zh", "zh-TW", "ja", "de
     await page.locator("#wanKeys .adding input").press("Enter");
     await page.locator('#wanKeys [data-key="wan-2"]').waitFor();
     const rotate = word("Rotate key"), remove = word("Remove");
-    await click(page, row.getByRole("button", { name: rotate, exact: true }));
+    await click(page, row.locator(".wan-key-more"));
+    await click(page, page.locator(".wan-key-menu").getByRole("menuitemradio", { name: rotate, exact: true }));
     await page.keyboard.press("Escape");
     await page.locator("#modal").waitFor({ state: "hidden" });
     assert.equal(events.some((e) => e.action === "wan:keys/rotate-key"), false);
-    await click(page, row.getByRole("button", { name: rotate, exact: true }));
+    await click(page, row.locator(".wan-key-more"));
+    await click(page, page.locator(".wan-key-menu").getByRole("menuitemradio", { name: rotate, exact: true }));
     await click(page, page.locator("#modal").getByRole("button", { name: rotate, exact: true }));
     await page.locator("#modal").waitFor({ state: "hidden" });
     assert.match(await row.locator(".plan").textContent(), /rotated/);
     assert.equal(await page.locator('#wanKeys [data-key="wan-2"] .plan').textContent(), "sk-magpie-wan-â€¦2");
-    await click(page, row.getByRole("button", { name: remove, exact: true }));
+    await click(page, row.locator(".wan-key-more"));
+    await click(page, page.locator(".wan-key-menu").getByRole("menuitemradio", { name: remove, exact: true }));
     await click(page, page.locator("#modal").getByRole("button", { name: word("Cancel"), exact: true }));
     await page.locator("#modal").waitFor({ state: "hidden" });
     assert.equal(events.some((e) => e.action === "wan:keys/remove-key"), false);
-    await click(page, row.getByRole("button", { name: remove, exact: true }));
+    await click(page, row.locator(".wan-key-more"));
+    await click(page, page.locator(".wan-key-menu").getByRole("menuitemradio", { name: remove, exact: true }));
     await click(page, page.locator("#modal").getByRole("button", { name: remove, exact: true }));
     await page.locator("#modal").waitFor({ state: "hidden" });
     assert.equal(await row.count(), 0);
@@ -291,6 +303,168 @@ for (const engine of engines) for (const lang of ["en", "zh", "zh-TW", "ja", "de
   });
 }
 
+for (const engine of engines) for (const lang of ["en", "zh", "zh-TW", "ja", "de"]) {
+  test(`${engine} ${lang}: WAN credential validity stays visible and follows renewal`, async (t) => {
+    const { page, f, word, errors } = await open(t, engine, lang);
+    const now = Date.parse("2026-10-22T10:00:00Z");
+    await page.evaluate((now) => { Date.now = () => now; }, now);
+    f.signedIn();
+    f.state.auth.expiresAt = new Date(now + 125 * 60000).toISOString();
+    await page.evaluate(() => pollWAN());
+    assert.equal(await page.locator("#wanRenewalState").textContent(), word("Automatic WAN renewal active"));
+    assert.equal(await page.locator("#wanCredentialDetails").getAttribute("open"), null, "credential internals are secondary");
+    await click(page, page.locator("#wanCredentialDetails > summary"));
+    const format = (key, values) => word(key).replace(/\{(\w+)\}/g, (_, k) => values[k]);
+    assert.equal(await page.locator("#wanAuthRemaining").textContent(), format("Expires in {hours}h {minutes}m", { hours: 2, minutes: 5 }));
+    assert.equal(await page.locator("#wanAuthExpiresAt").getAttribute("datetime"), f.state.auth.expiresAt);
+    assert.match(await page.locator("#wanAuthExpiresAt").textContent(), /2026/);
+    assert.equal(await page.locator("#wanStorageMode").textContent(), word("Until magpie exits"));
+    assert.equal(await page.locator("#wanStorage").isVisible(), false, "signed-in card avoids the generic Remember instructions");
+    f.state.auth.storage = "system";
+    f.state.auth.expiresAt = new Date(now + 7 * 60000).toISOString();
+    await page.evaluate(() => pollWAN());
+    assert.equal(await page.locator("#wanAuthRemaining").textContent(), format("Expires in {minutes}m", { minutes: 7 }));
+    assert.equal(await page.locator("#wanStorageMode").textContent(), word("Saved on this computer"));
+    // A renewed deadline replaces both the countdown and absolute date.
+    f.state.auth.expiresAt = new Date(now + 8 * 3600000).toISOString();
+    await page.evaluate(() => pollWAN());
+    assert.equal(await page.locator("#wanAuthRemaining").textContent(), format("Expires in {hours}h {minutes}m", { hours: 8, minutes: 0 }));
+    assert.equal(await page.locator("#wanAuthExpiresAt").getAttribute("datetime"), f.state.auth.expiresAt);
+    for (const theme of ["light", "dark"]) for (const width of [1100, 420, 360]) {
+      await page.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
+      await page.setViewportSize({ width, height: 900 });
+      const card = page.locator(".wan-setup-card").filter({ has: page.locator("#wanAuth") });
+      const bounds = await card.evaluate(e => {
+        const box = e.getBoundingClientRect(), parts = ["wanAuthRemaining", "wanAuthExpiresAt", "wanLogout"].map(id => document.getElementById(id).getBoundingClientRect());
+        return { overflow: e.scrollWidth - e.clientWidth, inside: parts.every(p => p.left >= box.left && p.right <= box.right), size: parseFloat(getComputedStyle(document.getElementById("wanAuthRemaining")).fontSize) };
+      });
+      assert(bounds.overflow <= 1 && bounds.inside && bounds.size <= 14, JSON.stringify({ theme, width, ...bounds }));
+    }
+    for (const value of ["0001-01-01T00:00:00Z", "invalid"]) {
+      f.state.auth.expiresAt = value;
+      await page.evaluate(() => pollWAN());
+      assert.equal(await page.locator("#wanAuthRemaining").textContent(), word("Expiry not reported"));
+      assert.equal(await page.locator("#wanAuthExpiresAt").isVisible(), false);
+    }
+    f.state.auth.expiresAt = new Date(now - 1000).toISOString();
+    await page.evaluate(() => pollWAN());
+    assert.equal(await page.locator("#wanAuthRemaining").textContent(), word("WAN credential expired"));
+    assert.deepEqual(errors, []);
+  });
+}
+
+for (const engine of engines) for (const lang of ["en", "zh", "zh-TW", "ja", "de"]) {
+  test(`${engine} ${lang}: WAN health reflects scheduled, retrying and refused renewal`, async (t) => {
+    const { page, f, word, events, errors } = await open(t, engine, lang);
+    assert.equal(await page.locator("#wanRenewalState").textContent(), word("Automatic WAN renewal active"));
+    assert.equal(await page.locator("#wanRenewalNextRow").isVisible(), true);
+    assert.equal(await page.locator("#wanRenewalNext").getAttribute("datetime"), f.state.auth.renewal.nextAttemptAt);
+    f.state.auth.renewal = { state: "retrying", nextAttemptAt: new Date(Date.now() + 30000).toISOString() };
+    await page.evaluate(() => pollWAN());
+    assert.equal(await page.locator("#wanRenewalState").textContent(), word("Retrying WAN renewal"));
+    assert.equal(await page.locator("#wanRenewalNextLabel").textContent(), word("Next WAN retry"));
+    assert.equal(await page.locator("#wanRenewalHelp").textContent(), word("Renewal will retry automatically. The current credential is still valid."));
+    f.state.auth.state = "loading"; f.state.auth.expiresAt = new Date(Date.now() - 1000).toISOString();
+    await page.evaluate(() => pollWAN());
+    assert.equal(await page.locator("#wanRenewalHelp").textContent(), word("Access is unavailable until renewal succeeds. Start WAN again after recovery."));
+    assert.equal(await page.locator("#wanStart").isDisabled(), true);
+    f.state.auth.renewal = { state: "refreshing" };
+    await page.evaluate(() => pollWAN());
+    assert.equal(await page.locator("#wanRenewalState").textContent(), word("Renewing WAN credentials…"));
+    assert.equal(await page.locator("#wanRenewalNextRow").isVisible(), false);
+    f.state.auth.state = "error"; f.state.auth.renewal = { state: "required" };
+    await page.evaluate(() => pollWAN());
+    assert.equal(await page.locator("#wanRenewalState").textContent(), word("Sign in to WAN again"));
+    assert.equal(await page.locator("#wanLogin").isEnabled(), true);
+    f.signedIn(); delete f.state.auth.renewal;
+    await page.evaluate(() => pollWAN());
+    assert.equal(await page.locator("#wanRenewalState").textContent(), word("Automatic WAN renewal unavailable"));
+    f.state.auth.expiresAt = "0001-01-01T00:00:00Z";
+    await page.evaluate(() => pollWAN());
+    assert.equal(await page.locator("#wanRenewalState").textContent(), word("No fixed WAN credential expiry"));
+    f.fail("offline fixture status"); await page.evaluate(() => pollWAN());
+    assert.equal(await page.locator("#wanRenewal").isVisible(), false, "unknown status cannot keep a healthy renewal badge");
+    assert.equal(events.some(e => e.action === "wan:start" || e.action === "wan:auth/start"), false);
+    assert.deepEqual(errors, []);
+  });
+
+  test(`${engine} ${lang}: WAN client examples choose model, API and shell without reading a secret`, async (t) => {
+    const { page, f, word, events, errors } = await open(t, engine, lang);
+    await page.locator("#wanPickModel").waitFor({ state: "visible" });
+    await page.waitForFunction(() => !document.querySelector("#wanPickModel").disabled);
+    await click(page, page.locator("#wanPickModel"));
+    await click(page, page.locator(".wan-model-menu .pm-item").filter({ hasText: /relay\/m$/ }));
+    assert.equal(await page.locator("#wanCopyExample").isDisabled(), true, "no live endpoint while WAN is stopped");
+    f.state.state = "running"; f.state.endpoint = endpoint;
+    await page.evaluate(() => pollWAN());
+    await click(page, page.locator("#wanPowerShell"));
+    assert.match(await page.locator("#wanClaudeExample").textContent(), /\$env:ANTHROPIC_BASE_URL=/);
+    assert.match(await page.locator("#wanClaudeExample").textContent(), /claude --model 'relay\/m'/);
+    await click(page, page.locator("#wanCopyExample"));
+    assert(events.some(e => e.action === "clipboard" && e.body.text.includes("YOUR_WAN_KEY") && e.body.text.includes("relay/m")));
+    await click(page, page.locator("#wanBash"));
+    assert.match(await page.locator("#wanClaudeExample").textContent(), /^export ANTHROPIC_BASE_URL=/);
+    await click(page, page.locator("#wanClientOpenAI"));
+    assert.equal(await page.locator("#wanEndpoint code").textContent(), endpoint + "/v1");
+    assert((await page.locator("#wanClaudeExample").textContent()).includes(endpoint + "/v1/chat/completions"));
+    assert.match(await page.locator("#wanClaudeExample").textContent(), /"model":"relay\/m"/);
+    await click(page, page.locator("#wanEndpoint .copy"));
+    assert(events.some(e => e.action === "clipboard" && e.body.text === endpoint + "/v1"));
+    await click(page, page.locator("#wanPowerShell"));
+    assert.match(await page.locator("#wanClaudeExample").textContent(), /^Invoke-RestMethod /);
+    assert.equal(events.some(e => e.action === "wan:keys/copy-key"), false, "snippets never fetch a real key implicitly");
+    f.models({ gateway: { groups: [] }, providers: [{ id: "relay", name: "Relay", off: true, models: [{ id: "m", name: "Model", on: true }] }] });
+    await page.evaluate(() => pollWAN());
+    await page.waitForFunction(() => document.querySelector("#wanPickModel").disabled);
+    assert.equal(await page.locator("#wanCopyExample").isDisabled(), true, "disabled provider cannot remain selected");
+    f.failModels(); await page.evaluate(() => pollWAN());
+    await page.waitForFunction(message => document.querySelector("#wanModelHelp").textContent === message, word("Unable to load WAN models. Other WAN controls remain available."));
+    assert.equal(await page.locator("#wanStop").isEnabled(), true);
+    assert.deepEqual(errors, []);
+  });
+}
+
+for (const engine of engines) test(`${engine}: held model reads do not block Stop and late hidden reads cannot update the picker`, async t => {
+  const { page, f, events, errors } = await open(t, engine, "en");
+  await page.waitForFunction(() => !document.querySelector("#wanPickModel").disabled);
+  let held, signal;
+  const entered = new Promise(resolve => { signal = resolve; });
+  await page.route("**/api/providers", route => { if (!held) { held = route; signal(); } else return route.fallback(); });
+  f.state.state = "running"; f.state.endpoint = endpoint;
+  await page.evaluate(() => pollWAN()); await entered;
+  await click(page, page.locator("#wanStop"));
+  await page.waitForFunction(() => document.querySelector("#wanStatus").dataset.state === "stopping");
+  assert(events.some(e => e.action === "wan:stop"), "model loading cannot delay Stop");
+  await page.evaluate(() => { document.querySelector("#view-wan").hidden = true; });
+  await page.waitForFunction(() => wanTimers.size === 0);
+  await held.fulfill({ json: { gateway: { groups: [] }, providers: [{ id: "stale", models: [{ id: "late", name: "Late", on: true }] }] } }).catch(() => {});
+  await page.evaluate(() => { document.querySelector("#view-wan").hidden = false; });
+  await page.waitForFunction(() => !document.querySelector("#wanPickModel").disabled);
+  await click(page, page.locator("#wanPickModel"));
+  assert.equal(await page.locator(".wan-model-menu").textContent().then(s => s.includes("stale/late")), false);
+  await page.keyboard.press("Escape");
+  assert.deepEqual(errors, []);
+});
+
+for (const engine of engines) test(`${engine}: WAN key menus close on unknown keys and Escape preserves focus without scrolling`, async t => {
+  const { page, f, events, errors } = await open(t, engine, "en");
+  f.state.keys = [{ id: "wan-menu", name: "Work laptop", masked: "sk-magpie-wan-••••menu" }];
+  await page.evaluate(() => pollWAN());
+  const more = page.locator("#wanKeys .wan-key-more");
+  await click(page, more);
+  await page.keyboard.press("Escape");
+  assert.equal(await page.locator(".wan-key-menu").count(), 0);
+  assert.equal(await more.evaluate(e => e === document.activeElement), true);
+  assert.equal(await page.evaluate(() => wanFocus.every(Boolean)), true);
+  await click(page, more);
+  f.state.keysError = "fixture key read failed";
+  await page.evaluate(() => pollWAN());
+  assert.equal(await page.locator(".wan-key-menu").count(), 0);
+  assert.equal(await more.isDisabled(), true);
+  assert.equal(events.some(e => e.action === "wan:keys/remove-key" || e.action === "wan:keys/rotate-key"), false);
+  assert.deepEqual(errors, []);
+});
+
 for (const engine of engines) test(`${engine}: cached unavailable runtime does not prevent a signed-in user's explicit Start`, async (t) => {
   const { page, f, events, errors } = await open(t, engine, "en", false);
   f.signedIn();
@@ -308,6 +482,70 @@ for (const engine of engines) test(`${engine}: cached unavailable runtime does n
   await page.waitForFunction(() => document.querySelector("#wanStatus").dataset.state === "starting" && document.querySelector("#view-wan").getAttribute("aria-busy") === "false");
   assert.equal(events.filter((e) => e.action === "wan:start").length, 2);
   assert.equal(events.some((e) => e.action === "wan:runtime/install" || e.action === "wan:auth/start"), false);
+  assert.deepEqual(errors, []);
+});
+
+for (const engine of engines) test(`${engine}: WAN model read errors stay unknown and a completed key copy respects returned locks`, async t => {
+  const { page, f, errors } = await open(t, engine, "en");
+  await page.waitForFunction(() => !document.querySelector("#wanPickModel").disabled);
+  f.state.state = "running"; f.state.endpoint = endpoint;
+  f.state.keys = [{ id: "wan-lock", name: "Laptop", masked: "sk-magpie-wan-••••lock" }];
+  f.models({ gateway: { groups: [] }, providers: [{ id: "bad", models: null }] });
+  await page.evaluate(() => pollWAN());
+  await page.waitForFunction(() => document.querySelector("#wanModelHelp").textContent === "Unable to load WAN models. Other WAN controls remain available.");
+  assert.equal(await page.locator("#wanPickModel").isDisabled(), true);
+  assert.equal(await page.locator("#wanStop").isEnabled(), true);
+  await page.route("**/api/wan/keys/copy-key", route => {
+    f.state.keysError = "fixture unknown keys";
+    return route.fulfill({ json: { ...f.state, secret: "sk-fixture-copied-explicitly" } });
+  });
+  await page.evaluate(() => {
+    const button = document.querySelector("#wanKeys .copy"), handler = button.onclick;
+    window.wanCopyFinished = false;
+    button.onclick = async event => { try { await handler(event); } finally { wanCopyFinished = true; } };
+  });
+  await click(page, page.locator("#wanKeys .copy"));
+  await page.waitForFunction(() => wanCopyFinished);
+  assert.equal(await page.locator("#wanKeys button:enabled").count(), 0, "copy completion cannot re-enable an unknown key store");
+  assert.equal((await page.locator("#view-wan").textContent()).includes("sk-fixture-copied-explicitly"), false);
+  assert.deepEqual(errors, []);
+});
+
+for (const engine of engines) test(`${engine}: a held WAN model response cannot render into the kernel error boundary`, async t => {
+  const { page, errors } = await open(t, engine, "en");
+  await page.waitForFunction(() => !document.querySelector("#wanPickModel").disabled);
+  await page.evaluate(() => {
+    const fetch0 = window.fetch;
+    window.modelHeld = false; window.modelParsed = false;
+    window.fetch = async function (...args) {
+      const response = await fetch0.apply(this, args);
+      if (String(args[0]) !== "/api/providers" || modelHeld) return response;
+      const body = await response.text(); modelHeld = true;
+      await new Promise(resolve => { window.releaseModel = resolve; });
+      const held = new Response(body, { status: response.status, headers: response.headers });
+      const text = held.text.bind(held);
+      held.text = async () => { const value = await text(); modelParsed = true; return value; };
+      return held;
+    };
+  });
+  t.after(() => page.evaluate(() => window.releaseModel?.()).catch(() => {}));
+  await page.evaluate(() => pollWAN());
+  await page.waitForFunction(() => modelHeld);
+  await page.evaluate(() => {
+    Object.defineProperty(document.querySelector("#wanState"), "textContent", {
+      configurable: true, set() { throw Error("fixture WAN boundary"); },
+    });
+    magpie.call("wan", "relang");
+  });
+  const broken = page.locator("#view-wan .slot-error");
+  await broken.waitFor({ state: "attached" });
+  await page.evaluate(() => releaseModel());
+  await page.waitForFunction(() => modelParsed);
+  assert.deepEqual(errors, [], "late model parsing must leave the error boundary intact");
+  await click(page, broken.locator(".slot-again"));
+  await page.waitForFunction(() => document.querySelector("#wanStatus")?.dataset.state === "stopped");
+  await page.evaluate(() => pollWAN());
+  await page.waitForFunction(() => !document.querySelector("#wanPickModel").disabled);
   assert.deepEqual(errors, []);
 });
 
