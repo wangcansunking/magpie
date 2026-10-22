@@ -109,10 +109,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     const still = async (page, id, b) => {
       await b.scrollIntoViewIfNeeded();
       await page.waitForTimeout(150);
-      const before = await row(page, id).evaluate((e) => Math.round(e.getBoundingClientRect().top)), sc = await scrolled(page);
+      // Query the live row and its geometry in one browser turn. A node
+      // resolved before an editor redraw can already be detached at evaluate.
+      const top = () => row(page, id).evaluateAll(es => es.length === 1 && es[0].isConnected ? Math.round(es[0].getBoundingClientRect().top) : null);
+      const before = await top(), sc = await scrolled(page);
+      assert.equal(typeof before, "number", "one live account row before the click");
       await b.click();
       await page.waitForTimeout(200);
-      assert.equal(await row(page, id).evaluate((e) => Math.round(e.getBoundingClientRect().top)), before, `${id}'s row moved`);
+      assert.equal(await top(), before, `${id}'s row moved`);
       assert.equal(await scrolled(page), sc, "a click scrolled");
     };
     const posted = async (posts, n) => {
