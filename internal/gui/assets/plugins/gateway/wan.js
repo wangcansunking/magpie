@@ -421,7 +421,7 @@ function registerWANPage(ctx) {
   <div id="wanLogoutRow"><button class="text" id="wanLogout" data-t disabled>Sign out of WAN</button><p class="usage-note" data-t>Stop leaves WAN signed in. Sign out stops WAN and removes its local sign-in; it does not revoke GitHub authorization.</p></div>
   <div class="wan-storage-choice" id="wanRememberRow"><div class="name" id="wanRememberLabel" data-t>Login storage</div><div class="wan-client-tabs" role="radiogroup" aria-labelledby="wanRememberLabel"><button class="text" id="wanMemory" role="radio" aria-checked="true" data-t>Until magpie exits</button><button class="text" id="wanRemember" role="radio" aria-checked="false" data-t>Remember on this computer</button></div></div>
   <div class="row" id="wanAuthActions"><button class="text primary" id="wanLogin" data-t disabled>Sign in to GitHub for WAN</button><span id="wanCancelSlot"></span></div>
-  <div id="wanDevice" hidden><div class="row"><div class="who"><div class="name" data-t>Enter this code on GitHub</div><div class="wan-device-code"><code id="wanUserCode"></code><button class="text" id="wanCopyCode" data-t disabled>Copy</button></div></div></div><p class="usage-note" id="wanDeviceValidity"><span data-t>Device code validity</span> · <time id="wanDeviceDeadline"></time></p><div class="row"><div class="who"><span class="usage-note" id="wanVerificationURI"></span></div></div><div class="row"><button class="text primary" id="wanOpenGitHub" data-t disabled>Open GitHub</button></div></div>
+  <div id="wanDevice" hidden><div class="row"><div class="who"><div class="name" data-t>Enter this code on GitHub</div><div class="wan-device-code"><code id="wanUserCode"></code><button class="text" id="wanCopyCode" aria-describedby="wanUserCode" data-t disabled>Copy</button></div></div></div><p class="usage-note" id="wanDeviceValidity"><span data-t>Device code validity</span> · <time id="wanDeviceDeadline"></time></p><div class="row"><div class="who"><span class="usage-note" id="wanVerificationURI"></span></div></div><div class="row"><button class="text primary" id="wanOpenGitHub" data-t disabled>Open GitHub</button></div></div>
 </section>
 <p class="usage-note" id="wanStorage"></p>
 <p class="usage-note warn" id="wanAuthProblem" role="alert" hidden></p>
@@ -467,7 +467,7 @@ function registerWANPage(ctx) {
       };
       $("#wanCopyCode").onclick = () => {
         if ($("#wanCopyCode").disabled || !visible()) return;
-        copy(snapshot.auth.userCode, t("Enter this code on GitHub"), $("#wanCopyCode"));
+        copy(snapshot.auth.userCode, t("Code"), $("#wanCopyCode"));
       };
       $("#wanLogin").onclick = () => action("auth/start", { remember: remember && !!snapshot?.auth?.storageAvailable });
       $("#wanLogout").onclick = () => action("auth/logout", {});
