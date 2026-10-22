@@ -9,6 +9,19 @@ async function click(page, locator) {
   for (const detail of await closed.all()) await detail.locator(':scope > summary').click();
   await reach(page, locator); await locator.click();
 }
+// WebKit can acknowledge a viewport change before delivering resize/layout.
+// Measure responsive geometry after that event and its animation frame, not
+// while the preceding width's flex layout is still being replaced.
+async function resizeWAN(page, width) {
+  const same = await page.evaluate(w => innerWidth === w && innerHeight === 900, width);
+  if (same) return;
+  await page.evaluate(() => {
+    window.wanResizeSeen = false;
+    addEventListener("resize", () => { wanResizeSeen = true; }, { once: true });
+  });
+  await page.setViewportSize({ width, height: 900 });
+  await page.waitForFunction(w => wanResizeSeen && innerWidth === w && innerHeight === 900, width);
+}
 const { I18N } = strings();
 const engines = process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"];
 const endpoint = "https://wan-fixture.example.invalid";
@@ -222,7 +235,7 @@ for (const engine of engines) for (const lang of ["en", "zh", "zh-TW", "ja", "de
     assert.equal(await page.locator("#addWANKey").isDisabled(), true);
     assert.equal(await page.locator("#wanKeys button:enabled").count(), 0);
     for (const width of [1100, 420, 360]) {
-      await page.setViewportSize({ width, height: 900 });
+      await resizeWAN(page, width);
       const size = await page.locator("#view-wan").evaluate((e) => ({ own: e.scrollWidth - e.clientWidth, doc: document.documentElement.scrollWidth - innerWidth }));
       assert(size.own <= 1 && size.doc <= 1, JSON.stringify({ lang, width, ...size }));
     }
@@ -238,13 +251,23 @@ for (const engine of engines) for (const lang of ["en", "zh", "zh-TW", "ja", "de
     assert.equal(await page.locator("#wanStart").isDisabled(), true);
     assert.equal(await page.locator("#wanAuthState").textContent(), word("Signed out of GitHub for WAN"));
     assert.equal(await page.locator("#wanRemember").isChecked(), false, "memory-only is the default");
+    assert.equal(await page.locator(".wan-key-head").isVisible(), false, "no empty table header before the first key");
+    assert.equal(await page.locator("#wanMemory").getAttribute("tabindex"), "0");
     assert.equal(await page.locator('#view-wan input[type="text"]').count(), 0, "no client-ID or OAuth-app setting");
     assert.equal(events.some((e) => e.action !== "wan:read" && e.action.startsWith("wan:")), false, "GET status has no setup or publication side effect");
     assert.equal(events.some((e) => e.action === "open"), false);
     await click(page, page.locator("#wanInstall"));
     await page.waitForFunction(() => document.querySelector("#wanInstall").hidden && document.querySelector("#view-wan").getAttribute("aria-busy") === "false");
     assert.equal(await page.locator("#wanStart").isDisabled(), true, "install does not sign in or start");
-    await page.locator("#wanRemember").check();
+    assert.equal(await page.locator("#wanRuntimeDetails summary").count(), 0, "installed runtime is a plain status, not an empty disclosure");
+    assert.equal(await page.locator("#wanRuntimeHelp").isVisible(), false);
+    await page.locator("#wanMemory").focus();
+    await page.keyboard.press("ArrowRight");
+    assert.equal(await page.locator("#wanRemember").evaluate(e => e === document.activeElement), true);
+    await page.keyboard.press("Home");
+    assert.equal(await page.locator("#wanMemory").isChecked(), true);
+    await click(page, page.locator("#wanRemember"));
+    assert.equal(await page.locator("#wanStorage").textContent(), word("Restore sign-in after restarting magpie using this computer’s secure storage."));
     await page.evaluate(() => pollWAN());
     assert.equal(await page.locator("#wanRemember").isChecked(), true, "poll preserves the explicit preference");
     await click(page, page.locator("#wanLogin"));
@@ -255,7 +278,13 @@ for (const engine of engines) for (const lang of ["en", "zh", "zh-TW", "ja", "de
     await page.evaluate(() => pollWAN());
     assert.equal(await page.locator("#wanUserCode").textContent(), "ABCD-EFGH");
     assert.equal(await page.locator("#wanVerificationURI").textContent(), "https://github.com/login/device");
-    assert.equal(await page.locator("#wanAuthExpiry").isVisible(), true);
+    await Promise.all([
+      page.waitForResponse(r => new URL(r.url()).pathname === "/api/copy"),
+      click(page, page.locator("#wanCopyCode")),
+    ]);
+    assert(events.some(e => e.action === "clipboard" && e.body.text === "ABCD-EFGH"));
+    assert.equal(await page.locator("#wanDeviceValidity").isVisible(), true);
+    assert.equal(await page.locator("#wanCredentialDetails").isVisible(), false, "pending authorization does not show signed-in management");
     assert.equal(events.some((e) => e.action === "open"), false, "neither starting nor polling opens a browser");
     // A poll does not replace the code, cancel button or focused key form.
     const code = await page.locator("#wanUserCode").elementHandle();
@@ -270,6 +299,7 @@ for (const engine of engines) for (const lang of ["en", "zh", "zh-TW", "ja", "de
     await page.evaluate(() => pollWAN());
     assert.equal(await page.locator("#wanAuthState").textContent(), word("Signed in to GitHub for WAN"));
     assert.equal(await page.locator("#wanUserCode").textContent(), "");
+    assert.equal(await page.locator("#wanCopyCode").isDisabled(), true, "completed codes cannot be copied again");
     assert.equal(await page.locator("#wanCancelAuth").count(), 0);
     assert.equal(await page.locator("#wanStart").isEnabled(), true);
     assert.equal(events.some((e) => e.action === "wan:start"), false, "authorization never hosts a tunnel");
@@ -277,6 +307,8 @@ for (const engine of engines) for (const lang of ["en", "zh", "zh-TW", "ja", "de
     f.state.auth.state = "expired"; f.state.auth.error = "WAN sign-in expired; sign in again";
     await page.evaluate(() => pollWAN());
     assert.equal(await page.locator("#wanAuthState").textContent(), word("WAN sign-in expired"));
+    await click(page, page.locator("#wanMemory"));
+    assert.equal(await page.locator("#wanStorage").textContent(), word("Sign-in clears when magpie exits. Nothing is saved in the browser."), "reauthorization help describes the new selection, not the old saved grant");
     assert.equal(await page.locator("#wanStart").isDisabled(), true);
     assert.equal(await page.locator("#wanLogin").isEnabled(), true);
     await click(page, page.locator("#wanLogout"));
@@ -293,9 +325,13 @@ for (const engine of engines) for (const lang of ["en", "zh", "zh-TW", "ja", "de
     await click(page, page.locator("#wanCancelAuth"));
     await page.waitForFunction(() => document.querySelector("#wanAuth").dataset.state === "signed_out" && document.querySelector("#view-wan").getAttribute("aria-busy") === "false");
     assert.deepEqual(events.find((e) => e.action === "wan:auth/cancel").body, { attemptID });
+    f.state.auth.state = "error"; f.state.auth.expiresAt = "0001-01-01T00:00:00Z";
+    await page.evaluate(() => pollWAN());
+    assert.equal(await page.locator("#wanCredentialDetails").isVisible(), false, "no empty credential disclosure when validity is unknown");
+    assert.equal(await page.locator("#wanLogout").isVisible(), true, "an errored session can still be cleared");
     assert.equal(events.some((e) => e.action === "wan:start"), false);
     for (const width of [1100, 420, 360]) {
-      await page.setViewportSize({ width, height: 900 });
+      await resizeWAN(page, width);
       const size = await page.locator("#view-wan").evaluate((e) => ({ own: e.scrollWidth - e.clientWidth, doc: document.documentElement.scrollWidth - innerWidth }));
       assert(size.own <= 1 && size.doc <= 1, JSON.stringify({ lang, width, ...size }));
     }
@@ -332,7 +368,7 @@ for (const engine of engines) for (const lang of ["en", "zh", "zh-TW", "ja", "de
     assert.equal(await page.locator("#wanAuthExpiresAt").getAttribute("datetime"), f.state.auth.expiresAt);
     for (const theme of ["light", "dark"]) for (const width of [1100, 420, 360]) {
       await page.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
-      await page.setViewportSize({ width, height: 900 });
+      await resizeWAN(page, width);
       const card = page.locator(".wan-setup-card").filter({ has: page.locator("#wanAuth") });
       const bounds = await card.evaluate(e => {
         const box = e.getBoundingClientRect(), parts = ["wanAuthRemaining", "wanAuthExpiresAt", "wanLogout"].map(id => document.getElementById(id).getBoundingClientRect());
@@ -654,9 +690,12 @@ for (const engine of engines) test(`${engine}: held WAN auth start keeps polling
   await page.waitForFunction(() => authHeld && wanTimers.size === 1);
   await page.evaluate(() => pollWAN());
   assert.equal(await page.locator("#wanCancelAuth").isEnabled(), true, "poll obtains the attempt ID even while the initial POST reply is held");
-  assert.equal(await page.locator("#wanLogout").isEnabled(), true);
+  assert.equal(await page.locator("#wanLogout").isVisible(), false, "pending authorization offers Cancel instead of session management");
   f.code(); await page.evaluate(() => pollWAN());
   assert.equal(await page.locator("#wanUserCode").textContent(), "ABCD-EFGH");
+  // Authorization may complete through polling before auth/start answers.
+  // Sign out the completed session while that older reply remains held.
+  f.signedIn(); await page.evaluate(() => pollWAN());
   await click(page, page.locator("#wanLogout"));
   await page.waitForFunction(() => document.querySelector("#wanAuth").dataset.state === "signed_out" && document.querySelector("#view-wan").getAttribute("aria-busy") === "false");
   await page.evaluate(() => { releaseAuth(); return authFinished; });

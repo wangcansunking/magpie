@@ -63,12 +63,16 @@ and [GitHub App device flow](https://docs.github.com/en/apps/creating-github-app
 Sign in registers an attempt before requesting a device code. Only the
 verification URI, user code, deadline and attempt identity reach the page;
 the device code and access token stay in the backend. The user opens GitHub
-explicitly. Polling respects the response interval, slow-down and expiry.
+explicitly. The waiting view offers code copying, its validity time, Open GitHub
+and cancellation without signed-in management details. An installed runtime is
+a plain readiness status; an absent runtime exposes installation and its help. Polling respects the response interval, slow-down and expiry.
 Cancel targets the exact current attempt. Replaced/canceled attempts cannot
 commit late credentials. A slow secure-store operation does not hold the
 cached-status lock.
 
-Remember is available only with secure system storage. Selecting a memory
+The login storage picker offers an explicit memory session or remembering on
+this computer; it defaults to memory and supports keyboard selection. Remember
+is available only with secure system storage. Selecting a memory
 session first erases an earlier remembered login, so a restart cannot restore
 an account the user replaced. Failed reads and erases are unknown and block
 sign-in until explicit sign-out succeeds; they are not empty stores. An

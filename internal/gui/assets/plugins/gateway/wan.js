@@ -135,7 +135,8 @@ function registerWANPage(ctx) {
     $("#wanStop").disabled = !(canChange() || (fresh && busy === "start" && snapshot?.controllable)) || !["running", "starting"].includes(state);
     $("#wanInstall").disabled = !canChange() || snapshot.runtimeAvailable || !["stopped", "failed"].includes(state);
     $("#wanLogin").disabled = !canChange() || !["signed_out", "expired", "error"].includes(auth?.state) || !["stopped", "failed"].includes(state);
-    $("#wanRemember").disabled = $("#wanLogin").disabled || !auth?.storageAvailable;
+    $("#wanRemember").disabled = $("#wanMemory").disabled = $("#wanLogin").disabled || !auth?.storageAvailable;
+    $("#wanCopyCode").disabled = !fresh || auth?.state !== "awaiting_authorization" || !auth.userCode;
     $("#wanLogout").disabled = !canLogout() || !auth || auth.state === "signing_out";
     const cancel = $("#wanCancelAuth");
     if (cancel) cancel.disabled = !(canChange() || canInterruptAuth()) || !authorizing();
@@ -153,24 +154,24 @@ function registerWANPage(ctx) {
     $("#wanInstall").hidden = !!snapshot?.runtimeAvailable;
     $("#wanInstallRow").hidden = !!snapshot?.runtimeAvailable;
     $("#wanRuntimeHelp").hidden = !!snapshot?.runtimeAvailable;
-    const runtime = $("#wanRuntimeDetails"), available = !!snapshot?.runtimeAvailable;
-    if (runtime.dataset.available !== String(available)) {
-      runtime.dataset.available = String(available);
-      runtime.open = !available;
-    }
+    $("#wanRuntimeDetails").dataset.available = String(fresh && !!snapshot?.runtimeAvailable);
     $("#wanLoginHelp").hidden = current === "signed_in";
     $("#wanInstall").textContent = t(busy === "runtime/install" ? "Installing WAN runtime…" : "Install WAN runtime");
     const active = ["signed_in", "loading", "requesting_code", "awaiting_authorization", "signing_out"].includes(current);
     $("#wanLogin").hidden = active;
     $("#wanRememberRow").hidden = active || !auth?.storageAvailable;
     $("#wanAuthActions").hidden = active && !authorizing();
-    $("#wanLogoutRow").hidden = ["signed_out", "unknown"].includes(current);
+    $("#wanLogoutRow").hidden = ["signed_out", "unknown", "requesting_code", "awaiting_authorization"].includes(current);
     if (!auth?.storageAvailable) remember = false;
-    $("#wanRemember").checked = remember;
+    $("#wanRemember").setAttribute("aria-checked", String(remember));
+    $("#wanMemory").setAttribute("aria-checked", String(!remember));
+    $("#wanRemember").tabIndex = remember ? 0 : -1;
+    $("#wanMemory").tabIndex = remember ? -1 : 0;
     const storage = !auth?.storageAvailable ? "System secure storage is unavailable. Sign-in stays in memory until magpie exits."
-      : auth.storage === "system" && ["signed_in", "expired", "requesting_code", "awaiting_authorization"].includes(current)
+      : auth.storage === "system" && ["signed_in", "requesting_code", "awaiting_authorization"].includes(current)
         ? "WAN sign-in uses this computer's system secure storage."
-        : "Unless Remember is selected, sign-in stays in memory until magpie exits. No token is saved in the browser.";
+        : remember ? "Restore sign-in after restarting magpie using this computer’s secure storage."
+          : "Sign-in clears when magpie exits. Nothing is saved in the browser.";
     $("#wanStorage").textContent = t(storage);
     const awaiting = current === "awaiting_authorization";
     $("#wanDevice").hidden = !awaiting;
@@ -180,6 +181,9 @@ function registerWANPage(ctx) {
     $("#wanVerificationURI").textContent = awaiting ? auth.verificationURI : "";
     const deadline = typeof auth?.expiresAt === "string" && !auth.expiresAt.startsWith("0001-") ? new Date(auth.expiresAt) : null;
     const expiry = deadline && Number.isFinite(deadline.getTime()) && ["awaiting_authorization", "signed_in", "expired"].includes(current);
+    $("#wanDeviceDeadline").textContent = awaiting && expiry ? deadline.toLocaleString(locale, { hour: "2-digit", minute: "2-digit", timeZoneName: "short" }) : "";
+    $("#wanDeviceValidity").hidden = !awaiting || !expiry;
+    $("#wanDeviceDeadline").dateTime = awaiting && expiry ? deadline.toISOString() : "";
     $("#wanAuthSummary").hidden = !(expiry || current === "signed_in");
     $("#wanAuthExpiry").hidden = !(expiry || current === "signed_in");
     $("#wanAuthExpiryLabel").textContent = t(awaiting ? "Device code validity" : "Current credential validity");
@@ -214,7 +218,7 @@ function registerWANPage(ctx) {
     return date && Number.isFinite(date.getTime()) ? date.toLocaleString(locale, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZoneName: "short" }) : "";
   }
   function renderRenewal(auth, current, deadline) {
-    const renewal = fresh ? auth?.renewal : null;
+    const renewal = fresh && ["signed_in", "loading", "expired", "error"].includes(current) ? auth?.renewal : null;
     const state = renewal?.state;
     const supported = ["scheduled", "refreshing", "retrying", "required"].includes(state);
     const signedIn = current === "signed_in", restoring = current === "loading";
@@ -246,12 +250,13 @@ function registerWANPage(ctx) {
     $("#wanAuthHeader").hidden = signedIn || restoring && supported;
     const next = supported && ["scheduled", "retrying"].includes(state) ? dateText(renewal.nextAttemptAt) : "";
     $("#wanRenewalNextRow").hidden = !next;
+    $("#wanSessionMeta").hidden = !next && current !== "signed_in";
     $("#wanRenewalNextLabel").textContent = t(state === "retrying" ? "Next WAN retry" : "Next planned WAN renewal");
     $("#wanRenewalNext").textContent = next;
     $("#wanRenewalNext").dateTime = next ? new Date(renewal.nextAttemptAt).toISOString() : "";
     $("#wanExpiryNote").hidden = !supported || state === "required";
     const detail = $("#wanCredentialDetails"), group = current === "awaiting_authorization" ? "code" : signedIn || restoring ? "session" : "other";
-    detail.hidden = !["signed_in", "awaiting_authorization", "expired", "error", "loading", "requesting_code", "signing_out"].includes(current);
+    detail.hidden = !signedIn && !(current === "expired" && deadline && Number.isFinite(deadline.getTime()));
     if (detail.dataset.group !== group) {
       detail.dataset.group = group;
       detail.open = group !== "session";
@@ -300,6 +305,7 @@ function registerWANPage(ctx) {
     const box = $("#wanKeys");
     $("#wanKeysProblem").textContent = t(snapshot?.keysError || "");
     $("#wanKeysProblem").hidden = !$("#wanKeysProblem").textContent;
+    page.querySelector(".wan-key-head").hidden = !fresh || !!snapshot?.keysError || !snapshot?.keys?.length;
     // Failed key reads are unknown, not an empty store. Retain the last rows
     // or form without replacing what the reader typed; every control is locked
     // separately, leaving Stop and Sign out available for the known WAN owner.
@@ -405,6 +411,22 @@ function registerWANPage(ctx) {
 <p class="usage-note" id="wanOwnerNote" hidden data-t>This window does not own the gateway. WAN controls are unavailable.</p>
 <p class="usage-note warn" id="wanProblem" role="alert" hidden></p>
 <div class="wan-workspace">
+<aside class="wan-setup-card wan-session-card"><div class="row-head"><span class="label" data-t>GitHub sign-in for WAN</span></div>
+<p class="usage-note" id="wanLoginHelp" data-t>Authorize Microsoft's Dev Tunnels GitHub App for WAN. No application registration is needed. Signing in never starts WAN.</p>
+<section class="list gwcard" id="wanAuth" role="status">
+  <div class="wan-auth-header" id="wanAuthHeader"><div class="wan-auth-status"><span class="wan-auth-dot" aria-hidden="true"></span><div class="name" id="wanAuthState"></div></div></div>
+  <div class="wan-renewal" id="wanRenewal" hidden><div class="wan-renewal-title"><span class="wan-renewal-mark" aria-hidden="true">↻</span><strong id="wanRenewalState"></strong></div><p class="usage-note" id="wanRenewalHelp"></p></div>
+  <dl class="wan-session-meta" id="wanSessionMeta"><div id="wanRenewalNextRow" hidden><dt id="wanRenewalNextLabel"></dt><dd><time id="wanRenewalNext"></time></dd></div><div id="wanStorageInfo" hidden><dt data-t>Login storage</dt><dd id="wanStorageMode"></dd></div></dl>
+  <details id="wanCredentialDetails" class="wan-credential-details"><summary data-t>WAN credential details</summary><dl class="wan-auth-summary" id="wanAuthSummary" hidden><div id="wanAuthExpiry" hidden><dt id="wanAuthExpiryLabel"></dt><dd><time id="wanAuthExpiresAt"></time><span id="wanAuthRemaining"></span></dd></div></dl><p class="usage-note" id="wanExpiryNote" data-t>Renewal updates this access-token deadline. It is not a fixed sign-in expiry.</p></details>
+  <div id="wanLogoutRow"><button class="text" id="wanLogout" data-t disabled>Sign out of WAN</button><p class="usage-note" data-t>Stop leaves WAN signed in. Sign out stops WAN and removes its local sign-in; it does not revoke GitHub authorization.</p></div>
+  <div class="wan-storage-choice" id="wanRememberRow"><div class="name" id="wanRememberLabel" data-t>Login storage</div><div class="wan-client-tabs" role="radiogroup" aria-labelledby="wanRememberLabel"><button class="text" id="wanMemory" role="radio" aria-checked="true" data-t>Until magpie exits</button><button class="text" id="wanRemember" role="radio" aria-checked="false" data-t>Remember on this computer</button></div></div>
+  <div class="row" id="wanAuthActions"><button class="text primary" id="wanLogin" data-t disabled>Sign in to GitHub for WAN</button><span id="wanCancelSlot"></span></div>
+  <div id="wanDevice" hidden><div class="row"><div class="who"><div class="name" data-t>Enter this code on GitHub</div><div class="wan-device-code"><code id="wanUserCode"></code><button class="text" id="wanCopyCode" data-t disabled>Copy</button></div></div></div><p class="usage-note" id="wanDeviceValidity"><span data-t>Device code validity</span> · <time id="wanDeviceDeadline"></time></p><div class="row"><div class="who"><span class="usage-note" id="wanVerificationURI"></span></div></div><div class="row"><button class="text primary" id="wanOpenGitHub" data-t disabled>Open GitHub</button></div></div>
+</section>
+<p class="usage-note" id="wanStorage"></p>
+<p class="usage-note warn" id="wanAuthProblem" role="alert" hidden></p>
+<section id="wanRuntimeDetails" class="wan-runtime-details"><div class="wan-runtime-status" role="status"><span class="wan-runtime-dot" aria-hidden="true"></span><span id="wanRuntimeState"></span></div><div class="row" id="wanInstallRow"><button class="text" id="wanInstall" data-t disabled>Install WAN runtime</button></div><p class="usage-note" id="wanRuntimeHelp" data-t>Install downloads the WAN runtime. Installation and GitHub sign-in do not publish a tunnel; only Start does.</p></section>
+</aside>
 <section class="wan-client-card">
 <div class="row-head"><span class="label" data-t>Client connection</span></div>
 <div class="wan-client-tabs" id="wanClientType" role="group"><button class="text" id="wanClientClaude" aria-pressed="true">Claude Code</button><button class="text" id="wanClientOpenAI" aria-pressed="false" data-t>OpenAI-compatible WAN client</button></div>
@@ -414,21 +436,7 @@ function registerWANPage(ctx) {
 <div class="wan-client-example"><div class="wan-example-toolbar"><span class="usage-note" data-t>WAN client example</span><button class="text" id="wanCopyExample" data-t disabled>Copy WAN example</button></div><pre><code id="wanClaudeExample"></code></pre></div>
 <p class="usage-note" data-t>The endpoint is available only while WAN is running. Its address may change if the tunnel expires or is removed.</p>
 </section>
-<aside class="wan-setup-card wan-session-card"><div class="row-head"><span class="label" data-t>GitHub sign-in for WAN</span></div>
-<p class="usage-note" id="wanLoginHelp" data-t>Authorize Microsoft's Dev Tunnels GitHub App for WAN. No application registration is needed. Signing in never starts WAN.</p>
-<section class="list gwcard" id="wanAuth" role="status">
-  <div class="wan-auth-header" id="wanAuthHeader"><div class="wan-auth-status"><span class="wan-auth-dot" aria-hidden="true"></span><div class="name" id="wanAuthState"></div></div></div>
-  <div class="wan-renewal" id="wanRenewal" hidden><div class="wan-renewal-title"><span class="wan-renewal-mark" aria-hidden="true">↻</span><strong id="wanRenewalState"></strong></div><p class="usage-note" id="wanRenewalHelp"></p></div>
-  <dl class="wan-session-meta"><div id="wanRenewalNextRow" hidden><dt id="wanRenewalNextLabel"></dt><dd><time id="wanRenewalNext"></time></dd></div><div id="wanStorageInfo" hidden><dt data-t>Login storage</dt><dd id="wanStorageMode"></dd></div></dl>
-  <details id="wanCredentialDetails" class="wan-credential-details"><summary data-t>WAN credential details</summary><dl class="wan-auth-summary" id="wanAuthSummary" hidden><div id="wanAuthExpiry" hidden><dt id="wanAuthExpiryLabel"></dt><dd><time id="wanAuthExpiresAt"></time><span id="wanAuthRemaining"></span></dd></div></dl><p class="usage-note" id="wanExpiryNote" data-t>Renewal updates this access-token deadline. It is not a fixed sign-in expiry.</p><div id="wanLogoutRow"><button class="text" id="wanLogout" data-t disabled>Sign out of WAN</button></div><p class="usage-note" data-t>Stop leaves WAN signed in. Sign out stops WAN and removes its local sign-in; it does not revoke GitHub authorization.</p></details>
-  <div class="row" id="wanRememberRow"><label class="klf-check"><input type="checkbox" id="wanRemember"><span data-t>Remember WAN sign-in in system secure storage</span></label></div>
-  <div class="row" id="wanAuthActions"><button class="text primary" id="wanLogin" data-t disabled>Sign in to GitHub for WAN</button><span id="wanCancelSlot"></span></div>
-  <div id="wanDevice" hidden><div class="row"><div class="who"><div class="name" data-t>Enter this code on GitHub</div><code id="wanUserCode"></code></div></div><div class="row"><div class="who"><span class="usage-note" id="wanVerificationURI"></span></div></div><div class="row"><button class="text" id="wanOpenGitHub" data-t disabled>Open GitHub</button></div></div>
-</section>
-<p class="usage-note" id="wanStorage"></p>
-<p class="usage-note warn" id="wanAuthProblem" role="alert" hidden></p>
-<details id="wanRuntimeDetails" class="wan-runtime-details"><summary><span id="wanRuntimeState"></span></summary><div class="row" id="wanInstallRow"><button class="text" id="wanInstall" data-t disabled>Install WAN runtime</button></div><p class="usage-note" id="wanRuntimeHelp" data-t>Install downloads the WAN runtime. Installation and GitHub sign-in do not publish a tunnel; only Start does.</p></details>
-</aside></div>
+</div>
 <section class="wan-keys-card">
 <div class="row-head"><span class="label" data-t>WAN keys</span><span class="grow"></span><button class="text" id="addWANKey" data-t disabled>Add WAN key</button></div>
 <p class="usage-note wan-assignment" data-t>Use separate WAN keys for different clients. Names are labels, not device binding.</p>
@@ -445,7 +453,22 @@ function registerWANPage(ctx) {
       $("#wanStart").onclick = () => action("start", {});
       $("#wanStop").onclick = () => action("stop", {});
       $("#wanInstall").onclick = () => action("runtime/install", {});
-      $("#wanRemember").onchange = (e) => { remember = e.target.checked; };
+      for (const id of ["wanMemory", "wanRemember"]) $("#" + id).onclick = () => {
+        if ($("#" + id).disabled) return;
+        remember = id === "wanRemember";
+        renderAuth();
+      };
+      for (const id of ["wanMemory", "wanRemember"]) $("#" + id).onkeydown = e => {
+        if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(e.key)) return;
+        e.preventDefault();
+        const next = $("#" + (e.key === "Home" ? "wanMemory" : e.key === "End" ? "wanRemember" : remember ? "wanMemory" : "wanRemember"));
+        if (next.disabled) return;
+        next.click(); next.focus({ preventScroll: true });
+      };
+      $("#wanCopyCode").onclick = () => {
+        if ($("#wanCopyCode").disabled || !visible()) return;
+        copy(snapshot.auth.userCode, t("Enter this code on GitHub"), $("#wanCopyCode"));
+      };
       $("#wanLogin").onclick = () => action("auth/start", { remember: remember && !!snapshot?.auth?.storageAvailable });
       $("#wanLogout").onclick = () => action("auth/logout", {});
       $("#wanOpenGitHub").onclick = async () => {
