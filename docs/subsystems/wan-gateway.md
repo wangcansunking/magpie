@@ -24,7 +24,7 @@ and administrative page keep their existing addresses and authentication rules.
   socket and hosting generation. `New` is inert; `Own` attaches the gateway
   lifetime. `wan.json` contains a versioned tunnel identity and port, not a
   credential or an instruction to start automatically.
-- [`auth.go`](../../internal/wan/auth.go) owns GitHub device authorization,
+- [`auth.go`](../../internal/wan/auth.go) owns GitHub and Microsoft device authorization,
   expiry, background renewal, cancellation and the credential commit barrier.
   [`refresh.go`](../../internal/wan/refresh.go) rotates token pairs under that
   barrier; [`credentials.go`](../../internal/wan/credentials.go) leases the
@@ -32,6 +32,19 @@ and administrative page keep their existing addresses and authentication rules.
   [`github.go`](../../internal/wan/github.go) makes bounded, cancellable
   requests without following redirects. Neither uses provider sign-in,
   account discovery, existing CLI tokens or a browser-owned lifetime.
+- [`microsoft.go`](../../internal/wan/microsoft.go) implements Microsoft's
+  device grant and refresh against the common v2 endpoint. Personal Microsoft
+  and Entra organization accounts use the public Dev Tunnels CLI client and
+  the SDK's published Dev Tunnels resource audience. The helper sends `Bearer`
+  authorization for Microsoft and `github` authorization for GitHub.
+- [`usage.go`](../../internal/wan/usage.go) reads account identity and actual
+  `BandwidthPerUser` values from the Dev Tunnels `userlimits` API. An owner
+  worker checks once per minute, cancels old-credential requests and joins on
+  shutdown. Status reads only its cached value. Missing/failed measurements
+  remain unknown; same-credential failures retain explicitly stale values.
+- [`tunnel.go`](../../internal/wan/tunnel.go) stores one selected tunnel per
+  account in local-only `wan-tunnels.json`, using GitHub's numeric ID or
+  Microsoft's tenant/object IDs. Account names are display labels, not keys.
 - [`vault.go`](../../internal/wan/vault.go) defines a WAN-specific secure
   credential store. Windows uses the current user's Credential Manager,
   namespaced by settings directory. Other systems currently offer explicit
@@ -60,10 +73,19 @@ repository scope or client secret is requested. See the
 [SDK service-app contract](https://github.com/microsoft/dev-tunnels/blob/b73b0eb774b86a5b519c300f2f41c9072a66f663/ts/src/contracts/tunnelServiceProperties.ts)
 and [GitHub App device flow](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app#using-the-device-flow-to-generate-a-user-access-token).
 
+Microsoft device authorization uses `common`, the public CLI client ID
+`c0df98ca-23b4-4bce-bb9f-72039b28d3a5`, and the published resource
+`46da2f7e-b5ef-422a-88d4-2a7f9de6a0b2/.default` with `offline_access`,
+`openid` and `profile`. The supported verification pages are
+`https://login.microsoft.com/device` and `https://microsoft.com/devicelogin`.
+Account and tenant policies can refuse a grant. See the
+[official CLI authentication options](https://learn.microsoft.com/azure/developer/dev-tunnels/cli-commands).
+Provider subscriptions remain independent of this tunnel-service login.
+
 Sign in registers an attempt before requesting a device code. Only the
 verification URI, user code, deadline and attempt identity reach the page;
-the device code and access token stay in the backend. The user opens GitHub
-explicitly. The waiting view offers code copying, its validity time, Open GitHub
+the device code and access token stay in the backend. The user opens the chosen
+service explicitly. The waiting view offers code copying, its validity time, the service page
 and cancellation without signed-in management details. An installed runtime is
 a plain readiness status; an absent runtime exposes installation and its help. Polling respects the response interval, slow-down and expiry.
 Cancel targets the exact current attempt. Replaced/canceled attempts cannot
@@ -83,6 +105,12 @@ status, command arguments, environment or logs. A remembered version-2 secure
 record contains the rotating pair and its access/refresh deadlines. Version-1
 access-only records still load; they require one fresh device sign-in to acquire
 a refresh token. Non-expiring access-only grants retain their existing behavior.
+Microsoft uses a version-3 secure record with a provider discriminator. Its
+refresh deadline remains unknown because the token response does not report it.
+Records exceeding Windows Credential Manager's 2560-byte blob limit are
+compressed inside the native vault, with bounded decompression and the same
+validation on restore. A record that still does not fit is refused; it never
+falls back to plaintext. Existing GitHub records keep their original format.
 
 The gateway owner renews independently of the page, before access expiry (up to
 five minutes early, or one quarter of a short grant's lifetime). Each successful
@@ -183,11 +211,32 @@ streams: the lease revokes admission and request contexts if renewal or helper
 update fails, the current deadline expires, or Stop occurs. Stop cancels and
 joins the update writer before disposing the child.
 
-`wan.json` version 2 stores canonical `id`, `clusterId` and `port`. A legacy
-`{id,port}` is resolved only on an explicitly authenticated Start. Successful
-resolution migrates it; missing tunnels, different identities, corrupt files
-and extra ports refuse hosting. They do not silently replace or delete the
-saved tunnel. WAN client keys are independent of tunnel identity.
+`wan.json` version 2 stores the active canonical `id`, `clusterId`, `port` and
+optional account binding. `wan-tunnels.json` version 1 is the per-account
+catalog. Start resolves the authenticated identity, selects that account's
+saved entry, or creates its first tunnel. Returning to an account reuses its
+selection. Old unbound files, including `{id,port}`, cannot establish ownership:
+the first explicit Start creates an account-bound tunnel and may change the
+address. Corrupt files refuse hosting rather than becoming an empty catalog.
+Known bound tunnels that expire or disappear report an error; they are not
+silently replaced or deleted. WAN client keys are independent of identity.
+
+The explicit `POST /api/wan/tunnel/new` operation requires stopped WAN and
+records replacement intent for the current account only. It creates nothing
+remotely until the next Start. Other accounts' selections, existing remote
+tunnels and WAN keys are retained. The page confirms the address change.
+`POST /api/wan/auth/start` accepts optional `provider: "github" | "microsoft"`;
+omission preserves the original GitHub behavior. One WAN login is active at a
+time; selecting a different account requires its own authorization.
+
+`POST /api/wan/usage/refresh` coalesces checks with a 15-second cooldown.
+Usage reports bytes, a nullable limit, the service's Unix reset timestamp and
+last successful check time. No missing field becomes a fabricated zero.
+Fresh exhausted measurements block Start until the reported reset; stale or
+unavailable measurements do not invent a refusal. Service connection errors
+still remain visible. GitHub and Microsoft quotas are queried for the current
+identity; Microsoft is not assumed to have a larger or unlimited allowance.
+See the [service limits](https://github.com/MicrosoftDocs/azure-docs/blob/main/includes/dev-tunnels/dev-tunnels-service-limits.md).
 
 The SDK's automatic local-port forwarding is disabled. The helper uses its
 explicit V1 protocol selection and manually handles streams, dialing only
@@ -323,13 +372,17 @@ connectivity, native platform behavior or service authentication.
 
 ## Client setup page
 
-The WAN page puts service state first, then client connection beside sign-in
-health, followed by independent WAN keys. Installed runtime details collapse;
+The WAN page puts service state and actionable failure first, then account and
+bandwidth cards, tunnel facts, client setup and independent WAN keys. A quota
+meter shows actual usage and reset time; unavailable and stale data are labeled.
+Account renewal, storage, next attempt and current access-token expiry remain
+visible, with local time zones. Installed runtime readiness is a plain status;
 new installs and device authorization remain explicit. Provider sign-in supplies
-models; the separate GitHub login owns the tunnel. Stop/sign-out effects and
+models; the separate GitHub or Microsoft login owns the tunnel. Stop/sign-out effects and
 public-relay details remain available without dominating the working view.
-[The approved v2 concept](../design/wan-gateway-v2-20261022.png) is a visual
-reference, not a record of a live running tunnel.
+[The approved v3 concept](../design/wan-gateway-v3-20261023.png) is a visual
+reference. [V3 acceptance](../design/wan-gateway-v3-acceptance.md) distinguishes
+offline fixtures, actual service probes and unverified real-account flows.
 
 Client tabs distinguish Claude Code's root Endpoint from an OpenAI-compatible
 `/v1` base. PowerShell/Bash examples quote values literally. An explicit model

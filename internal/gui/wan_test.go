@@ -21,6 +21,8 @@ type fakeWANController struct {
 	authStarts, logouts, installs int
 	remember                      bool
 	canceled                      uint64
+	provider                      string
+	usageChecks, tunnelChanges    int
 }
 
 func (f *fakeWANController) WANStatus() wan.Status { return f.status }
@@ -39,8 +41,9 @@ func (f *fakeWANController) StopWAN() error {
 	return f.err
 }
 
-func (f *fakeWANController) StartWANAuth(remember bool) (wan.AuthStatus, error) {
+func (f *fakeWANController) StartWANAuth(remember bool, provider string) (wan.AuthStatus, error) {
 	f.authStarts++
+	f.provider = provider
 	f.remember = remember
 	if f.err == nil {
 		f.status.Auth = wan.AuthStatus{State: "requesting_code", AttemptID: 7}
@@ -319,4 +322,32 @@ func TestWANBrokenKeysStillPermitStopAndSignOut(t *testing.T) {
 	if err != nil || string(data) != string(broken) {
 		t.Fatalf("unknown keys were overwritten: %q %v", data, err)
 	}
+}
+
+func (f *fakeWANController) RefreshWANUsage() error { f.usageChecks++; return f.err }
+func (f *fakeWANController) NewWANTunnel() error    { f.tunnelChanges++; return f.err }
+func TestWANAccountDiagnosticsAndExplicitTunnelActions(t *testing.T) {
+	sandboxHome(t)
+	limit := uint64(5368709120)
+	controller := &fakeWANController{status: wan.Status{State: "failed", Usage: wan.Usage{State: "ready", Used: 5371017692, Limit: &limit, Account: wan.Account{ID: "github:1", Name: "fixture"}}, Tunnel: &wan.TunnelInfo{ID: "fixture-tunnel", Region: "usw2", Port: 50188, AccountID: "github:1"}}}
+	mux := http.NewServeMux()
+	wanRoutes(mux, func() wanController { return controller })
+	w := wanRequest(t, mux, "GET", "/api/wan", "", 200)
+	var out wanJSON
+	if json.Unmarshal(w.Body.Bytes(), &out) != nil || out.Usage.Used != 5371017692 || out.Tunnel == nil || out.Tunnel.ID != "fixture-tunnel" {
+		t.Fatal("diagnostics missing", w.Body)
+	}
+	if controller.starts != 0 || controller.usageChecks != 0 || controller.tunnelChanges != 0 {
+		t.Fatal("read had an action side effect")
+	}
+	wanRequest(t, mux, "POST", "/api/wan/auth/start", `{"remember":false,"provider":"microsoft"}`, 200)
+	if controller.provider != "microsoft" {
+		t.Fatal("Microsoft selection was lost")
+	}
+	wanRequest(t, mux, "POST", "/api/wan/usage/refresh", `{}`, 200)
+	wanRequest(t, mux, "POST", "/api/wan/tunnel/new", `{}`, 200)
+	if controller.usageChecks != 1 || controller.tunnelChanges != 1 || controller.starts != 0 {
+		t.Fatal("explicit management action published a tunnel")
+	}
+	wanRequest(t, mux, "POST", "/api/wan/tunnel/new", `{"id":"foreign-tunnel"}`, 400)
 }

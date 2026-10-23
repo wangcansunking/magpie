@@ -65,6 +65,10 @@ func TestExplicitRuntimeResultSupersedesInitialDiscovery(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			m := New(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 			m.runtime, m.store = &tunnelRuntime{}, memoryCredentialStore{}
+			m.usage.fetch = func(context.Context, string) (Usage, error) { return Usage{State: "unavailable"}, nil }
+			m.account = func(context.Context, string) (Account, error) {
+				return Account{ID: "github:1", Name: "fixture", Provider: "github"}, nil
+			}
 			entered, release := make(chan struct{}), make(chan struct{})
 			m.hasRuntime = func(context.Context) (bool, error) {
 				close(entered)

@@ -16,7 +16,7 @@ func TestWANRequiresServingOwner(t *testing.T) {
 	if err := s.StopWAN(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.StartWANAuth(false); err == nil {
+	if _, err := s.StartWANAuth(false, "github"); err == nil {
 		t.Fatal("an unserved gateway started authorization")
 	}
 	if err := s.CancelWANAuth(1); err == nil {

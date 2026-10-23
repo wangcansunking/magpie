@@ -28,15 +28,16 @@ var sdkHost []byte
 const sdkLineLimit = 64 << 10
 
 type sdkMessage struct {
-	Version    int           `json:"version"`
-	Generation string        `json:"generation"`
-	Op         string        `json:"op"`
-	Token      string        `json:"token"`
-	ClientID   string        `json:"clientID"`
-	Config     *tunnelConfig `json:"config"`
-	Port       int           `json:"port"`
-	Fresh      bool          `json:"fresh"`
-	Proxy      string        `json:"proxy"`
+	Version      int           `json:"version"`
+	Generation   string        `json:"generation"`
+	Op           string        `json:"op"`
+	Token        string        `json:"token"`
+	AuthProvider string        `json:"authProvider,omitempty"`
+	ClientID     string        `json:"clientID"`
+	Config       *tunnelConfig `json:"config"`
+	Port         int           `json:"port"`
+	Fresh        bool          `json:"fresh"`
+	Proxy        string        `json:"proxy"`
 }
 
 type sdkEvent struct {
@@ -352,7 +353,7 @@ func (o *sdkOutput) consume(line []byte) (sdkEvent, error) {
 	}
 	switch event.Event {
 	case "prepared":
-		if o.phase != 0 || event.Config == nil || event.Code != "" || !validCanonicalConfig(*event.Config) || event.Config.Port != o.expected.Port {
+		if o.phase != 0 || event.Config == nil || event.Code != "" || (!validCanonicalConfig(*event.Config) || event.Config.AccountID != "" || event.Config.AccountName != "" || event.Config.New) || event.Config.Port != o.expected.Port {
 			return event, bad
 		}
 		if o.expected.Version == 2 && (event.Config.ID != o.expected.ID || event.Config.ClusterID != o.expected.ClusterID) {
@@ -405,6 +406,15 @@ func validEventFields(data []byte, event string) bool {
 	switch event {
 	case "prepared":
 		allowed["config"], allowed["endpoint"] = true, true
+		var config map[string]json.RawMessage
+		if json.Unmarshal(fields["config"], &config) != nil || len(config) != 4 {
+			return false
+		}
+		for key := range config {
+			if key != "version" && key != "id" && key != "clusterId" && key != "port" {
+				return false
+			}
+		}
 	case "ready":
 		allowed["endpoint"] = true
 	case "credentials":

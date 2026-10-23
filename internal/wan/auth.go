@@ -3,6 +3,7 @@ package wan
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 // Storage describes this session; StorageAvailable separately enables Remember.
 type AuthStatus struct {
 	State            string       `json:"state"`
+	Provider         string       `json:"provider,omitempty"`
 	Error            string       `json:"error"`
 	UserCode         string       `json:"userCode"`
 	VerificationURI  string       `json:"verificationURI"`
@@ -37,6 +39,7 @@ type authAttempt struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	remember bool
+	provider string
 }
 
 // auth has an immutable owner and application identity. mu guards cached state
@@ -63,6 +66,7 @@ type auth struct {
 	closed        bool
 	blocked       bool
 	github        githubDeviceClient
+	microsoft     microsoftDeviceClient
 	now           func() time.Time
 	wait          func(context.Context, time.Duration) error
 	deadline      func(context.Context, time.Duration) (context.Context, context.CancelFunc)
@@ -83,7 +87,7 @@ func newAuth(owner context.Context, clientID string, store credentialStore) *aut
 	ctx, cancel := context.WithCancel(owner)
 	a := &auth{
 		owner: ctx, cancel: cancel, clientID: clientID, store: store,
-		github: newGitHubDeviceClient(), now: time.Now, changed: make(chan struct{}), refreshWait: waitAuth,
+		github: newGitHubDeviceClient(), microsoft: newMicrosoftDeviceClient(), now: time.Now, changed: make(chan struct{}), refreshWait: waitAuth,
 		wait: waitAuth, deadline: context.WithTimeout,
 		status: AuthStatus{State: "signed_out", Storage: "memory", StorageAvailable: store.available()},
 	}
@@ -120,11 +124,12 @@ func (a *auth) restore() {
 		a.status.State = "signed_out"
 		return
 	}
-	if err != nil || !validSavedCredential(record) || record.ClientID != a.clientID {
+	if err != nil || !validSavedCredential(record) || (record.ClientID != a.clientID && !(record.Provider == "microsoft" && record.ClientID == microsoftClientID)) {
 		a.blocked = true // An unknown saved record is not an empty store.
 		a.status.State, a.status.Error = "error", "Could not read saved WAN sign-in for this application; sign out before signing in again"
 		return
 	}
+	a.status.Provider = record.Provider
 	a.status.Storage = "system"
 	a.status.ExpiresAt = record.ExpiresAt
 	if !record.ExpiresAt.IsZero() && !a.now().Before(record.ExpiresAt) && record.Refresh == "" {
@@ -169,7 +174,7 @@ func (a *auth) Status() AuthStatus {
 // Start registers the attempt before any request and returns immediately. The
 // owner, not an HTTP request or browser page, owns its cancellation. Replacing an
 // attempt also removes the old cached token; it cannot remain usable meanwhile.
-func (a *auth) Start(remember bool) (AuthStatus, error) {
+func (a *auth) Start(remember bool, providers ...string) (AuthStatus, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.closed || a.owner.Err() != nil {
@@ -177,6 +182,13 @@ func (a *auth) Start(remember bool) (AuthStatus, error) {
 	}
 	if a.blocked || a.status.State == "loading" {
 		return a.status, errors.New("WAN sign-in is loading or signing out; finish that operation first")
+	}
+	provider := "github"
+	if len(providers) > 0 && providers[0] != "" {
+		provider = providers[0]
+	}
+	if provider != "github" && provider != "microsoft" {
+		return a.status, errors.New("Unsupported WAN login provider")
 	}
 	if !oauthText(a.clientID, 128) {
 		return a.status, errors.New("A valid WAN GitHub OAuth Client ID is required")
@@ -190,10 +202,10 @@ func (a *auth) Start(remember bool) (AuthStatus, error) {
 	}
 	a.next++
 	ctx, cancel := context.WithCancel(a.owner)
-	r := &authAttempt{id: a.next, ctx: ctx, cancel: cancel, remember: remember}
+	r := &authAttempt{id: a.next, ctx: ctx, cancel: cancel, remember: remember, provider: provider}
 	a.current, a.credential = r, savedCredential{}
 	a.signalLocked()
-	a.status = AuthStatus{State: "requesting_code", AttemptID: r.id, Storage: "memory", StorageAvailable: a.status.StorageAvailable}
+	a.status = AuthStatus{State: "requesting_code", Provider: provider, AttemptID: r.id, Storage: "memory", StorageAvailable: a.status.StorageAvailable}
 	if remember {
 		a.status.Storage = "system"
 	}
@@ -239,7 +251,12 @@ func (a *auth) run(r *authAttempt) {
 		return
 	}
 	requested := a.now()
-	code, err := a.github.code(r.ctx, a.clientID, "")
+	var code githubDeviceCode
+	if r.provider == "microsoft" {
+		code, err = a.microsoft.code(r.ctx)
+	} else {
+		code, err = a.github.code(r.ctx, a.clientID, "")
+	}
 	if err != nil {
 		a.requestFailed(r, err)
 		return
@@ -276,7 +293,13 @@ func (a *auth) run(r *authAttempt) {
 			return
 		}
 		polled := a.now()
-		grant, err := a.github.poll(ctx, a.clientID, code.DeviceCode)
+		var grant githubGrant
+		var err error
+		if r.provider == "microsoft" {
+			grant, err = a.microsoft.poll(ctx, code.DeviceCode)
+		} else {
+			grant, err = a.github.poll(ctx, a.clientID, code.DeviceCode)
+		}
 		if err != nil {
 			if ctx.Err() != nil && r.ctx.Err() == nil {
 				a.fail(r, "GitHub device code for WAN expired; start sign-in again", false)
@@ -314,6 +337,9 @@ func (a *auth) run(r *authAttempt) {
 		if grant.Refresh != "" && grant.ExpiresIn > 0 && grant.RefreshExpiresIn > grant.ExpiresIn && grant.RefreshExpiresIn <= 2*366*24*60*60 {
 			record = rotatingCredential(a.clientID, grant, polled)
 		}
+		if r.provider == "microsoft" {
+			record = microsoftCredential(grant, polled)
+		}
 		a.accept(r, record)
 		return
 	}
@@ -333,6 +359,9 @@ func (a *auth) requestFailed(r *authAttempt, err error) {
 }
 
 func (a *auth) fail(r *authAttempt, message string, blocked bool) {
+	if r.provider == "microsoft" {
+		message = strings.ReplaceAll(message, "GitHub", "Microsoft")
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.activeLocked(r) {

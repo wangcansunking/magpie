@@ -1,10 +1,13 @@
 package wan
 
 import (
+	"bytes"
+	"compress/zlib"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +28,7 @@ const vaultSandbox = "MAGPIE_TEST_SANDBOX"
 // This record never enters settings, backups, status or the helper's diagnostics.
 type savedCredential struct {
 	Version          int       `json:"version"`
+	Provider         string    `json:"provider,omitempty"`
 	ClientID         string    `json:"clientID"`
 	Access           string    `json:"access"`
 	ExpiresAt        time.Time `json:"expiresAt,omitempty"`
@@ -74,6 +78,24 @@ func (s systemCredentialStore) load() (savedCredential, error) {
 		return savedCredential{}, err
 	}
 	defer clear(data)
+	if bytes.HasPrefix(data, []byte("magpie-wan-z1\n")) {
+		r, err := zlib.NewReader(bytes.NewReader(data[len("magpie-wan-z1\n"):]))
+		if err != nil {
+			return savedCredential{}, errors.New("Saved WAN sign-in is unreadable; sign out before signing in again")
+		}
+		expanded, err := io.ReadAll(io.LimitReader(r, (32<<10)+1))
+		r.Close()
+		if err != nil || len(expanded) > 32<<10 {
+			clear(expanded)
+			return savedCredential{}, errors.New("Saved WAN sign-in is unreadable; sign out before signing in again")
+		}
+		defer clear(expanded)
+		var record savedCredential
+		if json.Unmarshal(expanded, &record) != nil || !validSavedCredential(record) {
+			return savedCredential{}, errors.New("Saved WAN sign-in is unreadable; sign out before signing in again")
+		}
+		return record, nil
+	}
 	var record savedCredential
 	if len(data) == 0 || len(data) > maxCredentialBlob || json.Unmarshal(data, &record) != nil || !validSavedCredential(record) {
 		return savedCredential{}, errors.New("Saved WAN sign-in is unreadable; sign out before signing in again")
@@ -85,10 +107,23 @@ func (s systemCredentialStore) save(record savedCredential) error {
 		return errors.New("WAN credential is invalid")
 	}
 	data, err := json.Marshal(record)
+	defer func() { clear(data) }()
+	if err == nil && record.Provider == "microsoft" && len(data) > maxCredentialBlob {
+		var buf bytes.Buffer
+		buf.WriteString("magpie-wan-z1\n")
+		w := zlib.NewWriter(&buf)
+		_, writeErr := w.Write(data)
+		closeErr := w.Close()
+		clear(data)
+		data = buf.Bytes()
+		if writeErr != nil || closeErr != nil {
+			clear(data)
+			return errors.New("WAN credential does not fit secure storage; use a memory-only session")
+		}
+	}
 	if err != nil || len(data) > maxCredentialBlob {
 		return errors.New("WAN credential does not fit secure storage; use a memory-only session")
 	}
-	defer clear(data)
 	if err := s.vault.write(s.target, data); err != nil {
 		return errors.New("Could not save WAN sign-in in secure storage")
 	}
@@ -103,7 +138,13 @@ func (s systemCredentialStore) delete() error {
 
 func validSavedCredential(record savedCredential) bool {
 	validTime := func(t time.Time) bool { return t.IsZero() || t.Year() >= 2020 && t.Year() <= 9999 }
-	if !oauthText(record.ClientID, 128) || !oauthText(record.Access, 4096) || !validTime(record.ExpiresAt) {
+	if !oauthText(record.ClientID, 128) || !oauthText(record.Access, 8192) || !validTime(record.ExpiresAt) {
+		return false
+	}
+	if record.Version == 3 {
+		return record.Provider == "microsoft" && record.ClientID == microsoftClientID && validMicrosoftGrant(githubGrant{Access: record.Access, Refresh: record.Refresh, Type: "bearer", ExpiresIn: 3600}) && validTime(record.ExpiresAt) && !record.ExpiresAt.IsZero() && !record.RefreshAfter.IsZero() && validTime(record.RefreshAfter) && record.RefreshAfter.Before(record.ExpiresAt) && record.RefreshExpiresAt.IsZero()
+	}
+	if record.Provider != "" && record.Provider != "github" {
 		return false
 	}
 	if record.Version == 1 {

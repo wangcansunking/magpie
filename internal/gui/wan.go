@@ -16,10 +16,12 @@ type wanController interface {
 	WANStatus() wan.Status
 	StartWAN() error
 	StopWAN() error
-	StartWANAuth(bool) (wan.AuthStatus, error)
+	StartWANAuth(bool, string) (wan.AuthStatus, error)
 	CancelWANAuth(uint64) error
 	LogoutWAN() error
 	InstallWANRuntime() error
+	RefreshWANUsage() error
+	NewWANTunnel() error
 }
 
 type wanJSON struct {
@@ -93,13 +95,14 @@ func wanRoutes(mux *http.ServeMux, owner func() wanController) {
 			return
 		}
 		var in struct {
-			Remember bool `json:"remember"`
+			Remember bool   `json:"remember"`
+			Provider string `json:"provider"`
 		}
 		if err := wanInput(w, r, &in); err != nil {
 			fail(w, err)
 			return
 		}
-		if _, err := controller.StartWANAuth(in.Remember); err != nil {
+		if _, err := controller.StartWANAuth(in.Remember, in.Provider); err != nil {
 			fail(w, err)
 			return
 		}
@@ -128,7 +131,7 @@ func wanRoutes(mux *http.ServeMux, owner func() wanController) {
 		}
 		respond(w, controller, "")
 	})
-	for _, action := range []string{"auth/logout", "runtime/install"} {
+	for _, action := range []string{"auth/logout", "runtime/install", "usage/refresh", "tunnel/new"} {
 		mux.HandleFunc("POST /api/wan/"+action, func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Cache-Control", "no-store")
 			controller := control(w)
@@ -141,7 +144,11 @@ func wanRoutes(mux *http.ServeMux, owner func() wanController) {
 				return
 			}
 			var err error
-			if action == "auth/logout" {
+			if action == "usage/refresh" {
+				err = controller.RefreshWANUsage()
+			} else if action == "tunnel/new" {
+				err = controller.NewWANTunnel()
+			} else if action == "auth/logout" {
 				err = controller.LogoutWAN()
 			} else {
 				err = controller.InstallWANRuntime()

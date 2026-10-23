@@ -70,7 +70,7 @@ func (a *auth) refreshLoop(ctx context.Context, record savedCredential, remember
 		if err := a.refreshWait(ctx, delay); err != nil {
 			return
 		}
-		if !a.now().Before(record.RefreshExpiresAt) {
+		if !record.RefreshExpiresAt.IsZero() && !a.now().Before(record.RefreshExpiresAt) {
 			a.refreshRejected(ctx, record)
 			return
 		}
@@ -78,7 +78,13 @@ func (a *auth) refreshLoop(ctx context.Context, record savedCredential, remember
 		if !a.publishRenewal(ctx, record, "refreshing", time.Time{}) {
 			return
 		}
-		grant, err := a.github.refresh(ctx, a.clientID, record.Refresh)
+		var grant githubGrant
+		var err error
+		if record.Provider == "microsoft" {
+			grant, err = a.microsoft.refresh(ctx, record.Refresh)
+		} else {
+			grant, err = a.github.refresh(ctx, a.clientID, record.Refresh)
+		}
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -90,13 +96,19 @@ func (a *auth) refreshLoop(ctx context.Context, record savedCredential, remember
 			// Bounded retries retain the last access deadline. Hosting still
 			// closes if that deadline passes; network trouble never extends it.
 			retry = min(5*time.Minute, max(30*time.Second, retry*2))
-			delay = min(retry, max(time.Duration(0), record.RefreshExpiresAt.Sub(a.now())))
+			delay = retry
+			if !record.RefreshExpiresAt.IsZero() {
+				delay = min(retry, max(time.Duration(0), record.RefreshExpiresAt.Sub(a.now())))
+			}
 			if !a.publishRenewal(ctx, record, "retrying", a.now().Add(delay)) {
 				return
 			}
 			continue
 		}
 		next := rotatingCredential(a.clientID, grant, issued)
+		if record.Provider == "microsoft" {
+			next = microsoftCredential(grant, issued)
+		}
 		if !a.commitRefresh(ctx, record, next, remember) {
 			return
 		}

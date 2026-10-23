@@ -456,3 +456,17 @@ test('actual pinned SDK V1 keeps the same stream connected through host credenti
         await echo('after renewal, on the same forwarded stream');
     });
 });
+test('actual management adapter sends the provider-specific service authorization without borrowing another identity', async () => {
+  for (const provider of ['github', 'microsoft']) {
+    let observed;
+    const management = new sdk.ManagementClient({ name: 'offline-identity-fixture', version: '1' }, sdk.ManagementApiVersions.Version20230927preview,
+      async () => protocolFixture.serviceAuthorization(provider, 'fixture-credential'), undefined, undefined,
+      async config => { observed = config.headers.Authorization; return { data: [], status: 200, statusText: 'OK', headers: {}, config }; });
+    management.enableEventsReporting = false;
+    await management.listUserLimits();
+    assert.equal(observed, (provider === 'microsoft' ? 'Bearer ' : 'github ') + 'fixture-credential');
+    await management.dispose();
+  }
+  assert.throws(() => protocolFixture.serviceAuthorization('other', 'fixture-credential'));
+  assert.throws(() => protocolFixture.serviceAuthorization('microsoft', 'bad\r\ncredential'));
+});

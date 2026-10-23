@@ -8,11 +8,12 @@ import (
 )
 
 type sdkCredential struct {
-	Version    int    `json:"version"`
-	Generation string `json:"generation"`
-	Op         string `json:"op"`
-	Token      string `json:"token"`
-	Revision   uint64 `json:"revision"`
+	Version      int    `json:"version"`
+	Generation   string `json:"generation"`
+	Op           string `json:"op"`
+	Token        string `json:"token"`
+	AuthProvider string `json:"authProvider,omitempty"`
+	Revision     uint64 `json:"revision"`
 }
 
 // A lease extends only after the helper acknowledges the new GitHub and host
@@ -77,7 +78,7 @@ func keepCredentials(owner context.Context, a *auth, child *sdkProcess, generati
 				l.mu.Lock()
 				l.last = next
 				l.mu.Unlock()
-				err = child.send(update, sdkCredential{Version: 1, Generation: generation, Op: "credentials", Token: next, Revision: revision})
+				err = child.send(update, sdkCredential{Version: 1, Generation: generation, Op: "credentials", Token: next, AuthProvider: a.Status().Provider, Revision: revision})
 				if err == nil {
 					select {
 					case <-ack:

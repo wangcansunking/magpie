@@ -5,8 +5,10 @@ function registerWANPage(ctx) {
   let generation = 0, actionID = 0, visibilityID = 0, statusVersion = 0, read = null, timer = null, cleanup = null, keysDrawn = "", problem = "";
   let client = "claude", platform = /Win/i.test(navigator.platform) ? "powershell" : "bash", model = "";
   let modelChoices = "";
+
   let modelCatalog = null, modelRead = null, modelGeneration = 0, modelsProblem = false;
-  const deviceURI = "https://github.com/login/device";
+  const githubURI = "https://github.com/login/device", microsoftURI = "https://microsoft.com/devicelogin";
+  const deviceURI = () => snapshot?.auth?.provider === "microsoft" ? [microsoftURI, "https://login.microsoft.com/device"].includes(snapshot.auth.verificationURI) ? snapshot.auth.verificationURI : "https://login.microsoft.com/device" : githubURI;
   const mounted = () => page?.isConnected && !!page.querySelector("#wanClientType") && !!page.querySelector("#wanStatus");
   const visible = () => !suspended && mounted() && !page.hidden && !document.hidden;
   const canChange = () => fresh && snapshot?.controllable && !busy;
@@ -131,23 +133,26 @@ function registerWANPage(ctx) {
     const state = snapshot?.state, auth = snapshot?.auth;
     // Availability is cached: an external runtime installation can make it
     // stale. Start rechecks locally without downloading; only Install downloads.
-    $("#wanStart").disabled = !canChange() || !!snapshot?.keysError || auth?.state !== "signed_in" || !["stopped", "failed"].includes(state);
+    $("#wanStart").disabled = !canChange() || quotaExceeded() || !!snapshot?.keysError || auth?.state !== "signed_in" || !["stopped", "failed"].includes(state);
     $("#wanStop").disabled = !(canChange() || (fresh && busy === "start" && snapshot?.controllable)) || !["running", "starting"].includes(state);
     $("#wanInstall").disabled = !canChange() || snapshot.runtimeAvailable || !["stopped", "failed"].includes(state);
     $("#wanLogin").disabled = !canChange() || !["signed_out", "expired", "error"].includes(auth?.state) || !["stopped", "failed"].includes(state);
     $("#wanRemember").disabled = $("#wanMemory").disabled = $("#wanLogin").disabled || !auth?.storageAvailable;
     $("#wanCopyCode").disabled = !fresh || auth?.state !== "awaiting_authorization" || !auth.userCode;
     $("#wanLogout").disabled = !canLogout() || !auth || auth.state === "signing_out";
+    $("#wanRefreshUsage").disabled = !canChange() || auth?.state !== "signed_in" || Date.now() - new Date(snapshot?.usage?.checkedAt || 0).getTime() < 15000;
+    $("#wanNewTunnel").disabled = !canChange() || auth?.state !== "signed_in" || !["stopped", "failed"].includes(state) || !snapshot?.tunnel?.id || !!snapshot.tunnel.new;
+    $("#wanMicrosoftLogin").disabled = $("#wanLogin").disabled;
     const cancel = $("#wanCancelAuth");
     if (cancel) cancel.disabled = !(canChange() || canInterruptAuth()) || !authorizing();
-    $("#wanOpenGitHub").disabled = !(canChange() || canInterruptAuth()) || auth?.state !== "awaiting_authorization" || auth.verificationURI !== deviceURI;
+    $("#wanOpenGitHub").disabled = !(canChange() || canInterruptAuth()) || auth?.state !== "awaiting_authorization" || auth.verificationURI !== deviceURI();
     $("#wanCopyExample").disabled = !fresh || state !== "running" || !wanModels().some(m => m.id === model);
     $("#wanPickModel").disabled = !wanModels().length;
   }
   function renderAuth() {
     const auth = snapshot?.auth, current = fresh ? auth?.state : "unknown";
     $("#wanAuth").dataset.state = current || "unknown";
-    $("#wanAuthState").textContent = t(authStates[current] || authStates.unknown);
+    $("#wanAuthState").textContent = t(auth?.provider === "microsoft" && current === "requesting_code" ? "Requesting a Microsoft device code…" : auth?.provider === "microsoft" && current === "error" ? "Microsoft WAN sign-in failed" : auth?.provider === "microsoft" && current === "signed_in" ? "Signed in to Microsoft for WAN" : auth?.provider === "microsoft" && current === "awaiting_authorization" ? "Waiting for Microsoft authorization…" : authStates[current] || authStates.unknown);
     $("#wanAuthProblem").textContent = t(auth?.error || "");
     $("#wanAuthProblem").hidden = !$("#wanAuthProblem").textContent;
     $("#wanRuntimeState").textContent = t(!fresh ? "WAN runtime status unavailable" : snapshot?.runtimeAvailable ? "WAN runtime installed" : "WAN runtime not installed");
@@ -159,6 +164,12 @@ function registerWANPage(ctx) {
     $("#wanInstall").textContent = t(busy === "runtime/install" ? "Installing WAN runtime…" : "Install WAN runtime");
     const active = ["signed_in", "loading", "requesting_code", "awaiting_authorization", "signing_out"].includes(current);
     $("#wanLogin").hidden = active;
+    $("#wanMicrosoftLogin").hidden = active;
+    $("#wanOpenGitHub").textContent = t(auth?.provider === "microsoft" ? "Open Microsoft" : "Open GitHub");
+    $("#wanDevicePrompt").textContent = t(auth?.provider === "microsoft" ? "Enter this code on Microsoft" : "Enter this code on GitHub");
+    $("#wanAccountName").textContent = snapshot?.usage?.account?.name || t(auth?.provider === "microsoft" ? "Microsoft account" : "GitHub account");
+    $("#wanAccountIdentity").hidden = current !== "signed_in";
+    $("#wanAccountProvider").textContent = auth?.provider === "microsoft" ? t("Microsoft · Entra ID / Personal") : "GitHub";
     $("#wanRememberRow").hidden = active || !auth?.storageAvailable;
     $("#wanAuthActions").hidden = active && !authorizing();
     $("#wanLogoutRow").hidden = ["signed_out", "unknown", "requesting_code", "awaiting_authorization"].includes(current);
@@ -259,23 +270,61 @@ function registerWANPage(ctx) {
     detail.hidden = !signedIn && !(current === "expired" && deadline && Number.isFinite(deadline.getTime()));
     if (detail.dataset.group !== group) {
       detail.dataset.group = group;
-      detail.open = group !== "session";
+      detail.open = true;
     }
   }
+
+  function quotaExceeded() {
+    const u = snapshot?.usage;
+    return fresh && snapshot?.auth?.state === "signed_in" && u?.state === "ready" && Number.isSafeInteger(u.used) && Number.isSafeInteger(u.limit) && u.used >= u.limit && (!u.resetAt || new Date(u.resetAt).getTime() > Date.now());
+  }
+  function quotaSize(value) {
+    if (!Number.isSafeInteger(value) || value < 0) return t("Not reported");
+    return (value / 1073741824).toLocaleString(locale, { minimumFractionDigits: 3, maximumFractionDigits: 3 }) + " GiB";
+  }
+  function renderUsage() {
+    const u = snapshot?.usage, signedIn = fresh && snapshot?.auth?.state === "signed_in";
+    const known = signedIn && ["ready", "stale"].includes(u?.state) && Number.isSafeInteger(u.used) && u.used >= 0 && (u.limit === null || Number.isSafeInteger(u.limit) && u.limit >= 0);
+    $("#wanQuotaValue").textContent = known ? quotaSize(u.used) + " / " + (u.limit === null ? t("No reported limit") : quotaSize(u.limit)) : "—";
+    const ratio = known && u.limit !== null ? u.limit === 0 ? 100 : Math.min(100, u.used / u.limit * 100) : 0;
+    const track = $("#wanQuotaTrack"); track.hidden = !known || u.limit === null;
+    track.setAttribute("aria-label", t("Account bandwidth")); track.setAttribute("aria-valuemin", "0"); track.setAttribute("aria-valuemax", "100"); track.setAttribute("aria-valuenow", String(ratio));
+    $("#wanQuotaFill").style.width = ratio + "%"; track.dataset.exhausted = String(quotaExceeded());
+    $("#wanQuotaState").textContent = t(!signedIn ? "Sign in to see account usage" : !known ? u?.state === "loading" ? "Checking account usage…" : "Account usage unavailable" : u.state === "stale" ? "Last known usage · check failed" : quotaExceeded() ? "Bandwidth allowance exhausted" : "Monthly account allowance");
+    $("#wanQuotaReset").textContent = known ? dateText(u.resetAt) || t("Not reported") : "—";
+    $("#wanQuotaChecked").textContent = known ? dateText(u.checkedAt) || t("Not reported") : "—";
+    $("#wanQuotaProblem").textContent = signedIn ? t(u?.error || "") : "";
+    $("#wanQuotaProblem").hidden = !$("#wanQuotaProblem").textContent;
+  }
+  function renderTunnel() {
+    const tunnel = fresh ? snapshot?.tunnel : null;
+    $("#wanTunnelID").textContent = tunnel?.id || "—";
+    $("#wanTunnelRegion").textContent = tunnel?.region || "—";
+    $("#wanTunnelPort").textContent = tunnel?.port || "—";
+    $("#wanTunnelAccount").textContent = tunnel?.accountName || "—";
+    $("#wanTunnelState").textContent = t(tunnel?.new ? "The next Start creates a new tunnel for this account." : tunnel?.id ? "Saved tunnel · reused for this account" : "Start WAN to create this account’s tunnel.");
+  }
+
   function renderStatus() {
     const current = fresh ? snapshot?.state : "unknown";
-    $("#wanState").textContent = t(states[current] || states.unknown);
+    $("#wanState").textContent = t(quotaExceeded() ? "Dev Tunnels bandwidth exhausted" : states[current] || states.unknown);
     $("#wanStateDot").classList.toggle("on", current === "running");
     $("#wanStatus").dataset.state = current;
     $("#wanStart").hidden = ["running", "starting", "stopping"].includes(current);
     $("#wanStop").hidden = !["running", "starting", "stopping"].includes(current);
-    const note = current === "running" ? "Public access is enabled. Requests require a WAN key."
+    const note = quotaExceeded() ? "Public requests are blocked by Microsoft. Your provider sign-in is unaffected."
+      : current === "failed" ? "WAN is offline. Review the error before starting again."
+      : current === "starting" ? "Connecting to Microsoft Dev Tunnels…"
+      : current === "stopping" ? "Closing the public connection…"
+      : current === "running" ? "Public access is enabled. Requests require a WAN key."
       : !fresh ? "Read the WAN status before making changes."
-        : snapshot?.auth?.state !== "signed_in" ? "Sign in to GitHub below before starting WAN."
+        : snapshot?.auth?.state !== "signed_in" ? "Choose GitHub or Microsoft to authorize Dev Tunnels. Signing in never starts WAN."
           : "Ready to start. Starting WAN publishes a key-protected public endpoint.";
     $("#wanStatusHelp").textContent = t(snapshot?.keysError && ["stopped", "failed"].includes(current) ? "WAN keys could not be read. Resolve the key error before starting." : note);
     $("#wanProblem").textContent = t(problem || snapshot?.error || "");
-    $("#wanProblem").hidden = !$("#wanProblem").textContent;
+    $("#wanProblem").hidden = !$("#wanProblem").textContent || !problem && quotaExceeded() && /429|bandwidth is exhausted/i.test(snapshot?.error || "");
+    $("#wanStatusReset").hidden = !quotaExceeded();
+    $("#wanStatusReset").textContent = quotaExceeded() ? t("Resets {time}", { time: dateText(snapshot.usage.resetAt) || t("Not reported") }) : "";
     $("#wanOwnerNote").hidden = !snapshot || !!snapshot.controllable;
   }
   function keyForm() {
@@ -400,33 +449,36 @@ function registerWANPage(ctx) {
     // A copied example contains placeholders, never a key read from the backend.
     $("#wanClaudeExample").textContent = example;
   }
-  function render() { renderStatus(); renderAuth(); renderClient(); renderKeys(); controls(); }
+  function render() { renderStatus(); renderAuth(); renderUsage(); renderTunnel(); renderClient(); renderKeys(); controls(); }
   ctx.slots.add("page", {
     key: "wan", title: "WAN Gateway",
     html: `
 <p class="usage-note wan-intro" data-t>Let remote clients use your models.</p>
 <section class="list gwcard wan-status-card">
-  <div class="row gw" id="wanStatus" role="status"><span class="dot" id="wanStateDot" aria-hidden="true"></span><div class="who"><div class="name" id="wanState" data-t>WAN status unavailable</div><div class="usage-note" id="wanStatusHelp"></div></div><span class="usage-note wan-restart-note" data-t>Start WAN manually after restarting magpie.</span><button class="text primary" id="wanStart" data-t disabled>Start</button><button class="text" id="wanStop" data-t disabled>Stop</button></div>
+  <div class="row gw" id="wanStatus" role="status"><span class="dot" id="wanStateDot" aria-hidden="true"></span><div class="who"><div class="name" id="wanState" data-t>WAN status unavailable</div><div class="usage-note" id="wanStatusHelp"></div></div><span class="usage-note" id="wanStatusReset" hidden></span><button class="text primary" id="wanStart" data-t disabled>Start</button><button class="text" id="wanStop" data-t disabled>Stop</button></div>
 </section>
 <p class="usage-note" id="wanOwnerNote" hidden data-t>This window does not own the gateway. WAN controls are unavailable.</p>
 <p class="usage-note warn" id="wanProblem" role="alert" hidden></p>
-<div class="wan-workspace">
-<aside class="wan-setup-card wan-session-card"><div class="row-head"><span class="label" data-t>GitHub sign-in for WAN</span></div>
-<p class="usage-note" id="wanLoginHelp" data-t>Authorize Microsoft's Dev Tunnels GitHub App for WAN. No application registration is needed. Signing in never starts WAN.</p>
-<section class="list gwcard" id="wanAuth" role="status">
+<div class="wan-overview">
+<aside class="wan-setup-card wan-session-card"><div class="row-head"><span class="label" data-t>Dev Tunnels account</span></div>
+<p class="usage-note" id="wanLoginHelp" data-t>Choose GitHub or Microsoft to authorize Dev Tunnels. Signing in never starts WAN.</p>
+<section class="list gwcard" id="wanAuth" role="status"><div id="wanAccountIdentity" class="wan-account-identity" hidden><span class="wan-account-avatar" aria-hidden="true">◎</span><div><strong id="wanAccountName"></strong><div class="usage-note" id="wanAccountProvider"></div></div></div>
   <div class="wan-auth-header" id="wanAuthHeader"><div class="wan-auth-status"><span class="wan-auth-dot" aria-hidden="true"></span><div class="name" id="wanAuthState"></div></div></div>
   <div class="wan-renewal" id="wanRenewal" hidden><div class="wan-renewal-title"><span class="wan-renewal-mark" aria-hidden="true">↻</span><strong id="wanRenewalState"></strong></div><p class="usage-note" id="wanRenewalHelp"></p></div>
   <dl class="wan-session-meta" id="wanSessionMeta"><div id="wanRenewalNextRow" hidden><dt id="wanRenewalNextLabel"></dt><dd><time id="wanRenewalNext"></time></dd></div><div id="wanStorageInfo" hidden><dt data-t>Login storage</dt><dd id="wanStorageMode"></dd></div></dl>
-  <details id="wanCredentialDetails" class="wan-credential-details"><summary data-t>WAN credential details</summary><dl class="wan-auth-summary" id="wanAuthSummary" hidden><div id="wanAuthExpiry" hidden><dt id="wanAuthExpiryLabel"></dt><dd><time id="wanAuthExpiresAt"></time><span id="wanAuthRemaining"></span></dd></div></dl><p class="usage-note" id="wanExpiryNote" data-t>Renewal updates this access-token deadline. It is not a fixed sign-in expiry.</p></details>
-  <div id="wanLogoutRow"><button class="text" id="wanLogout" data-t disabled>Sign out of WAN</button><p class="usage-note" data-t>Stop leaves WAN signed in. Sign out stops WAN and removes its local sign-in; it does not revoke GitHub authorization.</p></div>
+  <section id="wanCredentialDetails" class="wan-credential-details"><dl class="wan-auth-summary" id="wanAuthSummary" hidden><div id="wanAuthExpiry" hidden><dt id="wanAuthExpiryLabel"></dt><dd><time id="wanAuthExpiresAt"></time><span id="wanAuthRemaining"></span></dd></div></dl><p class="usage-note" id="wanExpiryNote" data-t>Renewal updates this access-token deadline. It is not a fixed sign-in expiry.</p></section>
+  <div id="wanLogoutRow"><button class="text" id="wanLogout" data-t disabled>Sign out of WAN</button><p class="usage-note" data-t>Sign out stops WAN and removes its saved login on this computer.</p></div>
   <div class="wan-storage-choice" id="wanRememberRow"><div class="name" id="wanRememberLabel" data-t>Login storage</div><div class="wan-client-tabs" role="radiogroup" aria-labelledby="wanRememberLabel"><button class="text" id="wanMemory" role="radio" aria-checked="true" data-t>Until magpie exits</button><button class="text" id="wanRemember" role="radio" aria-checked="false" data-t>Remember on this computer</button></div></div>
-  <div class="row" id="wanAuthActions"><button class="text primary" id="wanLogin" data-t disabled>Sign in to GitHub for WAN</button><span id="wanCancelSlot"></span></div>
-  <div id="wanDevice" hidden><div class="row"><div class="who"><div class="name" data-t>Enter this code on GitHub</div><div class="wan-device-code"><code id="wanUserCode"></code><button class="text" id="wanCopyCode" aria-describedby="wanUserCode" data-t disabled>Copy</button></div></div></div><p class="usage-note" id="wanDeviceValidity"><span data-t>Device code validity</span> · <time id="wanDeviceDeadline"></time></p><div class="row"><div class="who"><span class="usage-note" id="wanVerificationURI"></span></div></div><div class="row"><button class="text primary" id="wanOpenGitHub" data-t disabled>Open GitHub</button></div></div>
+  <div class="row" id="wanAuthActions"><button class="text primary" id="wanLogin" data-t disabled>Sign in to GitHub for WAN</button><button class="text" id="wanMicrosoftLogin" data-t disabled>Sign in with Microsoft</button><span id="wanCancelSlot"></span></div>
+  <div id="wanDevice" hidden><div class="row"><div class="who"><div class="name" id="wanDevicePrompt" data-t>Enter this code on GitHub</div><div class="wan-device-code"><code id="wanUserCode"></code><button class="text" id="wanCopyCode" aria-describedby="wanUserCode" data-t disabled>Copy</button></div></div></div><p class="usage-note" id="wanDeviceValidity"><span data-t>Device code validity</span> · <time id="wanDeviceDeadline"></time></p><div class="row"><div class="who"><span class="usage-note" id="wanVerificationURI"></span></div></div><div class="row"><button class="text primary" id="wanOpenGitHub" data-t disabled>Open GitHub</button></div></div>
 </section>
 <p class="usage-note" id="wanStorage"></p>
 <p class="usage-note warn" id="wanAuthProblem" role="alert" hidden></p>
 <section id="wanRuntimeDetails" class="wan-runtime-details"><div class="wan-runtime-status" role="status"><span class="wan-runtime-dot" aria-hidden="true"></span><span id="wanRuntimeState"></span></div><div class="row" id="wanInstallRow"><button class="text" id="wanInstall" data-t disabled>Install WAN runtime</button></div><p class="usage-note" id="wanRuntimeHelp" data-t>Install downloads the WAN runtime. Installation and GitHub sign-in do not publish a tunnel; only Start does.</p></section>
 </aside>
+<section class="wan-quota-card"><div class="row-head"><span class="label" data-t>Account bandwidth</span><span class="grow"></span><button class="text" id="wanRefreshUsage" data-t disabled>Refresh usage</button></div><div class="wan-quota-value" id="wanQuotaValue"></div><div class="wan-quota-track" id="wanQuotaTrack" role="meter"><span id="wanQuotaFill"></span></div><p class="usage-note" id="wanQuotaState"></p><dl class="wan-session-meta"><div><dt data-t>Reset time</dt><dd id="wanQuotaReset"></dd></div><div><dt data-t>Last checked</dt><dd id="wanQuotaChecked"></dd></div></dl><p class="usage-note warn" id="wanQuotaProblem" role="alert" hidden></p><p class="usage-note" data-t>Monthly allowance is shared across this account. Changing a model or WAN key does not reset it.</p></section>
+</div>
+<section class="wan-tunnel-card"><div class="row-head"><span class="label" data-t>Tunnel</span><span class="grow"></span><button class="text" id="wanNewTunnel" data-t disabled>Use a new tunnel</button></div><p class="usage-note" id="wanTunnelState"></p><dl class="wan-tunnel-grid"><div><dt data-t>Tunnel ID</dt><dd id="wanTunnelID"></dd></div><div><dt data-t>Region</dt><dd id="wanTunnelRegion"></dd></div><div><dt data-t>Port</dt><dd id="wanTunnelPort"></dd></div><div><dt data-t>Account</dt><dd id="wanTunnelAccount"></dd></div></dl><p class="usage-note" data-t>Each account keeps its own tunnel. A new tunnel changes the address and keeps WAN keys.</p></section>
 <section class="wan-client-card">
 <div class="row-head"><span class="label" data-t>Client connection</span></div>
 <div class="wan-client-tabs" id="wanClientType" role="group"><button class="text" id="wanClientClaude" aria-pressed="true">Claude Code</button><button class="text" id="wanClientOpenAI" aria-pressed="false" data-t>OpenAI-compatible WAN client</button></div>
@@ -436,7 +488,6 @@ function registerWANPage(ctx) {
 <div class="wan-client-example"><div class="wan-example-toolbar"><span class="usage-note" data-t>WAN client example</span><button class="text" id="wanCopyExample" data-t disabled>Copy WAN example</button></div><pre><code id="wanClaudeExample"></code></pre></div>
 <p class="usage-note" data-t>The endpoint is available only while WAN is running. Its address may change if the tunnel expires or is removed.</p>
 </section>
-</div>
 <section class="wan-keys-card">
 <div class="row-head"><span class="label" data-t>WAN keys</span><span class="grow"></span><button class="text" id="addWANKey" data-t disabled>Add WAN key</button></div>
 <p class="usage-note wan-assignment" data-t>Use separate WAN keys for different clients. Names are labels, not device binding.</p>
@@ -445,7 +496,7 @@ function registerWANPage(ctx) {
 <section id="wanKeys"></section>
 <p class="usage-note" data-t>Disabling, rotating or removing a key takes effect on the next request. Streams already started may finish. Stop ends WAN access and its active requests.</p>
 </section>
-<div class="wan-info-footer"><details class="wan-details"><summary data-t>Connection details</summary><p class="usage-note" data-t>Start publishes a key-protected HTTPS endpoint through Microsoft devtunnel. Microsoft handles TLS traffic. Dev tunnels is a public preview, not a production SLA. WAN stays off after restarting magpie.</p></details><p class="usage-note" data-t>Provider sign-in supplies models. GitHub sign-in only establishes the WAN tunnel.</p></div>
+<div class="wan-info-footer"><details class="wan-details"><summary data-t>Connection details</summary><p class="usage-note" data-t>Start publishes a key-protected HTTPS endpoint through Microsoft devtunnel. Microsoft handles TLS traffic. Dev tunnels is a public preview, not a production SLA. WAN stays off after restarting magpie.</p></details><p class="usage-note" data-t>Provider sign-in supplies models. Dev Tunnels sign-in only establishes the WAN tunnel.</p></div>
 `,
     mount() {
       cleanup?.();
@@ -470,11 +521,20 @@ function registerWANPage(ctx) {
         copy(snapshot.auth.userCode, t("Code"), $("#wanCopyCode"));
       };
       $("#wanLogin").onclick = () => action("auth/start", { remember: remember && !!snapshot?.auth?.storageAvailable });
+      $("#wanMicrosoftLogin").onclick = () => action("auth/start", { remember: remember && !!snapshot?.auth?.storageAvailable, provider: "microsoft" });
+      $("#wanRefreshUsage").onclick = () => action("usage/refresh", {});
+      $("#wanNewTunnel").onclick = async () => {
+        if ($("#wanNewTunnel").disabled || !visible()) return;
+        const selected = snapshot.tunnel.id, account = snapshot.usage?.account?.id, opened = visibilityID;
+        if (await confirmAction(t("Use a new tunnel?"), t("The next Start creates a new address for this account. Update your clients afterward. WAN keys and other accounts’ tunnels are kept."), t("Use a new tunnel"))) {
+          if (visible() && opened === visibilityID && selected === snapshot?.tunnel?.id && account === snapshot?.usage?.account?.id && !$("#wanNewTunnel").disabled) await action("tunnel/new", {});
+        }
+      };
       $("#wanLogout").onclick = () => action("auth/logout", {});
       $("#wanOpenGitHub").onclick = async () => {
         if ($("#wanOpenGitHub").disabled || !visible()) return;
         const opened = visibilityID;
-        try { await api("open", { url: deviceURI }); }
+        try { await api("open", { url: deviceURI() }); }
         catch (e) { if (opened === visibilityID && visible()) status(t(e.message), "err"); }
       };
       for (const [id, value] of [["wanClientClaude", "claude"], ["wanClientOpenAI", "openai"]]) $("#" + id).onclick = () => { client = value; renderClient(); controls(); };

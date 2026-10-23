@@ -47,7 +47,12 @@ func TestFakeSDK(t *testing.T) {
 	input := bufio.NewReader(os.Stdin)
 	line, err := input.ReadBytes('\n')
 	var prepare sdkMessage
-	if err != nil || strictJSON(line, &prepare) != nil || prepare.Version != 1 || prepare.Op != "prepare" || len(prepare.Generation) != 32 || prepare.Port < 1 || prepare.Token != "fake-sdk-token" || prepare.ClientID != DefaultGitHubClientID {
+	_ = strictJSON(line, &prepare)
+	expectedClientID := DefaultGitHubClientID
+	if prepare.AuthProvider == "microsoft" {
+		expectedClientID = microsoftClientID
+	}
+	if err != nil || strictJSON(line, &prepare) != nil || prepare.Version != 1 || prepare.Op != "prepare" || len(prepare.Generation) != 32 || prepare.Port < 1 || prepare.Token != "fake-sdk-token" || prepare.ClientID != expectedClientID {
 		os.Exit(21)
 	}
 	fmt.Fprintln(calls, "prepare")
@@ -61,6 +66,9 @@ func TestFakeSDK(t *testing.T) {
 		os.Exit(22)
 	}
 	config := tunnelConfig{Version: 2, ID: "actual-id", ClusterID: "usw2", Port: prepare.Port}
+	if mode == "account-tunnels" && prepare.Fresh {
+		config.ID = "actual-" + prepare.Generation[:12]
+	}
 	if prepare.Fresh {
 		if prepare.Config != nil {
 			os.Exit(23)
@@ -102,6 +110,7 @@ func TestFakeSDK(t *testing.T) {
 	}
 	// A host command is accepted only after the canonical identity is on disk.
 	saved, fresh, err := readTunnel(filepath.Join(folder, "wan.json"))
+	saved.AccountID, saved.AccountName, saved.New = "", "", false
 	if err != nil || fresh || saved != config {
 		os.Exit(28)
 	}
@@ -128,7 +137,12 @@ func TestFakeSDK(t *testing.T) {
 				break
 			}
 			var update sdkCredential
-			if strictJSON(line, &update) != nil || update.Version != 1 || update.Revision != revision+1 || update.Op != "credentials" || update.Generation != prepare.Generation || !strings.HasPrefix(update.Token, "fake-renewed-") {
+			decodeErr := strictJSON(line, &update)
+			provider := update.AuthProvider
+			if provider == "" { // Legacy GitHub records omit the provider discriminator.
+				provider = "github"
+			}
+			if decodeErr != nil || provider != prepare.AuthProvider || update.Version != 1 || update.Revision != revision+1 || update.Op != "credentials" || update.Generation != prepare.Generation || !strings.HasPrefix(update.Token, "fake-renewed-") {
 				os.Exit(34)
 			}
 			revision = update.Revision
@@ -188,6 +202,10 @@ func fakeManager(t *testing.T, mode string, handler http.Handler) (*Manager, str
 	}
 	m := New(handler)
 	m.runtime = &tunnelRuntime{}
+	m.account = func(context.Context, string) (Account, error) {
+		return Account{ID: "github:1", Name: "fixture", Provider: "github"}, nil
+	}
+	m.usage.fetch = func(context.Context, string) (Usage, error) { return Usage{State: "unavailable"}, nil }
 	m.path = filepath.Join(folder, "wan.json")
 	m.find = func(context.Context) (string, error) { return executable, nil }
 	m.hasRuntime = func(context.Context) (bool, error) { return true, nil }
@@ -381,7 +399,7 @@ func TestCorruptConfigAndOccupiedPortFailClosed(t *testing.T) {
 	}
 	defer listener.Close()
 	m, folder := fakeManager(t, "ok", http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	config := tunnelConfig{Version: 2, ID: "actual-id", ClusterID: "usw2", Port: listener.Addr().(*net.TCPAddr).Port}
+	config := tunnelConfig{Version: 2, ID: "actual-id", ClusterID: "usw2", Port: listener.Addr().(*net.TCPAddr).Port, AccountID: "github:1", AccountName: "fixture"}
 	data, _ := json.Marshal(config)
 	os.WriteFile(m.path, data, 0600)
 	if err := m.Start(context.Background()); err == nil {
@@ -412,7 +430,7 @@ func TestHeldListenerDoesNotReleasePort(t *testing.T) {
 	}
 }
 
-func TestLegacyConfigResolvedBeforeHostAndNeverReplacedOnMissing(t *testing.T) {
+func TestUnboundLegacyConfigCreatesAccountTunnelAndPreservesOnFailure(t *testing.T) {
 	for _, mode := range []string{"ok", "missing"} {
 		t.Run(mode, func(t *testing.T) {
 			m, folder := fakeManager(t, mode, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
@@ -429,8 +447,8 @@ func TestLegacyConfigResolvedBeforeHostAndNeverReplacedOnMissing(t *testing.T) {
 			err = m.Start(context.Background())
 			data, _ := os.ReadFile(m.path)
 			calls, _ := os.ReadFile(filepath.Join(folder, "calls"))
-			if strings.Contains(string(calls), "create\n") {
-				t.Fatal("legacy tunnel was silently replaced")
+			if !strings.Contains(string(calls), "create\n") {
+				t.Fatal("unbound legacy tunnel was reused for an unverified account")
 			}
 			if mode == "missing" {
 				if err == nil || string(data) != original || strings.Contains(string(calls), "host\n") {
@@ -438,7 +456,7 @@ func TestLegacyConfigResolvedBeforeHostAndNeverReplacedOnMissing(t *testing.T) {
 				}
 			} else {
 				config, _, readErr := readTunnel(m.path)
-				if err != nil || readErr != nil || config.Version != 2 || config.ID != "actual-id" || config.ClusterID != "usw2" || config.Port != port {
+				if err != nil || readErr != nil || config.Version != 2 || config.ID != "actual-id" || config.ClusterID != "usw2" || config.AccountID != "github:1" {
 					t.Fatalf("canonical migration: %#v %v %v", config, err, readErr)
 				}
 			}

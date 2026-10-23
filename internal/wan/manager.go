@@ -35,11 +35,13 @@ const DefaultGitHubClientID = "Iv1.e7b89e013f801f03"
 
 // Status is a cached, credential-free snapshot. Endpoint exists only while running.
 type Status struct {
-	State            string     `json:"state"`
-	Endpoint         string     `json:"endpoint"`
-	Error            string     `json:"error"`
-	RuntimeAvailable bool       `json:"runtimeAvailable"`
-	Auth             AuthStatus `json:"auth"`
+	State            string      `json:"state"`
+	Endpoint         string      `json:"endpoint"`
+	Error            string      `json:"error"`
+	RuntimeAvailable bool        `json:"runtimeAvailable"`
+	Auth             AuthStatus  `json:"auth"`
+	Usage            Usage       `json:"usage"`
+	Tunnel           *TunnelInfo `json:"tunnel,omitempty"`
 }
 
 // Manager is inert until the actual gateway attaches its lifetime with Own.
@@ -69,6 +71,10 @@ type Manager struct {
 	closed          bool
 	runtimeExplicit bool // an explicit start/install supersedes initial discovery
 	actions         sync.WaitGroup
+	background      sync.WaitGroup
+	usage           *usageMonitor
+	account         func(context.Context, string) (Account, error)
+	tunnels         map[string]tunnelConfig
 }
 
 type hosting struct {
@@ -90,7 +96,8 @@ func (r *hosting) revoke() {
 }
 
 func New(handler http.Handler) *Manager {
-	return &Manager{
+	service := newServiceClient()
+	return &Manager{account: service.account, usage: &usageMonitor{request: make(chan struct{}, 1), fetch: service.usage},
 		handler: handler, path: filepath.Join(settings.Dir(), "wan.json"),
 		find: availableRuntime, hasRuntime: cachedRuntimeAvailable, install: plugin.Bun, proxy: startWANProxy, command: proc.Command, startTree: startSDKTree,
 		wait: 90 * time.Second, runtime: &processTunnels, clientID: DefaultGitHubClientID,
@@ -117,6 +124,8 @@ func (m *Manager) Own(ctx context.Context) error {
 	m.auth = newAuth(m.owner, m.clientID, m.store)
 	m.actions.Add(1)
 	go m.discoverRuntime()
+	m.background.Add(1)
+	go func() { defer m.background.Done(); m.usage.run(m.owner, m.auth) }()
 	if m.runtime.owners == nil {
 		m.runtime.owners = make(map[*Manager]struct{})
 	}
@@ -127,11 +136,19 @@ func (m *Manager) Own(ctx context.Context) error {
 
 func (m *Manager) discoverRuntime() {
 	defer m.actions.Done()
+	config, fresh, configErr := readTunnel(m.path)
+	accounts, accountsErr := readTunnelAccounts(m.path)
 	available, err := m.hasRuntime(m.owner)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !m.closed && m.owner.Err() == nil && err == nil && m.current == nil && !m.blocked && !m.runtimeExplicit {
 		m.status.RuntimeAvailable = available
+		if configErr == nil && !fresh {
+			m.status.Tunnel = tunnelInfo(config)
+		}
+		if accountsErr == nil {
+			m.tunnels = accounts
+		}
 	}
 }
 
@@ -150,6 +167,7 @@ func (m *Manager) joinOwner() {
 	a.CancelJoin()
 	m.Stop()
 	m.actions.Wait()
+	m.background.Wait()
 	m.runtime.mu.Lock()
 	delete(m.runtime.owners, m)
 	m.runtime.mu.Unlock()
@@ -173,14 +191,29 @@ func (m *Manager) Close() {
 func (m *Manager) Status() Status {
 	m.mu.Lock()
 	status, a := m.status, m.auth
+	if status.Tunnel != nil {
+		copy := *status.Tunnel
+		status.Tunnel = &copy
+	}
 	m.mu.Unlock()
 	if a != nil {
 		status.Auth = a.Status()
+		status.Usage = m.usage.status(a)
+		if status.Usage.Account.ID != "" {
+			m.mu.Lock()
+			selected, exists := m.tunnels[status.Usage.Account.ID]
+			m.mu.Unlock()
+			if exists {
+				status.Tunnel = tunnelInfo(selected)
+			} else if status.Tunnel == nil || status.Tunnel.AccountID != status.Usage.Account.ID {
+				status.Tunnel = &TunnelInfo{AccountID: status.Usage.Account.ID, AccountName: status.Usage.Account.Name, New: true}
+			}
+		}
 	}
 	return status
 }
 
-func (m *Manager) StartAuth(remember bool) (AuthStatus, error) {
+func (m *Manager) StartAuth(remember bool, providers ...string) (AuthStatus, error) {
 	m.runtime.mu.Lock()
 	defer m.runtime.mu.Unlock()
 	if m.runtime.shutdown != nil {
@@ -195,7 +228,7 @@ func (m *Manager) StartAuth(remember bool) (AuthStatus, error) {
 	if m.current != nil {
 		return m.auth.Status(), errors.New("Stop WAN gateway before replacing its sign-in")
 	}
-	return m.auth.Start(remember)
+	return m.auth.Start(remember, providers...)
 }
 
 func (m *Manager) CancelAuth(id uint64) bool {
@@ -407,6 +440,9 @@ func (m *Manager) run(r *hosting) {
 		return
 	}
 	authOwner, snapshotToken = a, token
+	if a.Status().Provider == "microsoft" {
+		clientID = microsoftClientID
+	}
 	var expired <-chan time.Time
 	if !expires.IsZero() {
 		credentialStartup, cancelCredential := context.WithDeadline(startup, expires)
@@ -434,11 +470,40 @@ func (m *Manager) run(r *hosting) {
 		failure = errors.New("Another backend owns WAN gateway, or its runtime lock is unavailable")
 		return
 	}
+	account, err := m.account(startup, snapshotToken)
+	if err != nil {
+		failure = err
+		return
+	}
+	usage := m.usage.status(a)
+	if usage.State == "ready" && usage.Limit != nil && usage.Used >= *usage.Limit && (usage.ResetAt.IsZero() || time.Now().Before(usage.ResetAt)) {
+		failure = errors.New("Dev Tunnels account bandwidth is exhausted; wait for the reset or request a limit increase")
+		return
+	}
 	config, fresh, err := readTunnel(m.path)
 	if err != nil {
 		failure = err
 		return
 	}
+	accounts, err := readTunnelAccounts(m.path)
+	if err != nil {
+		failure = err
+		return
+	}
+	if selected, ok := accounts[account.ID]; ok {
+		config = selected
+		fresh = false
+	}
+	if config.AccountID != account.ID || config.New {
+		fresh = true
+		config = tunnelConfig{}
+	}
+	config.AccountID, config.AccountName = account.ID, account.Name
+	m.mu.Lock()
+	m.status.Usage.Account = account
+	m.mu.Unlock()
+	wireConfig := config
+	wireConfig.AccountID, wireConfig.AccountName, wireConfig.New = "", "", false
 	raw, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(config.Port)))
 	if err != nil {
 		failure = errors.New("WAN gateway's saved loopback port is unavailable; no tunnel was hosted")
@@ -446,6 +511,7 @@ func (m *Manager) run(r *hosting) {
 	}
 	listener = &heldListener{TCPListener: raw.(*net.TCPListener)}
 	config.Port = raw.Addr().(*net.TCPAddr).Port
+	wireConfig.Port = config.Port
 	requests := r.requests
 	server = &http.Server{
 		Handler: m.admission(requests, &r.admitted), BaseContext: func(net.Listener) context.Context { return requests },
@@ -469,12 +535,12 @@ func (m *Manager) run(r *hosting) {
 		failure = errors.New("WAN proxy configuration is unavailable")
 		return
 	}
-	child, err = startSDK(startup, tool, m.command, m.startTree, hex.EncodeToString(generation[:]), config, r.revoke)
+	child, err = startSDK(startup, tool, m.command, m.startTree, hex.EncodeToString(generation[:]), wireConfig, r.revoke)
 	if err != nil {
 		failure = err
 		return
 	}
-	request := sdkMessage{Version: 1, Generation: hex.EncodeToString(generation[:]), Op: "prepare", Token: token, ClientID: clientID, Config: &config, Fresh: fresh, Proxy: proxy.url}
+	request := sdkMessage{Version: 1, Generation: hex.EncodeToString(generation[:]), Op: "prepare", Token: token, ClientID: clientID, Config: &wireConfig, Fresh: fresh, Proxy: proxy.url, AuthProvider: account.Provider}
 	if fresh {
 		request.Config = nil
 	}
@@ -513,11 +579,22 @@ func (m *Manager) run(r *hosting) {
 	}
 	// Save the exact validated canonical identity before permitting host. A failed
 	// migration never overwrites the old identity or silently creates a new one.
-	data, _ := json.Marshal(prepared.Config)
+	saved := *prepared.Config
+	saved.AccountID, saved.AccountName = account.ID, account.Name
+	data, _ := json.Marshal(saved)
+	accounts[account.ID] = saved
+	if err := writeTunnelAccounts(m.path, accounts); err != nil {
+		failure = err
+		return
+	}
 	if err := edit.WriteAtomic(m.path, append(data, '\n')); err != nil {
 		failure = errors.New("Could not save WAN tunnel identity; no tunnel was hosted")
 		return
 	}
+	m.mu.Lock()
+	m.status.Tunnel = tunnelInfo(saved)
+	m.tunnels = accounts
+	m.mu.Unlock()
 	if err := child.output.host(); err != nil {
 		failure = err
 		return
@@ -633,10 +710,13 @@ func (l *heldListener) Accept() (net.Conn, error) {
 }
 
 type tunnelConfig struct {
-	Version   int    `json:"version"`
-	ID        string `json:"id"`
-	ClusterID string `json:"clusterId,omitempty"`
-	Port      int    `json:"port"`
+	Version     int    `json:"version"`
+	ID          string `json:"id"`
+	ClusterID   string `json:"clusterId,omitempty"`
+	Port        int    `json:"port"`
+	AccountID   string `json:"accountID,omitempty"`
+	AccountName string `json:"accountName,omitempty"`
+	New         bool   `json:"new,omitempty"`
 }
 
 func readTunnel(path string) (tunnelConfig, bool, error) {
@@ -657,7 +737,7 @@ func readTunnel(path string) (tunnelConfig, bool, error) {
 		config.Version = 1
 		return config, false, nil
 	}
-	if !validCanonicalConfig(config) {
+	if !validCanonicalConfig(config) || !validAccountBinding(config) {
 		return tunnelConfig{}, false, errors.New("Invalid wan.json; refusing to replace the saved tunnel")
 	}
 	return config, false, nil

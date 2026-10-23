@@ -59,9 +59,12 @@ function wanFixture(lang, events) {
       let secret = "";
       if (action === "start") { state.state = "starting"; state.error = ""; }
       else if (action === "stop") state.state = "stopping";
+      else if (action === "usage/refresh") {}
+      else if (action === "tunnel/new") state.tunnel.new = true;
       else if (action === "runtime/install") state.runtimeAvailable = true;
       else if (action === "auth/start") {
-        assert.deepEqual(Object.keys(body), ["remember"], "no caller-supplied client identity or scope");
+        assert.deepEqual(Object.keys(body), body.provider ? ["remember", "provider"] : ["remember"], "only the selected provider and storage choice reach the backend");
+        state.auth.provider = body.provider || "github";
         Object.assign(state.auth, { state: "requesting_code", error: "", userCode: "", verificationURI: "", attemptID: ++attempt, storage: body.remember ? "system" : "memory" });
       } else if (action === "auth/cancel") {
         if (state.auth.attemptID === body.attemptID) Object.assign(state.auth, { state: "signed_out", userCode: "", verificationURI: "", storage: "memory" });
@@ -352,8 +355,7 @@ for (const engine of engines) for (const lang of ["en", "zh", "zh-TW", "ja", "de
     f.state.auth.expiresAt = new Date(now + 125 * 60000).toISOString();
     await page.evaluate(() => pollWAN());
     assert.equal(await page.locator("#wanRenewalState").textContent(), word("Automatic WAN renewal active"));
-    assert.equal(await page.locator("#wanCredentialDetails").getAttribute("open"), null, "credential internals are secondary");
-    await click(page, page.locator("#wanCredentialDetails > summary"));
+    assert.equal(await page.locator("#wanAuthExpiresAt").isVisible(), true, "the current credential deadline stays visible without opening a disclosure");
     const format = (key, values) => word(key).replace(/\{(\w+)\}/g, (_, k) => values[k]);
     assert.equal(await page.locator("#wanAuthRemaining").textContent(), format("Expires in {hours}h {minutes}m", { hours: 2, minutes: 5 }));
     assert.equal(await page.locator("#wanAuthExpiresAt").getAttribute("datetime"), f.state.auth.expiresAt);
@@ -986,3 +988,72 @@ for (const engine of engines) test(`${engine}: WAN polling is canceled off-page 
   assert.equal(await page.locator("#wanStatus").getAttribute("data-state"), "running");
   assert.deepEqual(errors, []);
 });
+for (const engine of engines) for (const lang of ["en", "zh", "zh-TW", "ja", "de"]) {
+  test(`${engine} ${lang}: WAN quota, account and tunnel diagnostics remain clear`, async (t) => {
+    const { page, f, word, events, errors } = await open(t, engine, lang);
+    f.state.usage = { state: "ready", account: { id: "github:1", name: "fixture-user", provider: "github" }, used: 5371017692, limit: 5368709120, resetAt: new Date(Date.now() + 30 * 86400000).toISOString(), checkedAt: new Date().toISOString() };
+    f.state.tunnel = { id: "fixture-tunnel", region: "usw2", port: 50188, accountID: "github:1", accountName: "fixture-user", new: false };
+    f.state.state = "failed"; f.state.error = "WAN relay disconnected; start WAN again explicitly";
+    await page.evaluate(() => pollWAN());
+    assert.equal(await page.locator("#wanState").textContent(), word("Dev Tunnels bandwidth exhausted"));
+    assert.equal(await page.locator("#wanStart").isDisabled(), true);
+    assert.match(await page.locator("#wanQuotaValue").textContent(), /5[.,]002 GiB \/ 5[.,]000 GiB/);
+    assert.equal(await page.locator("#wanQuotaFill").evaluate(e=>e.style.width), "100%");
+    assert.equal(await page.locator("#wanStatusReset").isVisible(), true);
+    assert.notEqual(await page.locator("#wanQuotaReset").textContent(), word("Not reported"));
+    assert.equal(await page.locator("#wanAccountName").textContent(), "fixture-user");
+    assert.equal(await page.locator("#wanTunnelID").textContent(), "fixture-tunnel");
+    assert.equal(await page.locator("#wanProblem").isVisible(), true);
+    await resizeWAN(page, 360);
+    const overflow = await page.locator("#view-wan").evaluate(e=>e.scrollWidth-e.clientWidth);
+    assert(overflow <= 1, `narrow quota layout overflow ${overflow}`);
+    f.state.usage.state = "stale"; f.state.usage.error = "usage check failed";
+    await page.evaluate(() => pollWAN());
+    assert.equal(await page.locator("#wanQuotaState").textContent(), word("Last known usage · check failed"));
+    assert.match(await page.locator("#wanQuotaValue").textContent(), /5[.,]002/);
+    assert.equal(await page.locator("#wanStatusHelp").textContent(), word("WAN is offline. Review the error before starting again."));
+    assert.equal(await page.locator("#wanStart").isDisabled(), false, "unknown current usage does not manufacture a current quota refusal");
+    f.state.usage.state = "ready"; f.state.usage.error = "";
+    f.state.usage.resetAt = new Date(Date.now() - 86400000).toISOString();
+    await page.evaluate(() => pollWAN());
+    assert.equal(await page.locator("#wanStart").isDisabled(), false, "a previous accounting period cannot block Start after its reset");
+    f.state.usage = { state: "ready", account: { id: "github:2", name: "second-user" }, used: 0, limit: 5368709120, checkedAt: "2026-10-23T05:36:46Z" };
+    f.state.tunnel = { accountID: "github:2", accountName: "second-user", new: true };
+    await page.evaluate(() => pollWAN());
+    assert.equal(await page.locator("#wanAccountName").textContent(), "second-user");
+    assert.match(await page.locator("#wanQuotaValue").textContent(), /0[.,]000/);
+    assert.equal(await page.locator("#wanTunnelID").textContent(), "—");
+    assert.equal(await page.locator("#wanNewTunnel").isDisabled(), true);
+    f.state.auth.state = "signed_out";
+    await page.evaluate(() => pollWAN());
+    assert.equal(await page.locator("#wanQuotaValue").textContent(), "—", "logout hides old account numbers");
+    assert.equal(events.some(e=>e.action==="wan:start"), false);
+    assert.deepEqual(errors, []);
+  });
+}
+for (const engine of engines) {
+  test(`${engine}: WAN Microsoft login uses its own device page and tunnel replacement is explicit`, async (t) => {
+    const { page, f, word, events, errors } = await open(t, engine, "en", false);
+    await click(page, page.locator("#wanMicrosoftLogin"));
+    assert.deepEqual(events.find(e=>e.action==="wan:auth/start").body,{remember:false,provider:"microsoft"});
+    await page.waitForFunction(()=>document.querySelector("#view-wan").getAttribute("aria-busy")==="false" && document.querySelector("#wanAuth").dataset.state==="requesting_code");
+    f.code(); f.state.auth.provider="microsoft"; f.state.auth.verificationURI="https://login.microsoft.com/device";
+    await page.evaluate(()=>pollWAN());
+    assert.equal(await page.locator("#wanOpenGitHub").textContent(), "Open Microsoft");
+    await click(page,page.locator("#wanOpenGitHub"));
+    assert.deepEqual(events.find(e=>e.action==="open").body,{url:"https://login.microsoft.com/device"});
+    f.ready(); f.state.auth.provider="microsoft";
+    f.state.tunnel={id:"microsoft-fixture",region:"usw2",port:50188,accountID:"microsoft:fixture",accountName:"ms-fixture",new:false};
+    await page.evaluate(()=>pollWAN());
+    await click(page,page.locator("#wanNewTunnel"));
+    const dialog=page.getByRole("alertdialog");
+    await click(page,dialog.getByRole("button",{name:"Cancel",exact:true}));
+    assert.equal(events.some(e=>e.action==="wan:tunnel/new"),false);
+    await click(page,page.locator("#wanNewTunnel"));
+    await click(page,dialog.getByRole("button",{name:"Use a new tunnel",exact:true}));
+    assert.equal(events.filter(e=>e.action==="wan:tunnel/new").length,1);
+    assert.equal(events.some(e=>e.action==="wan:start"),false,"replacement never publishes implicitly");
+    assert.equal(await page.locator("#wanNewTunnel").isDisabled(),true);
+    assert.deepEqual(errors,[]);
+  });
+}

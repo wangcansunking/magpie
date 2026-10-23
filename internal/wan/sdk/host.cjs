@@ -39138,6 +39138,7 @@ __export(host_exports, {
   protocolFixture: () => protocolFixture,
   renewHostCredentials: () => renewHostCredentials,
   sdkFixture: () => sdkFixture,
+  serviceAuthorization: () => serviceAuthorization,
   validatePortOptions: () => validatePortOptions
 });
 module.exports = __toCommonJS(host_exports);
@@ -39160,6 +39161,7 @@ if (require.main === module) {
 var wireVersion = 1;
 var lineLimit = 64 * 1024;
 var serviceClientID = "Iv1.e7b89e013f801f03";
+var microsoftClientID = "c0df98ca-23b4-4bce-bb9f-72039b28d3a5";
 var idPattern = /^[a-z0-9][a-z0-9-]{1,58}[a-z0-9]$/;
 var clusterPattern = /^(([a-z]{3,4}[0-9]{1,3})|asse|aue|brs|euw|use)$/;
 var legacyPattern = /^magpie-wan-[a-f0-9]{32}$/;
@@ -39175,6 +39177,7 @@ var Failure = class extends Error {
 var phase = "new";
 var generation = "";
 var token = "";
+var authProvider = "github";
 var credentialRevision = 0;
 var credentialUpdating = false;
 var ownedPort = 0;
@@ -39411,8 +39414,10 @@ function managementOptions() {
   return { includePorts: true, includeAccessControl: true, tokenScopes: [TunnelAccessScopes.Host] };
 }
 async function prepare(message) {
-  keys(message, ["version", "generation", "op", "port", "fresh", "config", "token", "clientID", "proxy"]);
-  if (!validPort(message.port) || typeof message.fresh !== "boolean" || typeof message.token !== "string" || !/^[\x21-\x7e]{1,8192}$/.test(message.token) || message.clientID !== serviceClientID || typeof message.proxy !== "string") {
+  keys(message, ["version", "generation", "op", "port", "fresh", "config", "token", "clientID", "proxy", "authProvider"], ["version", "generation", "op", "port", "fresh", "config", "token", "clientID", "proxy"]);
+  authProvider = message.authProvider || "github";
+  if (!["github", "microsoft"].includes(authProvider)) throw new Failure("protocol");
+  if (!validPort(message.port) || typeof message.fresh !== "boolean" || typeof message.token !== "string" || !/^[\x21-\x7e]{1,8192}$/.test(message.token) || message.clientID !== (authProvider === "microsoft" ? microsoftClientID : serviceClientID) || typeof message.proxy !== "string") {
     throw new Failure("protocol");
   }
   ownedPort = message.port;
@@ -39434,7 +39439,7 @@ async function prepare(message) {
     ManagementApiVersions.Version20230927preview,
     async () => {
       if (!disposingHost) live();
-      return `github ${token}`;
+      return serviceAuthorization(authProvider, token);
     },
     void 0,
     agent
@@ -39581,7 +39586,11 @@ var sdkFixture = {
   HttpsProxyAgent,
   managementOptions
 };
-var protocolFixture = { parseLine, endpoint, codeFor };
+function serviceAuthorization(provider, credential) {
+  if (!["github", "microsoft"].includes(provider) || !/^[\x21-\x7e]{1,8192}$/.test(credential)) throw new Failure("protocol");
+  return (provider === "microsoft" ? "Bearer " : "github ") + credential;
+}
+var protocolFixture = { parseLine, endpoint, codeFor, serviceAuthorization };
 async function renewHostCredentials(management, activeHost, target, check, expectedEndpoint) {
   const current = await management.getTunnel({ tunnelId: target.id, clusterId: target.clusterId }, managementOptions(), cancellation.token);
   check();
@@ -39600,8 +39609,9 @@ async function renewHostCredentials(management, activeHost, target, check, expec
   return current;
 }
 async function updateCredentials(message) {
-  keys(message, ["version", "generation", "op", "token", "revision"]);
-  if (typeof message.token !== "string" || !/^[\x21-\x7e]{1,4096}$/.test(message.token) || !Number.isSafeInteger(message.revision) || message.revision !== credentialRevision + 1) throw new Failure("protocol");
+  keys(message, ["version", "generation", "op", "token", "revision", "authProvider"], ["version", "generation", "op", "token", "revision"]);
+  if ((message.authProvider || "github") !== authProvider) throw new Failure("protocol");
+  if (typeof message.token !== "string" || !/^[\x21-\x7e]{1,8192}$/.test(message.token) || !Number.isSafeInteger(message.revision) || message.revision !== credentialRevision + 1) throw new Failure("protocol");
   token = message.token;
   message.token = "";
   tunnel = await renewHostCredentials(client, host, config, live, preparedEndpoint);
@@ -39744,5 +39754,6 @@ if (require.main === module) {
   protocolFixture,
   renewHostCredentials,
   sdkFixture,
+  serviceAuthorization,
   validatePortOptions
 });

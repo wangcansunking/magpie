@@ -66,12 +66,12 @@ func (s *Server) wanManager() (*wan.Manager, context.Context, error) {
 	return manager, ctx, nil
 }
 
-func (s *Server) StartWANAuth(remember bool) (wan.AuthStatus, error) {
+func (s *Server) StartWANAuth(remember bool, provider string) (wan.AuthStatus, error) {
 	manager, _, err := s.wanManager()
 	if err != nil {
 		return wan.AuthStatus{}, err
 	}
-	return manager.StartAuth(remember)
+	return manager.StartAuth(remember, provider)
 }
 
 func (s *Server) CancelWANAuth(attemptID uint64) error {
@@ -109,4 +109,19 @@ func (s *Server) StopWAN() error {
 		manager.Stop()
 	}
 	return nil
+}
+
+func (s *Server) RefreshWANUsage() error {
+	m, _, e := s.wanManager()
+	if e != nil {
+		return e
+	}
+	return m.RefreshUsage()
+}
+func (s *Server) NewWANTunnel() error {
+	m, _, e := s.wanManager()
+	if e != nil {
+		return e
+	}
+	return m.RequestNewTunnel()
 }
