@@ -75,4 +75,15 @@ The native limit is documented by Microsoft's
 
 ## Windows artifact
 
-The production artifact is recorded after the source commit and build.
+Source commit a98e11b9 produced dist/microsoft-login-fixed/magpie.exe,
+59,430,912 bytes, embedded version magpie wan-gateway-a98e11b9.
+The Windows x64 PE machine, GUI subsystem, resource directory and isolated
+--version smoke checks passed. SHA-256:
+
+dc46acc495ae45bd1330011fc23a5f91f39fef4abe9bce053ffb1f7e502d378d
+
+Evidence: wan-native-vault-exe-20261023/build-status.json.
+After live verification, isolated test logout returned HTTP 200 and signed_out;
+the dev process then exited normally with code 0. The user's desktop account
+configuration was not changed. Exit the old desktop version before opening
+the new executable, so its singleton does not keep handling requests.
