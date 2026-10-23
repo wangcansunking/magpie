@@ -79,6 +79,14 @@ func (s systemCredentialStore) load() (savedCredential, error) {
 		return savedCredential{}, err
 	}
 	defer clear(data)
+	if bytes.HasPrefix(data, []byte(credentialChunksPrefix)) {
+		assembled, err := s.readParts(data)
+		if err != nil {
+			return savedCredential{}, err
+		}
+		defer clear(assembled)
+		data = assembled
+	}
 	if bytes.HasPrefix(data, []byte("magpie-wan-z1\n")) {
 		r, err := zlib.NewReader(bytes.NewReader(data[len("magpie-wan-z1\n"):]))
 		if err != nil {
@@ -122,19 +130,35 @@ func (s systemCredentialStore) save(record savedCredential) error {
 			return errors.New("WAN credential does not fit secure storage; use a memory-only session")
 		}
 	}
+	if err == nil && record.Provider == "microsoft" && len(data) > maxCredentialBlob {
+		return s.writeParts(data)
+	}
 	if err != nil || len(data) > maxCredentialBlob {
 		return errors.New("WAN credential does not fit secure storage; use a memory-only session")
 	}
 	if err := s.vault.write(s.target, data); err != nil {
 		return errors.New("Could not save WAN sign-in in secure storage")
 	}
+	if record.Provider == "microsoft" {
+		for slot := 0; slot < 2; slot++ {
+			if err := s.eraseParts(slot); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 func (s systemCredentialStore) delete() error {
+	var cleanup error
+	for slot := 0; slot < 2; slot++ {
+		if err := s.eraseParts(slot); err != nil {
+			cleanup = err
+		}
+	}
 	if err := s.vault.remove(s.target); err != nil && !errors.Is(err, errCredentialMissing) {
 		return errors.New("Could not erase saved WAN sign-in; retry sign out")
 	}
-	return nil
+	return cleanup
 }
 
 func validSavedCredential(record savedCredential) bool {

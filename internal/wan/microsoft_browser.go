@@ -82,21 +82,25 @@ func (b *microsoftBrowser) callback(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	u, _ := url.Parse(b.redirect)
 	if r.Method != http.MethodGet || r.Host != u.Host || r.URL.Path != "/" || r.URL.RawPath != "" || r.Header.Get("Origin") != "" || len(r.URL.RawQuery) > 8192 {
+		microsoftBrowserDiagnostic("callback rejected: request envelope")
 		http.Error(w, "Invalid sign-in callback", http.StatusBadRequest)
 		return
 	}
 	q, err := url.ParseQuery(r.URL.RawQuery)
 	if err != nil {
+		microsoftBrowserDiagnostic("callback rejected: query encoding")
 		http.Error(w, "Invalid sign-in callback", http.StatusBadRequest)
 		return
 	}
 	for key, values := range q {
 		if len(values) != 1 || (key != "code" && key != "state" && key != "error" && key != "error_description" && key != "error_uri" && key != "session_state") {
+			microsoftBrowserDiagnostic("callback rejected: unexpected or duplicate parameter")
 			http.Error(w, "Invalid sign-in callback", http.StatusBadRequest)
 			return
 		}
 	}
 	if subtle.ConstantTimeCompare([]byte(q.Get("state")), []byte(b.state)) != 1 || (q.Get("code") == "") == (q.Get("error") == "") || (q.Get("code") != "" && !oauthText(q.Get("code"), 4096)) || (q.Get("error") != "" && !oauthText(q.Get("error"), 128)) {
+		microsoftBrowserDiagnostic("callback rejected: state or grant fields")
 		http.Error(w, "Invalid sign-in callback", http.StatusBadRequest)
 		return
 	}
@@ -108,6 +112,7 @@ func (b *microsoftBrowser) callback(w http.ResponseWriter, r *http.Request) {
 	}
 	b.claimed = true
 	b.mu.Unlock()
+	microsoftBrowserDiagnostic("callback accepted")
 	// Finish the fixed-length response before token exchange can close the server.
 	// Never echo a code, state or vendor error description to the browser.
 	message := "Microsoft authorization received. Return to magpie to check your sign-in. You may close this tab."
@@ -206,6 +211,7 @@ func (a *auth) runMicrosoftBrowser(r *authAttempt) {
 	a.status.ExpiresAt = a.now().Add(microsoftBrowserLifetime)
 	a.mu.Unlock()
 	_ = a.openBrowserAttempt(r) // A launch failure remains visible and retryable.
+	microsoftBrowserDiagnostic("waiting for system browser callback")
 	var reply browserReply
 	select {
 	case reply = <-b.reply:
@@ -222,12 +228,14 @@ func (a *auth) runMicrosoftBrowser(r *authAttempt) {
 		return
 	}
 	if reply.failure != "" {
+		microsoftBrowserDiagnostic("authorization server returned an error callback")
 		a.fail(r, "Microsoft browser sign-in was refused; check account and tenant policies, then sign in again", false)
 		return
 	}
 	issued := a.now()
 	grant, err := a.microsoft.exchange(ctx, b, reply.code)
 	if err != nil {
+		microsoftBrowserDiagnostic("token exchange failed")
 		a.requestFailed(r, err)
 		return
 	}
@@ -235,4 +243,5 @@ func (a *auth) runMicrosoftBrowser(r *authAttempt) {
 		return
 	}
 	a.accept(r, microsoftCredential(grant, issued))
+	microsoftBrowserDiagnostic("credential commit completed; check auth status")
 }

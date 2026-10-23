@@ -153,8 +153,18 @@ new account-specific tunnel on their first new sign-in. Its
 refresh deadline remains unknown because the token response does not report it.
 Records exceeding Windows Credential Manager's 2560-byte blob limit are
 compressed inside the native vault, with bounded decompression and the same
-validation on restore. A record that still does not fit is refused; it never
-falls back to plaintext. Existing GitHub records keep their original format.
+validation on restore. If a Microsoft record still exceeds one blob, bounded
+native-vault parts hold the payload and a small root stores its slot, size,
+count and SHA-256 digest. Each part remains within the native limit. The owner
+writes the inactive of two fixed slots, switches the root only after all parts
+succeed, then erases the previous slot. Missing, mixed or corrupt parts are
+unknown credentials, never a partial session or an empty store. Logout erases
+both bounded slots even after an interrupted write or a missing root; a failed
+erasure blocks sign-in until retry. There are no token files or plaintext
+fallbacks. The existing small/compressed and GitHub records remain readable.
+Development builds log only bounded response metadata (lengths, booleans,
+numeric error codes) and fixed browser stages; credential contents, callback
+parameters and vendor error descriptions never enter these diagnostics.
 
 The gateway owner renews independently of the page, before access expiry (up to
 five minutes early, or one quarter of a short grant's lifetime). Each successful

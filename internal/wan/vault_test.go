@@ -38,7 +38,7 @@ func (v *fakeCredentialVault) write(target string, data []byte) error {
 }
 func (v *fakeCredentialVault) remove(target string) error {
 	v.deleteTarget = target
-	if v.deleteErr == nil {
+	if v.deleteErr == nil && !strings.Contains(target, "/part-v1/") {
 		v.data = nil
 	}
 	return v.deleteErr

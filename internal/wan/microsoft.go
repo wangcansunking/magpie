@@ -52,6 +52,9 @@ func (c microsoftDeviceClient) post(ctx context.Context, path string, values url
 		return errors.New("Microsoft WAN authorization is temporarily unavailable")
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, (32<<10)+1))
+	if path == "/token" {
+		microsoftResponseDiagnostic(resp.StatusCode, b)
+	}
 	if err != nil || len(b) > 32<<10 || json.Unmarshal(b, out) != nil {
 		return errors.New("Microsoft returned an unreadable WAN authorization response")
 	}
