@@ -73,3 +73,18 @@ system-browser flow. Policies requiring a separate Windows broker or blocking
 the account/resource can still refuse authorization. This change does not
 disable tenant policies. The user's running client and public tunnel were not
 restarted for verification.
+
+## Windows artifact
+
+Source commit `2b8b2abb` produced `dist/microsoft-browser/magpie.exe`,
+59,405,824 bytes, embedded version `magpie wan-gateway-2b8b2abb`.
+The x64 PE machine, GUI subsystem, resource directory and isolated
+`--version` checks passed. SHA-256:
+
+```text
+645d5437707d0ad4d895e1a997184d69b72caef6446148b871ed122fac7f122a
+```
+
+Evidence: `wan-browser-exe-20261023/build-status.json` in the ignored runs
+directory. The separate folder preserves the existing executable; the user
+must exit the old application before starting this new build.
