@@ -48,4 +48,13 @@ one real Microsoft sign-in to confirm the organization's end-to-end flow.
 
 ## Windows artifact
 
-Pending source commit and production build.
+Source commit 016792d9 produced dist/microsoft-credential/magpie.exe,
+59,420,672 bytes, version magpie wan-gateway-016792d9.
+Windows x64 PE machine, GUI subsystem, embedded resources and isolated
+--version smoke checks passed. SHA-256:
+
+8239d4fbf86a50bf65f498e8019c117a40021bcae6c59d14eb4e33f01721f207
+
+Build evidence: wan-opaque-exe-20261023/build-status.json.
+Exit the old application before starting this separate new executable.
+
