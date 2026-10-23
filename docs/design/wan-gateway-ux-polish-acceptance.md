@@ -44,6 +44,8 @@ authentication change was included.
 - All three translation ownership/duplicate/completeness checks passed.
 - All three GUI asset budget/type/usage checks passed. JavaScript syntax and
   `git diff --check` passed.
+- Four final Chinese/German key-action cases passed in both engines after
+  address/key copy-button sizing was finalized (`wan-ux-final-keys-20261023`).
 - Negative control: removing button borders from the asynchronously served
   fixture CSS made the actual new test fail at `wanInstall has a visible
   button boundary`. Repository source was never replaced by that mutation.
@@ -63,3 +65,19 @@ Evidence is under ignored `node_modules/.wan-validation/runs/` in
 The Microsoft organizational-account device-flow compatibility limitation
 documented in the preceding acceptance remains unresolved by this visual
 change. No real user client or public tunnel was restarted for verification.
+
+## Windows artifact
+
+Source commit `d6ac8b70` produced
+`dist/wan-ux-polish/magpie.exe` (59,368,960 bytes), with version
+`magpie wan-gateway-d6ac8b70`. The x64 PE machine, GUI subsystem, resource
+directory and isolated `--version` checks passed. SHA-256 was independently
+checked after building:
+
+```text
+7905969733d643b5c5d28072bb74c91a18901df99820c546927bf5037e443fdc
+```
+
+The separate release folder preserves any previously running executable.
+Build evidence is in `wan-ux-polish-exe-20261023/build-status.json` under the
+same ignored runs directory.
