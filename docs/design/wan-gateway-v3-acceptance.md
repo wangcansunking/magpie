@@ -119,3 +119,14 @@ The production Windows GUI artifact is delivered as `dist/magpie.exe`, with
 version, SHA-256, x64 PE machine, GUI subsystem and resource directory; the
 isolated `--version` check must pass before delivery. The build does not start
 a gateway or replace a running executable.
+
+Built from source commit `b58c8f8e`, embedded version
+`magpie wan-gateway-b58c8f8e`, size 59,362,304 bytes. Verified PE x64 machine
+`0x8664`, GUI subsystem `2`, a nonempty resource directory and successful
+isolated `--version`. SHA-256:
+
+```text
+a135f96a67a360beab3f5f105331eb08aed621f21dac22d8c5cee1781c1980e8
+```
+
+Build evidence: `node_modules/.wan-validation/runs/wan-v3-windows-exe-20261023/build-status.json`.
