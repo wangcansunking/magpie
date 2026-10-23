@@ -66,12 +66,20 @@ func (s *Server) wanManager() (*wan.Manager, context.Context, error) {
 	return manager, ctx, nil
 }
 
-func (s *Server) StartWANAuth(remember bool, provider string) (wan.AuthStatus, error) {
+func (s *Server) StartWANAuth(remember bool, provider string, methods ...string) (wan.AuthStatus, error) {
 	manager, _, err := s.wanManager()
 	if err != nil {
 		return wan.AuthStatus{}, err
 	}
-	return manager.StartAuth(remember, provider)
+	return manager.StartAuth(remember, append([]string{provider}, methods...)...)
+}
+
+func (s *Server) OpenWANAuthBrowser(id uint64) error {
+	manager, _, err := s.wanManager()
+	if err != nil {
+		return err
+	}
+	return manager.OpenAuthBrowser(id)
 }
 
 func (s *Server) CancelWANAuth(attemptID uint64) error {

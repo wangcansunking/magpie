@@ -33,10 +33,17 @@ and administrative page keep their existing addresses and authentication rules.
   requests without following redirects. Neither uses provider sign-in,
   account discovery, existing CLI tokens or a browser-owned lifetime.
 - [`microsoft.go`](../../internal/wan/microsoft.go) implements Microsoft's
-  device grant and refresh against the common v2 endpoint. Personal Microsoft
+  explicit device grant and refresh against the common v2 endpoint. Personal Microsoft
   and Entra organization accounts use the public Dev Tunnels CLI client and
   the SDK's published Dev Tunnels resource audience. The helper sends `Bearer`
   authorization for Microsoft and `github` authorization for GitHub.
+- [`microsoft_browser.go`](../../internal/wan/microsoft_browser.go) owns the
+  default Microsoft system-browser flow: authorization code with S256 PKCE,
+  a random held IPv4 loopback port and the CLI-compatible
+  `http://localhost:<port>/` redirect. The backend launches the OS default
+  browser through `proc.OpenBrowser`; embedded/web-page browsers do not own
+  the flow. Callback state is random, checked and one-use; its listener and
+  accepted connections are joined on completion, cancellation and shutdown.
 - [`usage.go`](../../internal/wan/usage.go) reads account identity and actual
   `BandwidthPerUser` values from the Dev Tunnels `userlimits` API. An owner
   worker checks once per minute, cancels old-credential requests and joins on
@@ -73,21 +80,43 @@ repository scope or client secret is requested. See the
 [SDK service-app contract](https://github.com/microsoft/dev-tunnels/blob/b73b0eb774b86a5b519c300f2f41c9072a66f663/ts/src/contracts/tunnelServiceProperties.ts)
 and [GitHub App device flow](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app#using-the-device-flow-to-generate-a-user-access-token).
 
-Microsoft device authorization uses `common`, the public CLI client ID
+Microsoft authorization uses `common`, the public CLI client ID
 `c0df98ca-23b4-4bce-bb9f-72039b28d3a5`, and the published resource
 `46da2f7e-b5ef-422a-88d4-2a7f9de6a0b2/.default` with `offline_access`,
-`openid` and `profile`. The supported verification pages are
+`openid` and `profile`. Microsoft defaults to system-browser authorization
+code/PKCE, matching the CLI's interactive flow rather than its `-d` option.
+The browser callback uses the localhost root and a random port, as shown in
+the [official CLI diagnostic trace](https://github.com/microsoft/dev-tunnels/issues/500).
+Its code, state, verifier and authorization URL never enter the GUI snapshot,
+settings or logs. A fixed, non-reflecting callback page acknowledges receipt;
+the WAN page reports the token exchange's result separately. Wrong host,
+origin, state, duplicate parameters and replayed callbacks are refused.
+
+Device flow remains an explicit `method: "device"` option; no browser failure
+silently falls back to it. Its supported verification pages are
 `https://login.microsoft.com/device` and `https://microsoft.com/devicelogin`.
 Account and tenant policies can refuse a grant. See the
 [official CLI authentication options](https://learn.microsoft.com/azure/developer/dev-tunnels/cli-commands).
 Provider subscriptions remain independent of this tunnel-service login.
 
-Sign in registers an attempt before requesting a device code. Only the
+Sign in registers an attempt before preparing a browser callback or device code.
+Microsoft browser preparation retains the existing `requesting_code` state
+with `method: "browser"`, then reports `awaiting_browser` with a 15-minute
+deadline. It opens the system browser once, without waiting for a page poll.
+An OS launch failure stays visible and allows an explicit
+`POST /api/wan/auth/open` retry bound to the exact `attemptID`; the request
+accepts no URL. Polling, page restoration and ordinary startup never reopen
+a browser. Cancellation and logout close its callback port even while a late
+token exchange remains in flight. Replacement retires the old callback before
+opening the next account's browser. Late grants cannot commit after retirement.
+
+For device flow, only the
 verification URI, user code, deadline and attempt identity reach the page;
 the device code and access token stay in the backend. The user opens the chosen
 service explicitly. The waiting view offers code copying, its validity time, the service page
-and cancellation without signed-in management details. An installed runtime is
-a plain readiness status; an absent runtime exposes installation and its help. Polling respects the response interval, slow-down and expiry.
+and cancellation without signed-in management details. A missing runtime is
+a prerequisite alert above the connection controls; the alert disappears after
+installation. Device polling respects the response interval, slow-down and expiry.
 Cancel targets the exact current attempt. Replaced/canceled attempts cannot
 commit late credentials. A slow secure-store operation does not hold the
 cached-status lock.
@@ -225,8 +254,9 @@ The explicit `POST /api/wan/tunnel/new` operation requires stopped WAN and
 records replacement intent for the current account only. It creates nothing
 remotely until the next Start. Other accounts' selections, existing remote
 tunnels and WAN keys are retained. The page confirms the address change.
-`POST /api/wan/auth/start` accepts optional `provider: "github" | "microsoft"`;
-omission preserves the original GitHub behavior. One WAN login is active at a
+`POST /api/wan/auth/start` accepts optional `provider: "github" | "microsoft"`
+and `method: "browser" | "device"`. Omission preserves GitHub device flow;
+Microsoft defaults to browser flow. Browser flow is refused for GitHub. One WAN login is active at a
 time; selecting a different account requires its own authorization.
 
 `POST /api/wan/usage/refresh` coalesces checks with a 15-second cooldown.

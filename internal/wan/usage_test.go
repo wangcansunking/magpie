@@ -312,7 +312,7 @@ func TestWANMicrosoftLoginRestoreAndSecureRecord(t *testing.T) {
 		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}, nil
 	})
 	a.wait = func(context.Context, time.Duration) error { return nil }
-	if _, err := a.Start(true, "microsoft"); err != nil {
+	if _, err := a.Start(true, "microsoft", "device"); err != nil {
 		t.Fatal(err)
 	}
 	got := awaitAuth(t, a, func(s AuthStatus) bool { return s.State == "signed_in" })

@@ -65,7 +65,10 @@ function wanFixture(lang, events) {
       else if (action === "auth/start") {
         assert.deepEqual(Object.keys(body), body.provider ? ["remember", "provider"] : ["remember"], "only the selected provider and storage choice reach the backend");
         state.auth.provider = body.provider || "github";
+        state.auth.method = state.auth.provider === "microsoft" ? "browser" : "device";
         Object.assign(state.auth, { state: "requesting_code", error: "", userCode: "", verificationURI: "", attemptID: ++attempt, storage: body.remember ? "system" : "memory" });
+      } else if (action === "auth/open") {
+        assert.deepEqual(body, {attemptID:state.auth.attemptID});
       } else if (action === "auth/cancel") {
         if (state.auth.attemptID === body.attemptID) Object.assign(state.auth, { state: "signed_out", userCode: "", verificationURI: "", storage: "memory" });
       } else if (action === "auth/logout") {
@@ -1035,26 +1038,30 @@ for (const engine of engines) for (const lang of ["en", "zh", "zh-TW", "ja", "de
     assert.deepEqual(errors, []);
   });
 }
-for (const engine of engines) {
-  test(`${engine}: WAN Microsoft login uses its own device page and tunnel replacement is explicit`, async (t) => {
-    const { page, f, word, events, errors } = await open(t, engine, "en", false);
+for (const engine of engines) for (const lang of ["en", "zh", "zh-TW", "ja", "de"]) {
+  test(`${engine} ${lang}: WAN Microsoft login uses the system browser and tunnel replacement is explicit`, async (t) => {
+    const { page, f, word, events, errors } = await open(t, engine, lang, false);
     await click(page, page.locator("#wanMicrosoftLogin"));
     await page.waitForFunction(()=>document.querySelector("#view-wan").getAttribute("aria-busy")==="false" && document.querySelector("#wanAuth").dataset.state==="requesting_code");
     assert.deepEqual(events.find(e=>e.action==="wan:auth/start").body,{remember:false,provider:"microsoft"});
-    f.code(); f.state.auth.provider="microsoft"; f.state.auth.verificationURI="https://login.microsoft.com/device";
+    Object.assign(f.state.auth,{provider:"microsoft",method:"browser",state:"awaiting_browser",userCode:"",verificationURI:"",expiresAt:new Date(Date.now()+900000).toISOString()});
     await page.evaluate(()=>pollWAN());
-    assert.equal(await page.locator("#wanOpenGitHub").textContent(), "Open Microsoft");
-    await Promise.all([page.waitForResponse(r => new URL(r.url()).pathname === "/api/open"), click(page,page.locator("#wanOpenGitHub"))]);
-    assert.deepEqual(events.find(e=>e.action==="open").body,{url:"https://login.microsoft.com/device"});
+    assert.equal(await page.locator("#wanBrowser").isVisible(),true);
+    assert.equal(await page.locator("#wanDevice").isVisible(),false,"browser login never asks for a device code");
+    assert.equal(await page.locator("#wanOpenBrowser").isEnabled(),true);
+    assert.equal(await page.locator("#wanCancelAuth").isEnabled(),true);
+    await Promise.all([page.waitForResponse(r=>new URL(r.url()).pathname==="/api/wan/auth/open"),click(page,page.locator("#wanOpenBrowser"))]);
+    await page.waitForFunction(()=>document.querySelector("#view-wan").getAttribute("aria-busy")==="false");
+    assert.equal(events.some(e=>e.action==="open"),false,"only the backend opens the system browser; no auth URL enters the page");
     f.ready(); f.state.auth.provider="microsoft";
     f.state.tunnel={id:"microsoft-fixture",region:"usw2",port:50188,accountID:"microsoft:fixture",accountName:"ms-fixture",new:false};
     await page.evaluate(()=>pollWAN());
     await click(page,page.locator("#wanNewTunnel"));
     const dialog=page.getByRole("alertdialog");
-    await click(page,dialog.getByRole("button",{name:"Cancel",exact:true}));
+    await click(page,dialog.getByRole("button",{name:word("Cancel"),exact:true}));
     assert.equal(events.some(e=>e.action==="wan:tunnel/new"),false);
     await click(page,page.locator("#wanNewTunnel"));
-    await Promise.all([page.waitForResponse(r => new URL(r.url()).pathname === "/api/wan/tunnel/new"), click(page,dialog.getByRole("button",{name:"Use a new tunnel",exact:true}))]);
+    await Promise.all([page.waitForResponse(r => new URL(r.url()).pathname === "/api/wan/tunnel/new"), click(page,dialog.getByRole("button",{name:word("Use a new tunnel"),exact:true}))]);
     await page.waitForFunction(()=>document.querySelector("#view-wan").getAttribute("aria-busy")==="false");
     assert.equal(events.filter(e=>e.action==="wan:tunnel/new").length,1);
     assert.equal(events.some(e=>e.action==="wan:start"),false,"replacement never publishes implicitly");

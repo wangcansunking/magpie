@@ -14,7 +14,7 @@ function registerWANPage(ctx) {
   const canChange = () => fresh && snapshot?.controllable && !busy;
   const canEditKeys = () => canChange() && !snapshot?.keysError;
   const pollingAction = () => ["start", "stop", "auth/start", "auth/cancel", "auth/logout", "runtime/install"].includes(busy);
-  const authorizing = () => ["requesting_code", "awaiting_authorization"].includes(snapshot?.auth?.state);
+  const authorizing = () => ["requesting_code", "awaiting_authorization", "awaiting_browser"].includes(snapshot?.auth?.state);
   const canInterruptAuth = () => fresh && snapshot?.controllable && busy === "auth/start";
   const canLogout = () => canChange() || canInterruptAuth() || (fresh && snapshot?.controllable && busy === "start");
   const authStates = {
@@ -89,7 +89,7 @@ function registerWANPage(ctx) {
     const interruptAuth = path === "auth/cancel" ? canInterruptAuth() : path === "auth/logout" && canLogout();
     if (!visible() || (!canChange() && !interrupt && !interruptAuth)) return null;
     if ((path.startsWith("keys/") || path === "start") && snapshot?.keysError) return null;
-    if (path === "auth/cancel" && (!authorizing() || !Number.isSafeInteger(body.attemptID) || body.attemptID <= 0 || body.attemptID !== snapshot.auth.attemptID)) return null;
+    if (["auth/cancel", "auth/open"].includes(path) && (!authorizing() || !Number.isSafeInteger(body.attemptID) || body.attemptID <= 0 || body.attemptID !== snapshot.auth.attemptID)) return null;
     cancelRead();
     const mine = ++actionID, opened = visibilityID, version = statusVersion, before = snapshot;
     busy = path; problem = "";
@@ -143,6 +143,7 @@ function registerWANPage(ctx) {
     $("#wanRefreshUsage").disabled = !canChange() || auth?.state !== "signed_in" || Date.now() - new Date(snapshot?.usage?.checkedAt || 0).getTime() < 15000;
     $("#wanNewTunnel").disabled = !canChange() || auth?.state !== "signed_in" || !["stopped", "failed"].includes(state) || !snapshot?.tunnel?.id || !!snapshot.tunnel.new;
     $("#wanMicrosoftLogin").disabled = $("#wanLogin").disabled;
+    $("#wanOpenBrowser").disabled = !canChange() || auth?.state !== "awaiting_browser" || auth?.method !== "browser";
     const cancel = $("#wanCancelAuth");
     if (cancel) cancel.disabled = !(canChange() || canInterruptAuth()) || !authorizing();
     $("#wanOpenGitHub").disabled = !(canChange() || canInterruptAuth()) || auth?.state !== "awaiting_authorization" || auth.verificationURI !== deviceURI();
@@ -152,7 +153,7 @@ function registerWANPage(ctx) {
   function renderAuth() {
     const auth = snapshot?.auth, current = fresh ? auth?.state : "unknown";
     $("#wanAuth").dataset.state = current || "unknown";
-    $("#wanAuthState").textContent = t(auth?.provider === "microsoft" && current === "requesting_code" ? "Requesting a Microsoft device code…" : auth?.provider === "microsoft" && current === "error" ? "Microsoft WAN sign-in failed" : auth?.provider === "microsoft" && current === "signed_in" ? "Signed in to Microsoft for WAN" : auth?.provider === "microsoft" && current === "awaiting_authorization" ? "Waiting for Microsoft authorization…" : authStates[current] || authStates.unknown);
+    $("#wanAuthState").textContent = t(auth?.method === "browser" && current === "requesting_code" ? "Opening the system browser…" : current === "awaiting_browser" ? "Complete Microsoft sign-in in your system browser" : auth?.provider === "microsoft" && current === "requesting_code" ? "Requesting a Microsoft device code…" : auth?.provider === "microsoft" && current === "error" ? "Microsoft WAN sign-in failed" : auth?.provider === "microsoft" && current === "signed_in" ? "Signed in to Microsoft for WAN" : auth?.provider === "microsoft" && current === "awaiting_authorization" ? "Waiting for Microsoft authorization…" : authStates[current] || authStates.unknown);
     $("#wanAuthProblem").textContent = t(auth?.error || "");
     $("#wanAuthProblem").hidden = !$("#wanAuthProblem").textContent;
     const runtimeText = t(!fresh ? "WAN runtime status unavailable" : snapshot?.runtimeAvailable ? "WAN runtime installed" : "WAN runtime not installed");
@@ -164,7 +165,7 @@ function registerWANPage(ctx) {
     $("#wanRuntimeDetails").hidden = !fresh || !!snapshot?.runtimeAvailable;
     $("#wanLoginHelp").hidden = current === "signed_in";
     $("#wanInstall").textContent = t(busy === "runtime/install" ? "Installing WAN runtime…" : "Install WAN runtime");
-    const active = ["signed_in", "loading", "requesting_code", "awaiting_authorization", "signing_out"].includes(current);
+    const active = ["signed_in", "loading", "requesting_code", "awaiting_authorization", "awaiting_browser", "signing_out"].includes(current);
     $("#wanLogin").hidden = active;
     $("#wanMicrosoftLogin").hidden = active;
     $("#wanOpenGitHub").textContent = t(auth?.provider === "microsoft" ? "Open Microsoft" : "Open GitHub");
@@ -175,7 +176,7 @@ function registerWANPage(ctx) {
     $("#wanAccountProvider").textContent = auth?.provider === "microsoft" ? t("Microsoft · Entra ID / Personal") : "GitHub";
     $("#wanRememberRow").hidden = active || !auth?.storageAvailable;
     $("#wanAuthActions").hidden = active && !authorizing();
-    $("#wanLogoutRow").hidden = ["signed_out", "unknown", "requesting_code", "awaiting_authorization"].includes(current);
+    $("#wanLogoutRow").hidden = ["signed_out", "unknown", "requesting_code", "awaiting_authorization", "awaiting_browser"].includes(current);
     if (!auth?.storageAvailable) remember = false;
     $("#wanRemember").setAttribute("aria-checked", String(remember));
     $("#wanMemory").setAttribute("aria-checked", String(!remember));
@@ -189,6 +190,8 @@ function registerWANPage(ctx) {
     $("#wanStorage").textContent = t(storage);
     const awaiting = current === "awaiting_authorization";
     $("#wanDevice").hidden = !awaiting;
+    $("#wanBrowser").hidden = current !== "awaiting_browser";
+    $("#wanBrowserDeadline").textContent = current === "awaiting_browser" ? dateText(auth.expiresAt) : "";
     $("#wanUserCode").textContent = awaiting ? auth.userCode : "";
     // Never turn a returned URI into a navigable link. Only this fixed GitHub
     // device page may be opened, and only by the reader's explicit click.
@@ -475,6 +478,7 @@ function registerWANPage(ctx) {
   <div id="wanLogoutRow"><button class="text" id="wanLogout" data-t disabled>Sign out of WAN</button><p class="usage-note" data-t>Sign out stops WAN and removes its saved login on this computer.</p></div>
   <div class="wan-storage-choice" id="wanRememberRow"><div class="name" id="wanRememberLabel" data-t>Login storage</div><div class="wan-client-tabs" role="radiogroup" aria-labelledby="wanRememberLabel"><button class="text" id="wanMemory" role="radio" aria-checked="true" data-t>Until magpie exits</button><button class="text" id="wanRemember" role="radio" aria-checked="false" data-t>Remember on this computer</button></div></div>
   <div class="row" id="wanAuthActions"><button class="text primary" id="wanLogin" data-t disabled>Sign in to GitHub for WAN</button><button class="text" id="wanMicrosoftLogin" data-t disabled>Sign in with Microsoft</button><span id="wanCancelSlot"></span></div>
+  <div id="wanBrowser" hidden><p class="usage-note" data-t>Continue in your system browser. Return here after Microsoft authorizes this computer.</p><p class="usage-note"><span data-t>Sign-in deadline</span> · <time id="wanBrowserDeadline"></time></p><button class="text" id="wanOpenBrowser" data-t disabled>Reopen system browser</button></div>
   <div id="wanDevice" hidden><div class="row"><div class="who"><div class="name" id="wanDevicePrompt" data-t>Enter this code on GitHub</div><div class="wan-device-code"><code id="wanUserCode"></code><button class="text" id="wanCopyCode" aria-describedby="wanUserCode" data-t disabled>Copy</button></div></div></div><p class="usage-note" id="wanDeviceValidity"><span data-t>Device code validity</span> · <time id="wanDeviceDeadline"></time></p><div class="row"><div class="who"><span class="usage-note" id="wanVerificationURI"></span></div></div><div class="row"><button class="text primary" id="wanOpenGitHub" data-t disabled>Open GitHub</button></div></div>
 </section>
 <p class="usage-note" id="wanStorage"></p>
@@ -526,6 +530,7 @@ function registerWANPage(ctx) {
         copy(snapshot.auth.userCode, t("Code"), $("#wanCopyCode"));
       };
       $("#wanLogin").onclick = () => action("auth/start", { remember: remember && !!snapshot?.auth?.storageAvailable });
+      $("#wanOpenBrowser").onclick = () => { if (!$("#wanOpenBrowser").disabled) action("auth/open", { attemptID: snapshot.auth.attemptID }); };
       $("#wanMicrosoftLogin").onclick = () => action("auth/start", { remember: remember && !!snapshot?.auth?.storageAvailable, provider: "microsoft" });
       $("#wanRefreshUsage").onclick = () => action("usage/refresh", {});
       $("#wanNewTunnel").onclick = async () => {

@@ -1,5 +1,10 @@
 magpie.strings({
   zh: {
+    "Opening the system browser…": "正在打开系统浏览器…",
+    "Complete Microsoft sign-in in your system browser": "请在系统浏览器完成 Microsoft 登录",
+    "Continue in your system browser. Return here after Microsoft authorizes this computer.": "请在系统浏览器继续授权，完成后返回此页面。",
+    "Sign-in deadline": "登录截止时间",
+    "Reopen system browser": "重新打开系统浏览器",
     "WAN runtime is required before starting. Install it once on this computer.": "启动 WAN 前必须安装运行环境，此电脑仅需安装一次。",
     "Choose GitHub or Microsoft to authorize Dev Tunnels. Signing in never starts WAN.": "选择 GitHub 或 Microsoft 授权 Dev Tunnels，登录不会自动启动 WAN。",
     "Sign out stops WAN and removes its saved login on this computer.": "退出登录会停止 WAN，并移除此电脑保存的 WAN 登录。",
@@ -146,6 +151,11 @@ magpie.strings({
     "Disabling, rotating or removing a key takes effect on the next request. Streams already started may finish. Stop ends WAN access and its active requests.": "停用、轮换或删除密钥从下一次请求起生效。已开始的流可能继续完成。停止 WAN 会关闭访问并结束正在处理的请求。"
   },
   "zh-TW": {
+    "Opening the system browser…": "正在開啟系統瀏覽器…",
+    "Complete Microsoft sign-in in your system browser": "請在系統瀏覽器完成 Microsoft 登入",
+    "Continue in your system browser. Return here after Microsoft authorizes this computer.": "請在系統瀏覽器繼續授權，完成後返回此頁面。",
+    "Sign-in deadline": "登入截止時間",
+    "Reopen system browser": "重新開啟系統瀏覽器",
     "WAN runtime is required before starting. Install it once on this computer.": "啟動 WAN 前必須安裝執行環境，此電腦僅需安裝一次。",
     "Choose GitHub or Microsoft to authorize Dev Tunnels. Signing in never starts WAN.": "選擇 GitHub 或 Microsoft 授權 Dev Tunnels，登入不會自動啟動 WAN。",
     "Sign out stops WAN and removes its saved login on this computer.": "登出會停止 WAN，並移除此電腦儲存的 WAN 登入。",
@@ -292,6 +302,11 @@ magpie.strings({
     "Disabling, rotating or removing a key takes effect on the next request. Streams already started may finish. Stop ends WAN access and its active requests.": "停用、輪替或刪除金鑰從下一次請求起生效。已開始的串流可能繼續完成。停止 WAN 會關閉存取並結束正在處理的請求。"
   },
   ja: {
+    "Opening the system browser…": "システムブラウザーを開いています…",
+    "Complete Microsoft sign-in in your system browser": "システムブラウザーで Microsoft のログインを完了してください",
+    "Continue in your system browser. Return here after Microsoft authorizes this computer.": "システムブラウザーで認証を続け、完了したらこの画面に戻ってください。",
+    "Sign-in deadline": "ログインの期限",
+    "Reopen system browser": "システムブラウザーを再度開く",
     "WAN runtime is required before starting. Install it once on this computer.": "WAN の起動にはランタイムが必要です。このコンピューターに一度インストールしてください。",
     "Choose GitHub or Microsoft to authorize Dev Tunnels. Signing in never starts WAN.": "GitHub または Microsoft で Dev Tunnels を承認します。ログインだけでは WAN は開始しません。",
     "Sign out stops WAN and removes its saved login on this computer.": "ログアウトすると WAN を停止し、この PC の保存済みログインを削除します。",
@@ -438,6 +453,11 @@ magpie.strings({
     "Disabling, rotating or removing a key takes effect on the next request. Streams already started may finish. Stop ends WAN access and its active requests.": "キーの無効化・更新・削除は次のリクエストから有効です。開始済みのストリームは完了する場合があります。WAN を停止するとアクセスと処理中のリクエストを終了します。"
   },
   de: {
+    "Opening the system browser…": "Systembrowser wird geöffnet…",
+    "Complete Microsoft sign-in in your system browser": "Microsoft-Anmeldung im Systembrowser abschließen",
+    "Continue in your system browser. Return here after Microsoft authorizes this computer.": "Im Systembrowser fortfahren. Nach der Microsoft-Autorisierung hierher zurückkehren.",
+    "Sign-in deadline": "Anmeldefrist",
+    "Reopen system browser": "Systembrowser erneut öffnen",
     "WAN runtime is required before starting. Install it once on this computer.": "Vor dem WAN-Start ist die Laufzeit erforderlich. Einmal auf diesem Computer installieren.",
     "Choose GitHub or Microsoft to authorize Dev Tunnels. Signing in never starts WAN.": "Autorisiere Dev Tunnels mit GitHub oder Microsoft. Eine Anmeldung startet WAN nicht.",
     "Sign out stops WAN and removes its saved login on this computer.": "Abmelden stoppt WAN und entfernt die gespeicherte Anmeldung auf diesem Computer.",

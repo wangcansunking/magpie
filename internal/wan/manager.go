@@ -244,6 +244,19 @@ func (m *Manager) CancelAuth(id uint64) bool {
 	return a.Cancel(id)
 }
 
+func (m *Manager) OpenAuthBrowser(id uint64) error {
+	m.mu.Lock()
+	if m.closed || m.auth == nil || m.blocked {
+		m.mu.Unlock()
+		return errors.New("WAN authorization owner is unavailable or busy")
+	}
+	a := m.auth
+	m.actions.Add(1)
+	m.mu.Unlock()
+	defer m.actions.Done()
+	return a.OpenBrowser(id)
+}
+
 func (m *Manager) Logout() error {
 	m.mu.Lock()
 	if m.auth == nil || m.blocked || m.closed || m.owner.Err() != nil {
@@ -254,8 +267,11 @@ func (m *Manager) Logout() error {
 	m.actions.Add(1)
 	defer m.actions.Done()
 	a := m.auth
-	a.Logout() // Invalidate before stopping, without waiting on the vault.
+	browser := a.Logout() // Invalidate before stopping, without waiting on the vault.
 	m.mu.Unlock()
+	if browser != nil {
+		browser.close()
+	}
 	m.Stop()
 	err := a.Erase()
 	m.mu.Lock()

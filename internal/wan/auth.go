@@ -11,12 +11,13 @@ import (
 )
 
 // AuthStatus is a cached, credential-free snapshot. ExpiresAt is the device-code
-// deadline while authorizing, then the access-token deadline when signed in.
+// or system-browser deadline while authorizing, then the access-token deadline.
 // A zero signed-in deadline means GitHub issued a non-expiring access token.
 // Storage describes this session; StorageAvailable separately enables Remember.
 type AuthStatus struct {
 	State            string       `json:"state"`
 	Provider         string       `json:"provider,omitempty"`
+	Method           string       `json:"method,omitempty"`
 	Error            string       `json:"error"`
 	UserCode         string       `json:"userCode"`
 	VerificationURI  string       `json:"verificationURI"`
@@ -35,11 +36,14 @@ type AuthRenewal struct {
 }
 
 type authAttempt struct {
-	id       uint64
-	ctx      context.Context
-	cancel   context.CancelFunc
-	remember bool
-	provider string
+	id              uint64
+	ctx             context.Context
+	cancel          context.CancelFunc
+	remember        bool
+	provider        string
+	method          string
+	browser         *microsoftBrowser
+	replacedBrowser *microsoftBrowser
 }
 
 // auth has an immutable owner and application identity. mu guards cached state
@@ -67,6 +71,7 @@ type auth struct {
 	blocked       bool
 	github        githubDeviceClient
 	microsoft     microsoftDeviceClient
+	openBrowser   func(string) error
 	now           func() time.Time
 	wait          func(context.Context, time.Duration) error
 	deadline      func(context.Context, time.Duration) (context.Context, context.CancelFunc)
@@ -87,7 +92,7 @@ func newAuth(owner context.Context, clientID string, store credentialStore) *aut
 	ctx, cancel := context.WithCancel(owner)
 	a := &auth{
 		owner: ctx, cancel: cancel, clientID: clientID, store: store,
-		github: newGitHubDeviceClient(), microsoft: newMicrosoftDeviceClient(), now: time.Now, changed: make(chan struct{}), refreshWait: waitAuth,
+		github: newGitHubDeviceClient(), microsoft: newMicrosoftDeviceClient(), openBrowser: defaultWANBrowser, now: time.Now, changed: make(chan struct{}), refreshWait: waitAuth,
 		wait: waitAuth, deadline: context.WithTimeout,
 		status: AuthStatus{State: "signed_out", Storage: "memory", StorageAvailable: store.available()},
 	}
@@ -190,6 +195,16 @@ func (a *auth) Start(remember bool, providers ...string) (AuthStatus, error) {
 	if provider != "github" && provider != "microsoft" {
 		return a.status, errors.New("Unsupported WAN login provider")
 	}
+	method := "device"
+	if provider == "microsoft" {
+		method = "browser"
+	}
+	if len(providers) > 1 && providers[1] != "" {
+		method = providers[1]
+	}
+	if method != "device" && method != "browser" || method == "browser" && provider != "microsoft" {
+		return a.status, errors.New("Unsupported WAN sign-in method")
+	}
 	if !oauthText(a.clientID, 128) {
 		return a.status, errors.New("A valid WAN GitHub OAuth Client ID is required")
 	}
@@ -197,15 +212,17 @@ func (a *auth) Start(remember bool, providers ...string) (AuthStatus, error) {
 		return a.status, errVaultUnavailable
 	}
 	a.stopRefreshLocked()
+	var replacedBrowser *microsoftBrowser
 	if a.current != nil {
+		replacedBrowser = a.current.browser
 		a.current.cancel()
 	}
 	a.next++
 	ctx, cancel := context.WithCancel(a.owner)
-	r := &authAttempt{id: a.next, ctx: ctx, cancel: cancel, remember: remember, provider: provider}
+	r := &authAttempt{id: a.next, ctx: ctx, cancel: cancel, remember: remember, provider: provider, method: method, replacedBrowser: replacedBrowser}
 	a.current, a.credential = r, savedCredential{}
 	a.signalLocked()
-	a.status = AuthStatus{State: "requesting_code", Provider: provider, AttemptID: r.id, Storage: "memory", StorageAvailable: a.status.StorageAvailable}
+	a.status = AuthStatus{State: "requesting_code", Provider: provider, Method: method, AttemptID: r.id, Storage: "memory", StorageAvailable: a.status.StorageAvailable}
 	if remember {
 		a.status.Storage = "system"
 	}
@@ -227,6 +244,10 @@ func (a *auth) active(r *authAttempt) bool {
 func (a *auth) run(r *authAttempt) {
 	defer a.workers.Done()
 	defer r.cancel()
+	if r.replacedBrowser != nil {
+		r.replacedBrowser.close()
+		r.replacedBrowser = nil
+	}
 	defer func() {
 		a.mu.Lock()
 		if a.current == r {
@@ -248,6 +269,10 @@ func (a *auth) run(r *authAttempt) {
 		return
 	}
 	if !a.active(r) {
+		return
+	}
+	if r.method == "browser" {
+		a.runMicrosoftBrowser(r)
 		return
 	}
 	requested := a.now()
@@ -442,11 +467,15 @@ func (a *auth) Cancel(attemptID uint64) bool {
 		return false
 	}
 	r := a.current
+	browser := r.browser
 	a.current = nil
 	r.cancel()
 	a.credential = savedCredential{}
 	a.status = AuthStatus{State: "signed_out", AttemptID: r.id, Storage: "memory", StorageAvailable: a.status.StorageAvailable}
 	a.mu.Unlock()
+	if browser != nil {
+		browser.close()
+	}
 	a.commit.Lock()
 	a.commit.Unlock()
 	return true
@@ -511,21 +540,25 @@ func (a *auth) eraseRejected(id uint64) {
 	a.blocked = false
 }
 
-// Logout immediately invalidates tokens and attempts. The manager must then stop
-// and join hosting, then call Erase. Local logout does not revoke GitHub's grant.
-func (a *auth) Logout() {
+// Logout invalidates tokens and attempts immediately. The manager closes the
+// returned callback outside its locks, joins hosting, then calls Erase.
+// Local logout does not revoke the upstream authorization grant.
+func (a *auth) Logout() *microsoftBrowser {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.stopRefreshLocked()
 	a.blocked = true
 	a.signalLocked()
 	a.rejection = 0 // Explicit logout takes over any pending rejected-token erase.
+	var browser *microsoftBrowser
 	if a.current != nil {
+		browser = a.current.browser
 		a.current.cancel()
 		a.current = nil
 	}
 	a.credential = savedCredential{}
 	a.status = AuthStatus{State: "signing_out", Storage: "memory", StorageAvailable: a.status.StorageAvailable}
+	return browser
 }
 
 func (a *auth) Erase() error {

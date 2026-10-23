@@ -16,7 +16,8 @@ type wanController interface {
 	WANStatus() wan.Status
 	StartWAN() error
 	StopWAN() error
-	StartWANAuth(bool, string) (wan.AuthStatus, error)
+	StartWANAuth(bool, string, ...string) (wan.AuthStatus, error)
+	OpenWANAuthBrowser(uint64) error
 	CancelWANAuth(uint64) error
 	LogoutWAN() error
 	InstallWANRuntime() error
@@ -97,40 +98,49 @@ func wanRoutes(mux *http.ServeMux, owner func() wanController) {
 		var in struct {
 			Remember bool   `json:"remember"`
 			Provider string `json:"provider"`
+			Method   string `json:"method"`
 		}
 		if err := wanInput(w, r, &in); err != nil {
 			fail(w, err)
 			return
 		}
-		if _, err := controller.StartWANAuth(in.Remember, in.Provider); err != nil {
+		if _, err := controller.StartWANAuth(in.Remember, in.Provider, in.Method); err != nil {
 			fail(w, err)
 			return
 		}
 		respond(w, controller, "")
 	})
-	mux.HandleFunc("POST /api/wan/auth/cancel", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "no-store")
-		controller := control(w)
-		if controller == nil {
-			return
-		}
-		var in struct {
-			AttemptID uint64 `json:"attemptID"`
-		}
-		if err := wanInput(w, r, &in); err != nil {
-			fail(w, err)
-			return
-		}
-		if in.AttemptID == 0 {
-			fail(w, errors.New("WAN sign-in attempt is required"))
-			return
-		}
-		if err := controller.CancelWANAuth(in.AttemptID); err != nil {
-			fail(w, err)
-			return
-		}
-		respond(w, controller, "")
-	})
+	for _, action := range []string{"cancel", "open"} {
+		mux.HandleFunc("POST /api/wan/auth/"+action, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Cache-Control", "no-store")
+			controller := control(w)
+			if controller == nil {
+				return
+			}
+			var in struct {
+				AttemptID uint64 `json:"attemptID"`
+			}
+			if err := wanInput(w, r, &in); err != nil {
+				fail(w, err)
+				return
+			}
+			if in.AttemptID == 0 {
+				fail(w, errors.New("WAN sign-in attempt is required"))
+				return
+			}
+			var err error
+			if action == "open" {
+				err = controller.OpenWANAuthBrowser(in.AttemptID)
+			} else {
+				err = controller.CancelWANAuth(in.AttemptID)
+			}
+			if err != nil {
+				fail(w, err)
+				return
+			}
+			respond(w, controller, "")
+		})
+	}
 	for _, action := range []string{"auth/logout", "runtime/install", "usage/refresh", "tunnel/new"} {
 		mux.HandleFunc("POST /api/wan/"+action, func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Cache-Control", "no-store")

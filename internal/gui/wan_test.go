@@ -22,6 +22,8 @@ type fakeWANController struct {
 	remember                      bool
 	canceled                      uint64
 	provider                      string
+	method                        string
+	browserOpened                 uint64
 	usageChecks, tunnelChanges    int
 }
 
@@ -41,15 +43,20 @@ func (f *fakeWANController) StopWAN() error {
 	return f.err
 }
 
-func (f *fakeWANController) StartWANAuth(remember bool, provider string) (wan.AuthStatus, error) {
+func (f *fakeWANController) StartWANAuth(remember bool, provider string, methods ...string) (wan.AuthStatus, error) {
 	f.authStarts++
 	f.provider = provider
+	if len(methods) > 0 {
+		f.method = methods[0]
+	}
 	f.remember = remember
 	if f.err == nil {
 		f.status.Auth = wan.AuthStatus{State: "requesting_code", AttemptID: 7}
 	}
 	return f.status.Auth, f.err
 }
+
+func (f *fakeWANController) OpenWANAuthBrowser(id uint64) error { f.browserOpened = id; return f.err }
 func (f *fakeWANController) CancelWANAuth(id uint64) error {
 	f.canceled = id
 	return f.err
@@ -350,4 +357,29 @@ func TestWANAccountDiagnosticsAndExplicitTunnelActions(t *testing.T) {
 		t.Fatal("explicit management action published a tunnel")
 	}
 	wanRequest(t, mux, "POST", "/api/wan/tunnel/new", `{"id":"foreign-tunnel"}`, 400)
+}
+
+func TestWANBrowserAuthReopenIsExplicitAndOwnerOnly(t *testing.T) {
+	sandboxHome(t)
+	controller := &fakeWANController{}
+	var owner wanController = controller
+	mux := http.NewServeMux()
+	wanRoutes(mux, func() wanController { return owner })
+	wanRequest(t, mux, "POST", "/api/wan/auth/start", `{"remember":false,"provider":"microsoft","method":"browser"}`, 200)
+	if controller.method != "browser" {
+		t.Fatal("browser method was dropped")
+	}
+	wanRequest(t, mux, "GET", "/api/wan/auth/open", "", 405)
+	for _, body := range []string{`{}`, `{"attemptID":0}`, `{"attemptID":-1}`, `{"attemptID":7,"url":"https://attacker.invalid"}`} {
+		wanRequest(t, mux, "POST", "/api/wan/auth/open", body, 400)
+	}
+	if controller.browserOpened != 0 {
+		t.Fatal("read or invalid input opened browser")
+	}
+	wanRequest(t, mux, "POST", "/api/wan/auth/open", `{"attemptID":7}`, 200)
+	if controller.browserOpened != 7 || controller.canceled != 0 || controller.starts != 0 {
+		t.Fatal("reopen changed wrong operation")
+	}
+	owner = nil
+	wanRequest(t, mux, "POST", "/api/wan/auth/open", `{"attemptID":7}`, 409)
 }
