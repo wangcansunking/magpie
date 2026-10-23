@@ -108,6 +108,23 @@ func (a *auth) refreshLoop(ctx context.Context, record savedCredential, remember
 		next := rotatingCredential(a.clientID, grant, issued)
 		if record.Provider == "microsoft" {
 			next = microsoftCredential(grant, issued)
+			oldAccount := record.Account
+			if record.Version == 3 {
+				oldAccount, _ = microsoftAccount(record.Access)
+			}
+			if grant.ClientInfo == "" {
+				next.Account = oldAccount
+			} else if next.Account.ID != oldAccount.ID {
+				a.refreshRejected(ctx, record)
+				return
+			}
+			if grant.IDToken == "" {
+				next.Account.Name = oldAccount.Name
+			}
+			if !validMicrosoftAccount(next.Account) {
+				a.refreshRejected(ctx, record)
+				return
+			}
 		}
 		if !a.commitRefresh(ctx, record, next, remember) {
 			return

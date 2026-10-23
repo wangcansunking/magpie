@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Public device-flow client used by the official Dev Tunnels CLI; the resource
@@ -29,6 +31,7 @@ func newMicrosoftDeviceClient() microsoftDeviceClient {
 }
 
 func (c microsoftDeviceClient) post(ctx context.Context, path string, values url.Values, out any) error {
+	values.Set("client_info", "1")
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	r, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+path, strings.NewReader(values.Encode()))
@@ -82,8 +85,13 @@ func (c microsoftDeviceClient) poll(ctx context.Context, code string) (githubGra
 	if out.Error != "" && out.Error != "authorization_pending" && out.Error != "slow_down" {
 		return out, microsoftAuthorizationError(out.Error)
 	}
-	if out.Error == "" && !validMicrosoftGrant(out) {
-		return out, errors.New("Microsoft returned an unsupported WAN credential")
+	if out.Error == "" {
+		if err := microsoftGrantError(out); err != nil {
+			return out, err
+		}
+		if _, ok := microsoftGrantAccount(out); !ok {
+			return out, errors.New("Microsoft did not return WAN account information; sign in again")
+		}
 	}
 	return out, nil
 }
@@ -101,8 +109,7 @@ func (c microsoftDeviceClient) refresh(ctx context.Context, refresh string) (git
 	return out, nil
 }
 func validMicrosoftGrant(g githubGrant) bool {
-	_, ok := microsoftAccount(g.Access)
-	return ok && oauthText(g.Access, 8192) && oauthText(g.Refresh, 8192) && strings.EqualFold(g.Type, "bearer") && g.ExpiresIn > 0 && g.ExpiresIn <= 86400
+	return microsoftGrantError(g) == nil
 }
 func microsoftAuthorizationError(code string) error {
 	switch code {
@@ -121,9 +128,8 @@ func microsoftAuthorizationError(code string) error {
 
 var microsoftGUID = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
-// These labels are decoded only from a token received by our TLS OAuth flow or
-// secure store. They are not an authentication decision; the service verifies
-// the bearer token on every operation. Never accept a caller-supplied JWT here.
+// Legacy version-3 vault migration only. New grants never inspect access tokens.
+// This function must not be used to choose an authentication provider.
 func microsoftAccount(token string) (Account, bool) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 || len(token) > 8192 {
@@ -159,5 +165,84 @@ func microsoftAccount(token string) (Account, bool) {
 
 func microsoftCredential(g githubGrant, issued time.Time) savedCredential {
 	end := issued.Add(time.Duration(g.ExpiresIn) * time.Second)
-	return savedCredential{Version: 3, Provider: "microsoft", ClientID: microsoftClientID, Access: g.Access, Refresh: g.Refresh, ExpiresAt: end, RefreshAfter: end.Add(-min(5*time.Minute, time.Duration(g.ExpiresIn)*time.Second/4))}
+	account, _ := microsoftGrantAccount(g)
+	return savedCredential{Version: 4, Account: account, Provider: "microsoft", ClientID: microsoftClientID, Access: g.Access, Refresh: g.Refresh, ExpiresAt: end, RefreshAfter: end.Add(-min(5*time.Minute, time.Duration(g.ExpiresIn)*time.Second/4))}
+}
+
+// Account metadata comes only from our TLS token endpoint response, never from
+// the callback or access token. This is MSAL's stable home-account identity.
+func microsoftGrantAccount(g githubGrant) (Account, bool) {
+	if !oauthText(g.ClientInfo, 2048) {
+		return Account{}, false
+	}
+	b, err := base64.RawURLEncoding.DecodeString(g.ClientInfo)
+	var info struct {
+		UID    string `json:"uid"`
+		Tenant string `json:"utid"`
+	}
+	if err != nil || json.Unmarshal(b, &info) != nil || !microsoftGUID.MatchString(info.Tenant) || !microsoftUID.MatchString(info.UID) {
+		return Account{}, false
+	}
+	uid := info.UID
+	if microsoftGUID.MatchString(uid) {
+		uid = strings.ToLower(uid)
+	}
+	return Account{ID: "microsoft:" + strings.ToLower(info.Tenant) + ":" + uid, Name: microsoftDisplayName(g.IDToken), Provider: "microsoft"}, true
+}
+
+var microsoftUID = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,113}$`)
+
+func validMicrosoftAccount(a Account) bool {
+	parts := strings.Split(a.ID, ":")
+	return a.Provider == "microsoft" && len(parts) == 3 && parts[0] == "microsoft" && microsoftGUID.MatchString(parts[1]) && microsoftUID.MatchString(parts[2]) && validMicrosoftName(a.Name)
+}
+func microsoftGrantError(g githubGrant) error {
+	if !oauthText(g.Access, 8192) {
+		return errors.New("Microsoft returned a missing, oversized or malformed WAN access token")
+	}
+	if !oauthText(g.Refresh, 8192) {
+		return errors.New("Microsoft did not return a usable WAN refresh token; sign in again")
+	}
+	if !strings.EqualFold(g.Type, "bearer") {
+		return errors.New("Microsoft returned an unsupported WAN token type")
+	}
+	if g.ExpiresIn <= 0 || g.ExpiresIn > 86400 {
+		return errors.New("Microsoft returned an unsupported WAN token lifetime")
+	}
+	return nil
+}
+
+func validMicrosoftName(name string) bool {
+	if len(name) == 0 || len(name) > 254 || !utf8.ValidString(name) {
+		return false
+	}
+	for _, c := range name {
+		if unicode.IsControl(c) {
+			return false
+		}
+	}
+	return strings.TrimSpace(name) != ""
+}
+
+// Optional display label only, from the same trusted TLS token response. Account
+// identity comes exclusively from client_info; this ID token is never persisted.
+func microsoftDisplayName(token string) string {
+	parts := strings.Split(token, ".")
+	if len(token) <= 16384 && len(parts) == 3 {
+		b, err := base64.RawURLEncoding.DecodeString(parts[1])
+		var claims struct {
+			Audience string `json:"aud"`
+			Username string `json:"preferred_username"`
+			Name     string `json:"name"`
+		}
+		if err == nil && json.Unmarshal(b, &claims) == nil && claims.Audience == microsoftClientID {
+			if validMicrosoftName(claims.Username) {
+				return claims.Username
+			}
+			if validMicrosoftName(claims.Name) {
+				return claims.Name
+			}
+		}
+	}
+	return "Microsoft account"
 }

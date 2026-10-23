@@ -78,9 +78,12 @@ func (c serviceClient) get(ctx context.Context, address, authorization string, o
 	return ctx.Err()
 }
 
-func (c serviceClient) account(ctx context.Context, token string) (Account, error) {
-	if a, ok := microsoftAccount(token); ok {
-		return a, nil
+func (c serviceClient) account(ctx context.Context, token string, identity ...Account) (Account, error) {
+	if len(identity) > 0 && identity[0].Provider == "microsoft" {
+		if !validMicrosoftAccount(identity[0]) {
+			return Account{}, errors.New("Could not identify the WAN account; sign in again")
+		}
+		return identity[0], nil
 	}
 	var user struct {
 		ID    uint64 `json:"id"`
@@ -95,8 +98,8 @@ func (c serviceClient) account(ctx context.Context, token string) (Account, erro
 	return Account{ID: "github:" + strconv.FormatUint(user.ID, 10), Name: user.Login, Provider: "github"}, nil
 }
 
-func (c serviceClient) usage(ctx context.Context, token string) (Usage, error) {
-	a, err := c.account(ctx, token)
+func (c serviceClient) usage(ctx context.Context, token string, identity ...Account) (Usage, error) {
+	a, err := c.account(ctx, token, identity...)
 	if err != nil {
 		return Usage{}, err
 	}

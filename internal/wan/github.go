@@ -46,6 +46,8 @@ type githubDeviceCode struct {
 // githubGrant stays backend-only, including any refresh token. No instance of
 // it is part of Status, a GUI response or the on-disk tunnel configuration.
 type githubGrant struct {
+	IDToken          string `json:"id_token,omitempty"`
+	ClientInfo       string `json:"client_info,omitempty"`
 	Access           string `json:"access_token"`
 	Type             string `json:"token_type"`
 	Scope            string `json:"scope"`

@@ -13,6 +13,9 @@ import (
 	"time"
 )
 
+func fixtureMicrosoftInfo() string {
+	return base64.RawURLEncoding.EncodeToString([]byte(`{"uid":"22222222-2222-2222-2222-222222222222","utid":"11111111-1111-1111-1111-111111111111"}`))
+}
 func fixtureMicrosoftToken() string {
 	b, _ := json.Marshal(map[string]string{"aud": microsoftAudience, "tid": "11111111-1111-1111-1111-111111111111", "oid": "22222222-2222-2222-2222-222222222222", "preferred_username": "fixture@example.invalid"})
 	return "eyJhbGciOiJSUzI1NiJ9." + base64.RawURLEncoding.EncodeToString(b) + ".fixture"
@@ -75,7 +78,7 @@ func TestWANUsageMicrosoftIdentityAndNoRedirectOrSecretErrors(t *testing.T) {
 		}
 		return &http.Response{StatusCode: 302, Body: io.NopCloser(strings.NewReader("SECRET")), Header: http.Header{"Location": {"https://attacker.invalid/"}}}, nil
 	})
-	if _, err := c.usage(context.Background(), token); err == nil || strings.Contains(err.Error(), "SECRET") {
+	if _, err := c.usage(context.Background(), token, fixtureMicrosoftAccount()); err == nil || strings.Contains(err.Error(), "SECRET") {
 		t.Fatal("unsafe error", err)
 	}
 	if calls != 1 {
@@ -152,7 +155,7 @@ func TestWANMicrosoftDeviceGrantAndRefresh(t *testing.T) {
 		}
 		body := `{"device_code":"fake-device","user_code":"ABCD-EFGH","verification_uri":"https://login.microsoft.com/device","expires_in":900,"interval":5}`
 		if strings.HasSuffix(r.URL.Path, "/token") {
-			body = `{"access_token":"` + token + `","refresh_token":"fake-refresh","token_type":"Bearer","expires_in":3600}`
+			body = `{"client_info":"` + fixtureMicrosoftInfo() + `","access_token":"` + token + `","refresh_token":"fake-refresh","token_type":"Bearer","expires_in":3600}`
 		}
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: http.Header{}}, nil
 	})
@@ -307,7 +310,7 @@ func TestWANMicrosoftLoginRestoreAndSecureRecord(t *testing.T) {
 	a.microsoft.client.Transport = githubRoundTrip(func(r *http.Request) (*http.Response, error) {
 		body := `{"device_code":"fake-device","user_code":"ABCD-EFGH","verification_uri":"https://microsoft.com/devicelogin","expires_in":900,"interval":5}`
 		if strings.HasSuffix(r.URL.Path, "/token") {
-			body = `{"access_token":"` + fixtureMicrosoftToken() + `","refresh_token":"fake-refresh","token_type":"Bearer","expires_in":3600}`
+			body = `{"client_info":"` + fixtureMicrosoftInfo() + `","access_token":"` + fixtureMicrosoftToken() + `","refresh_token":"fake-refresh","token_type":"Bearer","expires_in":3600}`
 		}
 		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}, nil
 	})
@@ -328,7 +331,7 @@ func TestWANMicrosoftLoginRestoreAndSecureRecord(t *testing.T) {
 	}
 	vault := &fakeCredentialVault{}
 	secure := systemCredentialStore{target: "fixture", vault: vault}
-	record := microsoftCredential(githubGrant{Access: fixtureMicrosoftToken(), Refresh: strings.Repeat("r", 2600), ExpiresIn: 3600}, time.Now().UTC())
+	record := microsoftCredential(githubGrant{ClientInfo: fixtureMicrosoftInfo(), Access: fixtureMicrosoftToken(), Refresh: strings.Repeat("r", 2600), ExpiresIn: 3600}, time.Now().UTC())
 	if err := secure.save(record); err != nil {
 		t.Fatal(err)
 	}
@@ -336,4 +339,9 @@ func TestWANMicrosoftLoginRestoreAndSecureRecord(t *testing.T) {
 	if err != nil || loaded.Access != record.Access || loaded.Refresh != record.Refresh {
 		t.Fatal("secure compressed Microsoft record failed to round-trip", err)
 	}
+}
+
+func fixtureMicrosoftAccount() Account {
+	a, _ := microsoftGrantAccount(githubGrant{ClientInfo: fixtureMicrosoftInfo()})
+	return a
 }

@@ -51,7 +51,8 @@ and administrative page keep their existing addresses and authentication rules.
   remain unknown; same-credential failures retain explicitly stale values.
 - [`tunnel.go`](../../internal/wan/tunnel.go) stores one selected tunnel per
   account in local-only `wan-tunnels.json`, using GitHub's numeric ID or
-  Microsoft's tenant/object IDs. Account names are display labels, not keys.
+  Microsoft's home tenant/user IDs (legacy records use tenant/object IDs).
+  Account names are display labels, not keys.
 - [`vault.go`](../../internal/wan/vault.go) defines a WAN-specific secure
   credential store. Windows uses the current user's Credential Manager,
   namespaced by settings directory. Other systems currently offer explicit
@@ -134,7 +135,21 @@ status, command arguments, environment or logs. A remembered version-2 secure
 record contains the rotating pair and its access/refresh deadlines. Version-1
 access-only records still load; they require one fresh device sign-in to acquire
 a refresh token. Non-expiring access-only grants retain their existing behavior.
-Microsoft uses a version-3 secure record with a provider discriminator. Its
+Microsoft uses a version-4 secure record with an explicit provider and the
+stable home-account identity from the TLS token response's requested
+`client_info` (`uid`/`utid`), matching MSAL's account model. Access tokens
+are opaque; their JWT shape, audience and claims never decide whether a new
+grant is accepted or which provider receives it. Profile lookup for Microsoft
+never sends its token to GitHub. Missing/invalid account metadata fails sign-in
+with a fixed message. Refresh responses may omit metadata; renewal retains the
+existing identity, and refuses a different or malformed identity. Existing
+version-3 vault records still load using their legacy identity reader, only for
+migration; a guest account whose new home identity differs must sign in again.
+Display names may come from the same response's optional ID token, bounded and
+checked for the application audience; labels never select an account. ID tokens
+are not persisted. Version-4 identities use the home tenant; guest accounts may
+therefore create a
+new account-specific tunnel on their first new sign-in. Its
 refresh deadline remains unknown because the token response does not report it.
 Records exceeding Windows Credential Manager's 2560-byte blob limit are
 compressed inside the native vault, with bounded decompression and the same

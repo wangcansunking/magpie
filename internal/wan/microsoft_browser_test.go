@@ -111,7 +111,7 @@ func browserURL(t *testing.T, opened <-chan string) *url.URL {
 }
 
 func browserGrantResponse() string {
-	return `{"access_token":"` + fixtureMicrosoftToken() + `","refresh_token":"browser-refresh-secret","token_type":"Bearer","expires_in":3600}`
+	return `{"client_info":"` + fixtureMicrosoftInfo() + `","access_token":"opaque-browser-access-secret","refresh_token":"browser-refresh-secret","token_type":"Bearer","expires_in":3600}`
 }
 
 func TestWANMicrosoftBrowserDefaultUsesPKCEAndSecureRestore(t *testing.T) {

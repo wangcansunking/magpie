@@ -27,6 +27,7 @@ const vaultSandbox = "MAGPIE_TEST_SANDBOX"
 // tokens rotate together with access tokens inside this secure record only.
 // This record never enters settings, backups, status or the helper's diagnostics.
 type savedCredential struct {
+	Account          Account   `json:"account,omitzero"`
 	Version          int       `json:"version"`
 	Provider         string    `json:"provider,omitempty"`
 	ClientID         string    `json:"clientID"`
@@ -141,7 +142,15 @@ func validSavedCredential(record savedCredential) bool {
 	if !oauthText(record.ClientID, 128) || !oauthText(record.Access, 8192) || !validTime(record.ExpiresAt) {
 		return false
 	}
-	if record.Version == 3 {
+	if record.Version == 3 || record.Version == 4 {
+		if record.Version == 4 && !validMicrosoftAccount(record.Account) {
+			return false
+		}
+		if record.Version == 3 {
+			if _, ok := microsoftAccount(record.Access); !ok {
+				return false
+			}
+		}
 		return record.Provider == "microsoft" && record.ClientID == microsoftClientID && validMicrosoftGrant(githubGrant{Access: record.Access, Refresh: record.Refresh, Type: "bearer", ExpiresIn: 3600}) && validTime(record.ExpiresAt) && !record.ExpiresAt.IsZero() && !record.RefreshAfter.IsZero() && validTime(record.RefreshAfter) && record.RefreshAfter.Before(record.ExpiresAt) && record.RefreshExpiresAt.IsZero()
 	}
 	if record.Provider != "" && record.Provider != "github" {

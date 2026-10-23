@@ -97,12 +97,54 @@ func (r *hosting) revoke() {
 
 func New(handler http.Handler) *Manager {
 	service := newServiceClient()
-	return &Manager{account: service.account, usage: &usageMonitor{request: make(chan struct{}, 1), fetch: service.usage},
+	m := &Manager{usage: &usageMonitor{request: make(chan struct{}, 1)},
 		handler: handler, path: filepath.Join(settings.Dir(), "wan.json"),
 		find: availableRuntime, hasRuntime: cachedRuntimeAvailable, install: plugin.Bun, proxy: startWANProxy, command: proc.Command, startTree: startSDKTree,
 		wait: 90 * time.Second, runtime: &processTunnels, clientID: DefaultGitHubClientID,
 		status: Status{State: "stopped", Auth: AuthStatus{State: "signed_out", Storage: "memory"}},
 	}
+	m.account = func(ctx context.Context, token string) (Account, error) {
+		identity, err := m.credentialAccount(token)
+		if err != nil {
+			return Account{}, err
+		}
+		return service.account(ctx, token, identity)
+	}
+	m.usage.fetch = func(ctx context.Context, token string) (Usage, error) {
+		identity, err := m.credentialAccount(token)
+		if err != nil {
+			return Usage{}, err
+		}
+		return service.usage(ctx, token, identity)
+	}
+	return m
+}
+
+// Resolve the exact credential snapshot before routing requests to a provider.
+// Token format must never decide whether a credential is sent to GitHub.
+func (m *Manager) credentialAccount(token string) (Account, error) {
+	m.mu.Lock()
+	a := m.auth
+	m.mu.Unlock()
+	if a == nil {
+		return Account{}, errors.New("WAN sign-in is no longer available")
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed || a.blocked || a.status.State != "signed_in" || a.credential.Access != token {
+		return Account{}, errors.New("WAN sign-in changed; retry the operation")
+	}
+	if a.credential.Provider != "microsoft" {
+		return Account{Provider: "github"}, nil
+	}
+	account := a.credential.Account
+	if a.credential.Version == 3 {
+		account, _ = microsoftAccount(token)
+	}
+	if !validMicrosoftAccount(account) {
+		return Account{}, errors.New("Could not identify the WAN account; sign in again")
+	}
+	return account, nil
 }
 
 // Own attaches exactly once, only after this process owns the gateway listener.

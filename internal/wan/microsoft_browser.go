@@ -129,8 +129,11 @@ func (c microsoftDeviceClient) exchange(ctx context.Context, b *microsoftBrowser
 	if grant.Error != "" {
 		return githubGrant{}, errors.New("Microsoft browser sign-in was refused; check account and tenant policies, then sign in again")
 	}
-	if !validMicrosoftGrant(grant) {
-		return githubGrant{}, errors.New("Microsoft returned an unsupported WAN credential")
+	if err := microsoftGrantError(grant); err != nil {
+		return githubGrant{}, err
+	}
+	if _, ok := microsoftGrantAccount(grant); !ok {
+		return githubGrant{}, errors.New("Microsoft did not return WAN account information; sign in again")
 	}
 	return grant, nil
 }
