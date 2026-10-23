@@ -376,13 +376,18 @@ The WAN page puts service state and actionable failure first, then account and
 bandwidth cards, tunnel facts, client setup and independent WAN keys. A quota
 meter shows actual usage and reset time; unavailable and stale data are labeled.
 Account renewal, storage, next attempt and current access-token expiry remain
-visible, with local time zones. Installed runtime readiness is a plain status;
-new installs and device authorization remain explicit. Provider sign-in supplies
+visible, with local time zones. A missing runtime is a required-warning banner
+above connection controls, with an explicit installation button. The entire
+banner disappears once the runtime is available; installed status is not a
+permanent account-card row. Device authorization remains explicit. Provider sign-in supplies
 models; the separate GitHub or Microsoft login owns the tunnel. Stop/sign-out effects and
 public-relay details remain available without dominating the working view.
 [The approved v3 concept](../design/wan-gateway-v3-20261023.png) is a visual
 reference. [V3 acceptance](../design/wan-gateway-v3-acceptance.md) distinguishes
 offline fixtures, actual service probes and unverified real-account flows.
+The [visual follow-up](../design/wan-gateway-ux-polish-acceptance.md) records the
+aligned metadata, compact renewal health, visible outlined actions, light/dark
+button contrast and focus checks, and responsive prerequisite placement.
 
 Client tabs distinguish Claude Code's root Endpoint from an OpenAI-compatible
 `/v1` base. PowerShell/Bash examples quote values literally. An explicit model

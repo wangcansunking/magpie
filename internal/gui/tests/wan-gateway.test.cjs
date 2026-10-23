@@ -3,11 +3,11 @@ const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
 const { fixture } = require("./fixtures/caller-keys.cjs");
 const { strings } = require("./strings.cjs");
-const { reach } = require("./reader.cjs");
+const { reach, pointerClick } = require("./reader.cjs");
 async function click(page, locator) {
   const closed = locator.locator('xpath=ancestor::details[not(@open)]');
   for (const detail of await closed.all()) await detail.locator(':scope > summary').click();
-  await reach(page, locator); await locator.click();
+  await reach(page, locator); await pointerClick(page, locator);
 }
 // WebKit can acknowledge a viewport change before delivering resize/layout.
 // Measure responsive geometry after that event and its animation frame, not
@@ -145,6 +145,7 @@ for (const engine of engines) for (const lang of ["en", "zh", "zh-TW", "ja", "de
     assert.equal(await page.locator(".wan-assignment").textContent(), word(assignment));
     assert.equal(await page.locator("#wanAuthState").textContent(), word("Signed in to GitHub for WAN"));
     assert.equal(await page.locator("#wanRuntimeState").textContent(), word("WAN runtime installed"));
+    assert.equal(await page.locator("#wanRuntimeDetails").isVisible(), false, "installed runtime leaves no permanent dashboard card");
     assert.equal(await page.locator("#wanStart").isEnabled(), true, "explicit sign-in permits Start to check the runtime locally");
     assert.equal(await page.locator("#wanStop").isDisabled(), true);
     assert.match(await page.locator("#wanClaudeExample").textContent(), /YOUR_WAN_ENDPOINT/);
@@ -257,6 +258,9 @@ for (const engine of engines) for (const lang of ["en", "zh", "zh-TW", "ja", "de
     const { page, f, word, events, errors } = await open(t, engine, lang, false);
     assert.equal(await page.locator("#wanStart").isDisabled(), true);
     assert.equal(await page.locator("#wanAuthState").textContent(), word("Signed out of GitHub for WAN"));
+    assert.equal(await page.locator("#wanRuntimeDetails").isVisible(), true);
+    assert.equal(await page.locator("#wanRuntimeDetails").getAttribute("role"), "alert");
+    assert(await page.locator("#wanRuntimeDetails").evaluate(e => !!(e.compareDocumentPosition(document.querySelector("#wanStatus")) & Node.DOCUMENT_POSITION_FOLLOWING)), "required runtime warning precedes connection controls");
     assert.equal(await page.locator("#wanRemember").isChecked(), false, "memory-only is the default");
     assert.equal(await page.locator(".wan-key-head").isVisible(), false, "no empty table header before the first key");
     assert.equal(await page.locator("#wanMemory").getAttribute("tabindex"), "0");
@@ -266,7 +270,7 @@ for (const engine of engines) for (const lang of ["en", "zh", "zh-TW", "ja", "de
     await click(page, page.locator("#wanInstall"));
     await page.waitForFunction(() => document.querySelector("#wanInstall").hidden && document.querySelector("#view-wan").getAttribute("aria-busy") === "false");
     assert.equal(await page.locator("#wanStart").isDisabled(), true, "install does not sign in or start");
-    assert.equal(await page.locator("#wanRuntimeDetails summary").count(), 0, "installed runtime is a plain status, not an empty disclosure");
+    assert.equal(await page.locator("#wanRuntimeDetails").isVisible(), false, "successful install removes the prerequisite warning");
     assert.equal(await page.locator("#wanRuntimeHelp").isVisible(), false);
     await page.locator("#wanMemory").focus();
     await page.keyboard.press("ArrowRight");
@@ -442,7 +446,7 @@ for (const engine of engines) for (const lang of ["en", "zh", "zh-TW", "ja", "de
     await click(page, page.locator("#wanPowerShell"));
     assert.match(await page.locator("#wanClaudeExample").textContent(), /\$env:ANTHROPIC_BASE_URL=/);
     assert.match(await page.locator("#wanClaudeExample").textContent(), /claude --model 'relay\/m'/);
-    await click(page, page.locator("#wanCopyExample"));
+    await Promise.all([page.waitForResponse(r => new URL(r.url()).pathname === "/api/copy"), click(page, page.locator("#wanCopyExample"))]);
     assert(events.some(e => e.action === "clipboard" && e.body.text.includes("YOUR_WAN_KEY") && e.body.text.includes("relay/m")));
     await click(page, page.locator("#wanBash"));
     assert.match(await page.locator("#wanClaudeExample").textContent(), /^export ANTHROPIC_BASE_URL=/);
@@ -450,7 +454,7 @@ for (const engine of engines) for (const lang of ["en", "zh", "zh-TW", "ja", "de
     assert.equal(await page.locator("#wanEndpoint code").textContent(), endpoint + "/v1");
     assert((await page.locator("#wanClaudeExample").textContent()).includes(endpoint + "/v1/chat/completions"));
     assert.match(await page.locator("#wanClaudeExample").textContent(), /"model":"relay\/m"/);
-    await click(page, page.locator("#wanEndpoint .copy"));
+    await Promise.all([page.waitForResponse(r => new URL(r.url()).pathname === "/api/copy"), click(page, page.locator("#wanEndpoint .copy"))]);
     assert(events.some(e => e.action === "clipboard" && e.body.text === endpoint + "/v1"));
     await click(page, page.locator("#wanPowerShell"));
     assert.match(await page.locator("#wanClaudeExample").textContent(), /^Invoke-RestMethod /);
@@ -1035,12 +1039,12 @@ for (const engine of engines) {
   test(`${engine}: WAN Microsoft login uses its own device page and tunnel replacement is explicit`, async (t) => {
     const { page, f, word, events, errors } = await open(t, engine, "en", false);
     await click(page, page.locator("#wanMicrosoftLogin"));
-    assert.deepEqual(events.find(e=>e.action==="wan:auth/start").body,{remember:false,provider:"microsoft"});
     await page.waitForFunction(()=>document.querySelector("#view-wan").getAttribute("aria-busy")==="false" && document.querySelector("#wanAuth").dataset.state==="requesting_code");
+    assert.deepEqual(events.find(e=>e.action==="wan:auth/start").body,{remember:false,provider:"microsoft"});
     f.code(); f.state.auth.provider="microsoft"; f.state.auth.verificationURI="https://login.microsoft.com/device";
     await page.evaluate(()=>pollWAN());
     assert.equal(await page.locator("#wanOpenGitHub").textContent(), "Open Microsoft");
-    await click(page,page.locator("#wanOpenGitHub"));
+    await Promise.all([page.waitForResponse(r => new URL(r.url()).pathname === "/api/open"), click(page,page.locator("#wanOpenGitHub"))]);
     assert.deepEqual(events.find(e=>e.action==="open").body,{url:"https://login.microsoft.com/device"});
     f.ready(); f.state.auth.provider="microsoft";
     f.state.tunnel={id:"microsoft-fixture",region:"usw2",port:50188,accountID:"microsoft:fixture",accountName:"ms-fixture",new:false};
@@ -1050,10 +1054,42 @@ for (const engine of engines) {
     await click(page,dialog.getByRole("button",{name:"Cancel",exact:true}));
     assert.equal(events.some(e=>e.action==="wan:tunnel/new"),false);
     await click(page,page.locator("#wanNewTunnel"));
-    await click(page,dialog.getByRole("button",{name:"Use a new tunnel",exact:true}));
+    await Promise.all([page.waitForResponse(r => new URL(r.url()).pathname === "/api/wan/tunnel/new"), click(page,dialog.getByRole("button",{name:"Use a new tunnel",exact:true}))]);
+    await page.waitForFunction(()=>document.querySelector("#view-wan").getAttribute("aria-busy")==="false");
     assert.equal(events.filter(e=>e.action==="wan:tunnel/new").length,1);
     assert.equal(events.some(e=>e.action==="wan:start"),false,"replacement never publishes implicitly");
     assert.equal(await page.locator("#wanNewTunnel").isDisabled(),true);
+    assert.deepEqual(errors,[]);
+  });
+}
+
+for (const engine of engines) for (const theme of ["light", "dark"]) {
+  test(engine + " " + theme + ": WAN actions have clear contrast, focus and required runtime placement", async t => {
+    const {page,f,errors}=await open(t,engine,"en",false);
+    await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
+    const enabled=page.locator("#wanInstall, #wanLogin, #wanMicrosoftLogin");
+    const styles=await enabled.evaluateAll(es=>es.map(e=>{
+      const c=getComputedStyle(e),r=e.getBoundingClientRect();
+      const rgb=x=>x.match(/[\d.]+/g).slice(0,3).map(Number);
+      const lum=x=>rgb(x).map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((a,v,i)=>a+v*[.2126,.7152,.0722][i],0);
+      const l=[lum(c.color),lum(c.backgroundColor)].sort((a,b)=>b-a);
+      return {id:e.id,border:parseFloat(c.borderTopWidth),contrast:(l[0]+.05)/(l[1]+.05),height:r.height,opacity:c.opacity};
+    }));
+    for(const s of styles){assert(s.border>=1,s.id+" has a visible button boundary");assert(s.contrast>=4.5,s.id+" text contrast "+s.contrast);assert(s.height>=36,s.id+" has a clear target");assert.equal(s.opacity,"1");}
+    await page.locator("#wanInstall").focus();
+    assert(await page.locator("#wanInstall").evaluate(e=>parseFloat(getComputedStyle(e).outlineWidth)>=2),"keyboard focus has a visible outline");
+    await resizeWAN(page,360);
+    assert(await page.locator("#wanRuntimeDetails").evaluate(e=>e.getBoundingClientRect().bottom<=document.querySelector("#wanStatus").getBoundingClientRect().top),"runtime prerequisite is above status on mobile");
+    f.ready();await page.evaluate(()=>pollWAN());
+    assert.equal(await page.locator("#wanRuntimeDetails").isVisible(),false);
+    await resizeWAN(page,1400);
+    const geometry=await page.locator("#view-wan").evaluate(e=>{const a=e.querySelector(".wan-session-card").getBoundingClientRect(),q=e.querySelector(".wan-quota-card").getBoundingClientRect();return {account:a.x,quota:q.x,delta:Math.abs(a.y-q.y),overflow:e.scrollWidth-e.clientWidth};});
+    assert(geometry.account<geometry.quota && geometry.delta<1,"desktop account and quota follow the approved order");
+    assert(geometry.overflow<=1,"WAN dashboard fits its container");
+    f.state.state="running";f.state.endpoint=endpoint;await page.evaluate(()=>pollWAN());
+    assert(await page.locator("#wanEndpoint .copy").evaluate(e=>parseFloat(getComputedStyle(e).borderTopWidth)>=1),"address copy has an explicit button boundary");
+    await resizeWAN(page,360);
+    assert(await page.locator("#wanEndpoint .copy").evaluate(e=>e.getBoundingClientRect().height>=44),"address copy has a mobile touch target");
     assert.deepEqual(errors,[]);
   });
 }

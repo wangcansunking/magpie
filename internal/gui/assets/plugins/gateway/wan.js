@@ -155,11 +155,13 @@ function registerWANPage(ctx) {
     $("#wanAuthState").textContent = t(auth?.provider === "microsoft" && current === "requesting_code" ? "Requesting a Microsoft device code…" : auth?.provider === "microsoft" && current === "error" ? "Microsoft WAN sign-in failed" : auth?.provider === "microsoft" && current === "signed_in" ? "Signed in to Microsoft for WAN" : auth?.provider === "microsoft" && current === "awaiting_authorization" ? "Waiting for Microsoft authorization…" : authStates[current] || authStates.unknown);
     $("#wanAuthProblem").textContent = t(auth?.error || "");
     $("#wanAuthProblem").hidden = !$("#wanAuthProblem").textContent;
-    $("#wanRuntimeState").textContent = t(!fresh ? "WAN runtime status unavailable" : snapshot?.runtimeAvailable ? "WAN runtime installed" : "WAN runtime not installed");
+    const runtimeText = t(!fresh ? "WAN runtime status unavailable" : snapshot?.runtimeAvailable ? "WAN runtime installed" : "WAN runtime not installed");
+    if ($("#wanRuntimeState").textContent !== runtimeText) $("#wanRuntimeState").textContent = runtimeText;
     $("#wanInstall").hidden = !!snapshot?.runtimeAvailable;
     $("#wanInstallRow").hidden = !!snapshot?.runtimeAvailable;
     $("#wanRuntimeHelp").hidden = !!snapshot?.runtimeAvailable;
     $("#wanRuntimeDetails").dataset.available = String(fresh && !!snapshot?.runtimeAvailable);
+    $("#wanRuntimeDetails").hidden = !fresh || !!snapshot?.runtimeAvailable;
     $("#wanLoginHelp").hidden = current === "signed_in";
     $("#wanInstall").textContent = t(busy === "runtime/install" ? "Installing WAN runtime…" : "Install WAN runtime");
     const active = ["signed_in", "loading", "requesting_code", "awaiting_authorization", "signing_out"].includes(current);
@@ -169,6 +171,7 @@ function registerWANPage(ctx) {
     $("#wanDevicePrompt").textContent = t(auth?.provider === "microsoft" ? "Enter this code on Microsoft" : "Enter this code on GitHub");
     $("#wanAccountName").textContent = snapshot?.usage?.account?.name || t(auth?.provider === "microsoft" ? "Microsoft account" : "GitHub account");
     $("#wanAccountIdentity").hidden = current !== "signed_in";
+    $(".wan-account-avatar").textContent = Array.from($("#wanAccountName").textContent.trim())[0]?.toLocaleUpperCase(locale) || "◎";
     $("#wanAccountProvider").textContent = auth?.provider === "microsoft" ? t("Microsoft · Entra ID / Personal") : "GitHub";
     $("#wanRememberRow").hidden = active || !auth?.storageAvailable;
     $("#wanAuthActions").hidden = active && !authorizing();
@@ -310,6 +313,7 @@ function registerWANPage(ctx) {
     $("#wanState").textContent = t(quotaExceeded() ? "Dev Tunnels bandwidth exhausted" : states[current] || states.unknown);
     $("#wanStateDot").classList.toggle("on", current === "running");
     $("#wanStatus").dataset.state = current;
+    $("#wanStatus").closest(".wan-status-card").dataset.quota = String(quotaExceeded());
     $("#wanStart").hidden = ["running", "starting", "stopping"].includes(current);
     $("#wanStop").hidden = !["running", "starting", "stopping"].includes(current);
     const note = quotaExceeded() ? "Public requests are blocked by Microsoft. Your provider sign-in is unaffected."
@@ -453,7 +457,8 @@ function registerWANPage(ctx) {
   ctx.slots.add("page", {
     key: "wan", title: "WAN Gateway",
     html: `
-<p class="usage-note wan-intro" data-t>Let remote clients use your models.</p>
+<header class="wan-page-heading"><h1 data-t>WAN Gateway</h1><p class="usage-note wan-intro" data-t>Let remote clients use your models.</p></header>
+<section id="wanRuntimeDetails" class="wan-runtime-details" role="alert" hidden><div class="wan-runtime-status"><span class="wan-runtime-dot" aria-hidden="true"></span><span id="wanRuntimeState"></span></div><div class="row" id="wanInstallRow"><button class="text primary" id="wanInstall" data-t disabled>Install WAN runtime</button></div><p class="usage-note" id="wanRuntimeHelp" data-t>WAN runtime is required before starting. Install it once on this computer.</p></section>
 <section class="list gwcard wan-status-card">
   <div class="row gw" id="wanStatus" role="status"><span class="dot" id="wanStateDot" aria-hidden="true"></span><div class="who"><div class="name" id="wanState" data-t>WAN status unavailable</div><div class="usage-note" id="wanStatusHelp"></div></div><span class="usage-note" id="wanStatusReset" hidden></span><button class="text primary" id="wanStart" data-t disabled>Start</button><button class="text" id="wanStop" data-t disabled>Stop</button></div>
 </section>
@@ -474,9 +479,9 @@ function registerWANPage(ctx) {
 </section>
 <p class="usage-note" id="wanStorage"></p>
 <p class="usage-note warn" id="wanAuthProblem" role="alert" hidden></p>
-<section id="wanRuntimeDetails" class="wan-runtime-details"><div class="wan-runtime-status" role="status"><span class="wan-runtime-dot" aria-hidden="true"></span><span id="wanRuntimeState"></span></div><div class="row" id="wanInstallRow"><button class="text" id="wanInstall" data-t disabled>Install WAN runtime</button></div><p class="usage-note" id="wanRuntimeHelp" data-t>Install downloads the WAN runtime. Installation and GitHub sign-in do not publish a tunnel; only Start does.</p></section>
+
 </aside>
-<section class="wan-quota-card"><div class="row-head"><span class="label" data-t>Account bandwidth</span><span class="grow"></span><button class="text" id="wanRefreshUsage" data-t disabled>Refresh usage</button></div><div class="wan-quota-value" id="wanQuotaValue"></div><div class="wan-quota-track" id="wanQuotaTrack" role="meter"><span id="wanQuotaFill"></span></div><p class="usage-note" id="wanQuotaState"></p><dl class="wan-session-meta"><div><dt data-t>Reset time</dt><dd id="wanQuotaReset"></dd></div><div><dt data-t>Last checked</dt><dd id="wanQuotaChecked"></dd></div></dl><p class="usage-note warn" id="wanQuotaProblem" role="alert" hidden></p><p class="usage-note" data-t>Monthly allowance is shared across this account. Changing a model or WAN key does not reset it.</p></section>
+<section class="wan-quota-card"><div class="row-head"><span class="label" data-t>Account bandwidth</span></div><div class="wan-quota-value" id="wanQuotaValue"></div><div class="wan-quota-track" id="wanQuotaTrack" role="meter"><span id="wanQuotaFill"></span></div><p class="usage-note" id="wanQuotaState"></p><dl class="wan-session-meta"><div><dt data-t>Reset time</dt><dd id="wanQuotaReset"></dd></div><div><dt data-t>Last checked</dt><dd id="wanQuotaChecked"></dd></div></dl><p class="usage-note warn" id="wanQuotaProblem" role="alert" hidden></p><div class="wan-quota-footer"><button class="text" id="wanRefreshUsage" data-t disabled>Refresh usage</button><p class="usage-note" data-t>Monthly allowance is shared across this account. Changing a model or WAN key does not reset it.</p></div></section>
 </div>
 <section class="wan-tunnel-card"><div class="row-head"><span class="label" data-t>Tunnel</span><span class="grow"></span><button class="text" id="wanNewTunnel" data-t disabled>Use a new tunnel</button></div><p class="usage-note" id="wanTunnelState"></p><dl class="wan-tunnel-grid"><div><dt data-t>Tunnel ID</dt><dd id="wanTunnelID"></dd></div><div><dt data-t>Region</dt><dd id="wanTunnelRegion"></dd></div><div><dt data-t>Port</dt><dd id="wanTunnelPort"></dd></div><div><dt data-t>Account</dt><dd id="wanTunnelAccount"></dd></div></dl><p class="usage-note" data-t>Each account keeps its own tunnel. A new tunnel changes the address and keeps WAN keys.</p></section>
 <section class="wan-client-card">
