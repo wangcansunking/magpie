@@ -57,4 +57,3 @@ Windows x64 PE machine, GUI subsystem, embedded resources and isolated
 
 Build evidence: wan-opaque-exe-20261023/build-status.json.
 Exit the old application before starting this separate new executable.
-
