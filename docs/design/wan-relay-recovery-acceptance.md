@@ -72,4 +72,12 @@ SDK bundle SHA-256: c74535481f3cde7637373cd4b1aa3e7d6e25c706c96d035cb3b4a2ac0693
 ## Final race checks and artifact
 
 Final related race run: 45 passing cases across internal/wan and
-internal/gui, zero failures. Production artifact follows the source commit.
+internal/gui, zero failures. Source commit 61f80939 produced dist/relay-recovery/magpie.exe,
+59,441,664 bytes, embedded version magpie wan-gateway-61f80939.
+The Windows x64 PE machine, GUI subsystem, embedded resources and isolated
+--version smoke checks passed. SHA-256:
+
+d3113bb12d4a4a44d1e9af83f78d17ca610652703c49766a5a0fd5bf34f645fb
+
+Build evidence: wan-relay-recovery-exe-20261025/build-status.json.
+Exit the old desktop process before starting this separate new executable.
