@@ -478,3 +478,30 @@ tunnel level, and rejects true, null and other types. Host/Origin preservation
 and the explicit zero request timeout must still be present. This matches
 the [service contract](https://github.com/microsoft/dev-tunnels/blob/main/cs/src/Contracts/TunnelOptions.cs),
 not an assumption that every omitted field is safe.
+
+## Relay transport recovery
+
+Within an already-running explicit Start, RelayRecovery asks the fixed SDK to
+reconnect the same host and tunnel after a recoverable transport failure. The
+first attempt is immediate, then starts are at least 20 seconds apart (at most
+three per minute), without overlapping attempts. A single five-minute deadline
+allows at most 15 starts. Repeated connection statuses and failed attempts do
+not extend it. One SDK connect call is one attempt; its internal retry/reconnect
+loops remain disabled so the policy controls the cadence even when the SDK
+would give up early. Initial Start still fails on its first failed connection.
+Authentication, permission, rate-limit, TLS and host-takeover failures are
+terminal, rather than retrying a credential/policy problem for five minutes.
+
+The owner retains its running state and endpoint during recovery. Existing
+streams may fail and clients may need to retry requests. Recovery never
+extends the parent's credential lease or creates another tunnel. Stop, EOF,
+logout and credential expiry cancel recovery, clear both timers, and join the
+in-flight connect before disposal. Failure at five full minutes emits the fixed
+reconnect_timeout error and revokes admission; late events cannot revive the
+generation. Startup after process exit never auto-publishes.
+
+The WAN page displays the persistent failure and a one-shot in-page notice.
+The desktop independently watches cached owner status and sends one native
+notification per recovery failure, even when the WAN page is closed. Clicking
+the native notification opens WAN. Repeated polls do not repeat it; a later
+independent failure is notified again. OS notification permissions still apply.

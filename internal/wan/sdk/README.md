@@ -127,3 +127,20 @@ login or a public tunnel has been run. Verification of the authenticated
 runtime and fail-closed hosting contract belongs to the separate WAN tests
 and explicitly approved sandbox relay check in the
 [WAN design reference](../../../docs/subsystems/wan-gateway.md).
+
+## Relay recovery
+
+RelayRecovery owns retries for one already-running explicit Start, using the
+same fixed SDK host and tunnel. Attempts start immediately, then at least
+20 seconds apart (at most three per minute), without overlap. The original
+five-minute deadline permits at most 15 attempts and never resets on an error
+or intermediate status. One SDK connect call is one attempt; SDK internal retry
+loops remain disabled. Initial connection failures still fail fast.
+
+Only network, timeout and transient service failures recover. Authentication,
+permission, rate-limit, TLS and another host taking the tunnel remain terminal.
+Stop cancels both timers and the shared connection cancellation token; shutdown
+joins the in-flight attempt before disposal. Tests use a virtual clock for the
+entire five-minute/15-attempt window. An actual fixed SDK V1 fixture replaces
+its in-memory relay, fails one SSH network attempt, and verifies a fresh
+forwarded request after recovery using an accelerated injected timer.

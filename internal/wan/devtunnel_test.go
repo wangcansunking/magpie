@@ -139,6 +139,21 @@ func TestSDKDisconnectImmediatelyRevokesAndNeverReadmits(t *testing.T) {
 	}
 }
 
+func TestSDKRecoveryTimeoutRevokesAndCannotBeReadmitted(t *testing.T) {
+	out := testSDKOutput()
+	var admitted atomic.Bool
+	admitted.Store(true)
+	out.revoke = func() { admitted.Store(false) }
+	writeSDKEvent(t, out, sdkEvent{Version: 1, Generation: out.generation, Event: "error", Code: "reconnect_timeout"})
+	if admitted.Load() || out.failure() == nil || out.failure().Error() != RelayRecoveryTimeoutMessage {
+		t.Fatal("recovery exhaustion did not terminate admission with its specific error")
+	}
+	writeSDKEvent(t, out, sdkEvent{Version: 1, Generation: out.generation, Event: "ready", Endpoint: preparedEvent().Endpoint})
+	if admitted.Load() {
+		t.Fatal("late SDK readiness revived an exhausted recovery")
+	}
+}
+
 func TestSDKCannotAdoptDifferentSavedCanonicalIdentity(t *testing.T) {
 	for _, change := range []func(*tunnelConfig){func(c *tunnelConfig) { c.ID = "different-id" }, func(c *tunnelConfig) { c.ClusterID = "use2" }} {
 		out := testSDKOutput()

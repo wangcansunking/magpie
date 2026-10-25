@@ -22,7 +22,7 @@ net.createConnection = function (...args) {
 };
 const stdinListeners = process.stdin.listenerCount('data');
 const oldConsoleError = console.error;
-const { createPortBridge, PortHost, sdkFixture: sdk, protocolFixture } = require('./host.cjs');
+const { createPortBridge, PortHost, RelayRecovery, sdkFixture: sdk, protocolFixture } = require('./host.cjs');
 assert.equal(process.stdin.listenerCount('data'), stdinListeners, 'require must not start IPC/auth/hosting');
 assert.equal(console.error, oldConsoleError, 'require must not replace the caller console');
 after(() => { net.createConnection = originalDial; });
@@ -139,11 +139,12 @@ test('fixed-port bridge pipes data with backpressure and abort destroys both end
     for (const error of peerErrors) assert.equal(error.code, 'ABORT_ERR', 'only the expected Duplexify abort is allowed');
 });
 
-async function actualV1(t, providedPort, exercise) {
+async function actualV1(t, providedPort, exercise, recover = false) {
     const port = providedPort || await echoServer(t);
     const extraPort = port === 65535 ? 1 : port + 1;
     const abort = new AbortController();
     let active = true;
+    let running = false;
     let deleted = false;
     let metadata = {
         tunnelId: 'offline-contract-fixture', clusterId: 'use',
@@ -157,6 +158,12 @@ async function actualV1(t, providedPort, exercise) {
         reportEvent: () => {},
     };
     const host = new PortHost(management, port, () => active && !abort.signal.aborted);
+    const failures = [];
+    let recoveryClock = 0;
+    if (recover) new RelayRecovery(host, () => running, abort.signal, code => failures.push(code),
+      () => host.connect(host.tunnel, { enableRetry: false, enableReconnect: false }),
+      (fn, ms) => setTimeout(() => { recoveryClock += ms; fn(); }, ms >= 300000 ? ms : Math.min(ms, 10)),
+      clearTimeout, () => recoveryClock);
     host.forwardConnectionsToLocalPorts = false;
     const bridge = createPortBridge(port, () => active, abort.signal);
     const firstStream = deferred();
@@ -185,6 +192,7 @@ async function actualV1(t, providedPort, exercise) {
         await host.dispose();
     });
     await Promise.all([relay.connect(), host.connect(metadata, { enableRetry: false, enableReconnect: false })]);
+    running = true;
     assert.equal(host.connectionProtocol, sdk.TunnelRelayTunnelHost.webSocketSubProtocol);
     clientStream = await relay.openStream(sdk.TunnelRelayTunnelHost.clientStreamChannelType);
     const configuration = new sdk.SshSessionConfiguration();
@@ -205,20 +213,22 @@ async function actualV1(t, providedPort, exercise) {
     assert.equal(event.isIncoming, false, 'released V1 event does not describe inbound as true');
     assert.equal(event.cancellation, undefined, 'helper lifetime must supply cancellation for V1');
     if (exercise) {
-        await exercise(remote, { abort, host, forwarding, port });
+        await exercise(remote, { abort, host, forwarding, port, failures, dropRelay: () => wireHost.destroy() });
     } else {
         const payload = Buffer.from('actual released SDK manual stream');
         const echoed = collect(remote, payload.length);
         remote.write(payload);
         assert.deepEqual(await echoed, payload);
     }
+    if (!recover) {
     metadata = { ...metadata, ports: [{ portNumber: port }, { portNumber: extraPort }] };
     await host.refreshPorts();
     assert.equal(forwarding.remoteForwardedPorts.find(value => value.remotePort === extraPort), undefined, 'externally added port must not be advertised');
     const dialsBefore = dials.length;
     await assert.rejects(forwarding.streamToRemotePort('127.0.0.1', extraPort));
     assert.equal(dials.length, dialsBefore, 'a direct request for an external port must not dial');
-    assert.equal(events, 1);
+    }
+    assert.equal(events, recover ? 2 : 1);
     active = false;
     abort.abort();
     remote.destroy();
@@ -469,4 +479,94 @@ test('actual management adapter sends the provider-specific service authorizatio
   }
   assert.throws(() => protocolFixture.serviceAuthorization('other', 'fixture-credential'));
   assert.throws(() => protocolFixture.serviceAuthorization('microsoft', 'bad\r\ncredential'));
+});
+
+
+function relayRecoveryFixture() {
+    const statuses=new Set(), retries=new Set(), timers=new Map(), failures=[], attempts=[];
+    let next=0, running=false, now=0, succeeds=false, held;
+    const abort=new AbortController();
+    const relay={disconnectReason:sdk.SshDisconnectReason.connectionLost,
+      connectionStatusChanged:fn=>{statuses.add(fn);return{dispose:()=>statuses.delete(fn)}},
+      retryingTunnelConnection:fn=>{retries.add(fn);return{dispose:()=>retries.delete(fn)}}};
+    const status=value=>{for(const fn of [...statuses])fn({status:value})};
+    const policy=new RelayRecovery(relay,()=>running,abort.signal,code=>failures.push(code),async()=>{
+      attempts.push(now);
+      if(held)return held.promise;
+      if(succeeds){status(sdk.ConnectionStatus.Connected);return}
+      throw Object.assign(new Error('fixture transport failure'),{code:'ECONNRESET'});
+    },(fn,ms)=>{const id=next++;timers.set(id,{fn,at:now+ms});return id},id=>timers.delete(id),()=>now);
+    return {relay,policy,abort,timers,failures,attempts,status,start:()=>{running=true},succeed:()=>{succeeds=true},
+      hold:()=>{held=deferred();return held},lose:()=>status(sdk.ConnectionStatus.Disconnected),
+      retry:error=>{const e={error,retry:true,delayMs:20000};for(const fn of [...retries])fn(e);return e},
+      advance:async target=>{for(;;){const entry=[...timers].filter(([,t])=>t.at<=target).sort((a,b)=>a[1].at-b[1].at||a[0]-b[0])[0];if(!entry)break;now=entry[1].at;timers.delete(entry[0]);entry[1].fn();for(let i=0;i<12;i++)await Promise.resolve()}now=target}};
+}
+
+test('relay recovery tries three times per minute for five minutes and reports exhaustion exactly once',async()=>{
+  const f=relayRecoveryFixture();
+  f.status(sdk.ConnectionStatus.Connecting);
+  assert.equal(f.timers.size,0);assert.equal(f.retry({code:'ECONNRESET'}).retry,false,'SDK internal retries must stay off');
+  f.start();f.lose();f.status(sdk.ConnectionStatus.Connecting);f.status(sdk.ConnectionStatus.RefreshingTunnelAccessToken);
+  await f.advance(299999);
+  assert.deepEqual(f.attempts,Array.from({length:15},(_,i)=>i*20000));
+  assert.deepEqual(f.failures,[],'the user must not be told five minutes failed before the full interval');
+  await f.advance(300000);assert.deepEqual(f.failures,['reconnect_timeout']);assert.equal(f.timers.size,0);
+  f.status(sdk.ConnectionStatus.Connected);await f.advance(600000);
+  assert.equal(f.attempts.length,15);assert.deepEqual(f.failures,['reconnect_timeout']);
+});
+
+test('successful relay recovery clears the budget, while Stop joins an in-flight attempt and prevents later retries',async()=>{
+  const f=relayRecoveryFixture();f.start();f.lose();await f.advance(40000);f.succeed();await f.advance(60000);
+  assert.deepEqual(f.attempts,[0,20000,40000,60000]);assert.equal(f.timers.size,0);assert.deepEqual(f.failures,[]);
+  f.lose();await f.advance(60000);assert.equal(f.attempts.length,5);assert.equal(f.timers.size,0);
+  f.policy.dispose();
+  const stopped=relayRecoveryFixture();stopped.start();const held=stopped.hold();stopped.lose();await stopped.advance(0);
+  assert.equal(stopped.attempts.length,1);stopped.abort.abort();held.reject(Object.assign(new Error('canceled transport'),{code:'ECONNRESET'}));
+  await stopped.policy.wait();await stopped.advance(600000);
+  assert.equal(stopped.timers.size,0);assert.equal(stopped.attempts.length,1);assert.deepEqual(stopped.failures,[]);
+});
+
+test('relay recovery refuses authentication, policy, TLS, host takeover and rate-limit failures',()=>{
+  for(const error of [{response:{status:401}},{errorContext:{statusCode:403}},{code:'CERT_HAS_EXPIRED'},{response:{status:429}}]){
+    const f=relayRecoveryFixture();f.start();f.relay.disconnectError=error;f.lose();
+    assert.equal(f.timers.size,0);assert.equal(f.failures.length,1);
+  }
+  const initial=relayRecoveryFixture();initial.lose();assert.equal(initial.timers.size,0);assert.equal(initial.failures.length,1);
+  const conflict=relayRecoveryFixture();conflict.start();conflict.relay.disconnectReason=sdk.SshDisconnectReason.tooManyConnections;conflict.lose();
+  assert.deepEqual(conflict.failures,['host_conflict']);assert.equal(conflict.timers.size,0);
+});
+
+test('actual pinned SDK V1 reconnects the same tunnel after transport loss and one failed network retry',{timeout:20000},async t=>{
+  await actualV1(t,undefined,async(remote,{host,port,failures,dropRelay})=>{
+    remote.on('error',()=>{});
+    const [newHost,newRelay]=pair();
+    const relay=new sdk.MultiChannelStream(new sdk.NodeStream(newRelay));
+    let attempts=0;
+    host.streamFactory={createRelayStream:async()=>{
+      attempts++;
+      if(attempts===1)throw new sdk.SshConnectionError('simulated relay transport reset',sdk.SshDisconnectReason.connectionLost);
+      return{stream:new sdk.NodeStream(newHost),protocol:sdk.TunnelRelayTunnelHost.webSocketSubProtocol};
+    }};
+    let session,stream;
+    t.after(()=>{stream?.destroy();session?.dispose();relay.dispose();newHost.destroy();newRelay.destroy()});
+    const connected=new Promise(resolve=>{
+      const sub=host.connectionStatusChanged(e=>{if(e.status===sdk.ConnectionStatus.Connected){sub.dispose();resolve()}});
+      t.after(()=>sub.dispose());
+    });
+    const relayConnected=relay.connect();
+    await host.sshSession.close(sdk.SshDisconnectReason.connectionLost, 'simulated relay transport loss');
+    await Promise.all([relayConnected,connected]);
+    assert.equal(attempts,2);assert.deepEqual(failures,[]);assert.equal(host.tunnel.tunnelId,'offline-contract-fixture');
+    stream=await relay.openStream(sdk.TunnelRelayTunnelHost.clientStreamChannelType);
+    const cfg=new sdk.SshSessionConfiguration();cfg.addService(sdk.PortForwardingService);
+    session=new sdk.SshClientSession(cfg);session.trace=()=>{};
+    session.onAuthenticating(e=>{e.authenticationPromise=Promise.resolve({})});
+    session.onRequest(e=>{e.isAuthorized=['tcpip-forward','cancel-tcpip-forward'].includes(e.request.requestType)});
+    const forwarding=session.activateService(sdk.PortForwardingService);forwarding.acceptLocalConnectionsForForwardedPorts=false;
+    await session.connect(new sdk.NodeStream(stream));await session.authenticate({username:'tunnel'});
+    await forwarding.waitForForwardedPort(port);
+    const forwarded=await forwarding.connectToForwardedPort(port);forwarded.on('error',()=>{});t.after(()=>forwarded.destroy());
+    const data=Buffer.from('new request after relay recovery'),received=collect(forwarded,data.length);
+    forwarded.write(data);assert.deepEqual(await received,data);
+  },true);
 });

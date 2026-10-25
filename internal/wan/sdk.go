@@ -446,6 +446,10 @@ func sdkError(code string) error {
 		return errors.New("WAN proxy is unavailable or unsupported; no direct connection was attempted")
 	case "disconnected":
 		return errors.New("WAN relay disconnected; start WAN again explicitly")
+	case "reconnect_timeout":
+		return errors.New(RelayRecoveryTimeoutMessage)
+	case "host_conflict":
+		return errors.New("Another host connected to this WAN tunnel; stop the other host or choose a new tunnel")
 	case "bad_request":
 		return errors.New("WAN service rejected the tunnel request (HTTP 400)")
 	case "conflict":

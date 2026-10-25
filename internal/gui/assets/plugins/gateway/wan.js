@@ -40,6 +40,8 @@ function registerWANPage(ctx) {
     // A copied credential is returned only to its explicit action, never
     // retained in the page's status snapshot or a browser store.
     const { secret, ...masked } = out;
+    const recoveryFailed = masked.state === "failed" && masked.error === "WAN could not reconnect for 5 minutes; check the network and start WAN again";
+    if (recoveryFailed && (snapshot?.state !== "failed" || snapshot.error !== masked.error)) status(t(masked.error), "err");
     snapshot = masked; statusVersion++;
     fresh = true; problem = "";
   }

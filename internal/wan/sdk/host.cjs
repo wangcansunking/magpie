@@ -39134,6 +39134,7 @@ var require_dist2 = __commonJS({
 var host_exports = {};
 __export(host_exports, {
   PortHost: () => PortHost,
+  RelayRecovery: () => RelayRecovery,
   createPortBridge: () => createPortBridge,
   protocolFixture: () => protocolFixture,
   renewHostCredentials: () => renewHostCredentials,
@@ -39192,6 +39193,7 @@ var shutdownTask;
 var errorSent = false;
 var preparingOperation = "prepare";
 var disposingHost = false;
+var relayRecovery;
 var bridges = /* @__PURE__ */ new Set();
 function object(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -39215,7 +39217,7 @@ function emit(event, fields = {}) {
 }
 function codeFor(error, fallback) {
   if (error instanceof Failure) return error.code;
-  const status = error?.response?.status;
+  const status = error?.response?.status ?? error?.errorContext?.statusCode;
   if (status === 401) return "auth";
   if (status === 403) return "forbidden";
   if (status === 404) return "not_found";
@@ -39591,6 +39593,107 @@ function serviceAuthorization(provider, credential) {
   return (provider === "microsoft" ? "Bearer " : "github ") + credential;
 }
 var protocolFixture = { parseLine, endpoint, codeFor, serviceAuthorization };
+var RelayRecovery = class {
+  constructor(relay, running, signal, failure, reconnect, schedule = setTimeout, cancelTimer = clearTimeout, now = () => performance.now()) {
+    this.relay = relay;
+    this.running = running;
+    this.signal = signal;
+    this.failure = failure;
+    this.reconnect = reconnect;
+    this.schedule = schedule;
+    this.cancelTimer = cancelTimer;
+    this.now = now;
+    this.subscriptions.push(relay.connectionStatusChanged((event) => {
+      if (this.stopped || signal.aborted) return;
+      if (event.status === ConnectionStatus.Connected) {
+        this.reset();
+        return;
+      }
+      if (event.status !== ConnectionStatus.Disconnected) return;
+      const code = this.category(relay.disconnectError);
+      if (!running() || !this.recoverable(code)) {
+        this.terminate(code);
+        return;
+      }
+      this.begin();
+      this.queue();
+    }));
+    this.subscriptions.push(relay.retryingTunnelConnection((event) => {
+      event.retry = false;
+    }));
+    signal.addEventListener("abort", this.onAbort, { once: true });
+    if (signal.aborted) this.dispose();
+  }
+  timer;
+  retryTimer;
+  stopped = false;
+  inFlight = false;
+  until = 0;
+  lastAttempt = -Infinity;
+  pending = Promise.resolve();
+  subscriptions = [];
+  category(error) {
+    const reasons = require_dev_tunnels_ssh().SshDisconnectReason;
+    if (this.relay.disconnectReason === reasons.tooManyConnections) return "host_conflict";
+    return codeFor(error, error?.reason === reasons.connectionLost || this.relay.disconnectReason === reasons.connectionLost ? "network" : "disconnected");
+  }
+  recoverable(code) {
+    return ["network", "timeout", "service"].includes(code);
+  }
+  begin() {
+    if (this.timer !== void 0) return;
+    this.until = this.now() + 3e5;
+    this.timer = this.schedule(() => {
+      if (!this.stopped && !this.signal.aborted) this.terminate("reconnect_timeout");
+    }, 3e5);
+  }
+  queue() {
+    if (this.stopped || this.signal.aborted || this.inFlight || this.retryTimer !== void 0) return;
+    this.retryTimer = this.schedule(() => {
+      this.retryTimer = void 0;
+      if (this.stopped || this.signal.aborted || !this.running()) return;
+      if (this.now() >= this.until) {
+        this.terminate("reconnect_timeout");
+        return;
+      }
+      this.lastAttempt = this.now();
+      this.inFlight = true;
+      this.pending = Promise.resolve().then(() => {
+        if (!this.stopped && !this.signal.aborted && this.running()) return this.reconnect();
+      }).catch((error) => {
+        if (this.stopped || this.signal.aborted) return;
+        const code = this.category(error);
+        if (!this.recoverable(code)) this.terminate(code);
+      }).finally(() => {
+        this.inFlight = false;
+        if (!this.stopped && !this.signal.aborted && this.timer !== void 0) this.queue();
+      });
+    }, Math.max(0, 2e4 - (this.now() - this.lastAttempt)));
+  }
+  onAbort = () => this.dispose();
+  reset() {
+    if (this.timer !== void 0) this.cancelTimer(this.timer);
+    if (this.retryTimer !== void 0) this.cancelTimer(this.retryTimer);
+    this.timer = void 0;
+    this.retryTimer = void 0;
+    this.until = 0;
+    this.lastAttempt = -Infinity;
+  }
+  terminate(code) {
+    this.dispose();
+    this.failure(code);
+  }
+  wait() {
+    return this.pending;
+  }
+  dispose() {
+    if (this.stopped) return;
+    this.stopped = true;
+    this.reset();
+    this.signal.removeEventListener("abort", this.onAbort);
+    for (const subscription of this.subscriptions) subscription?.dispose();
+  }
+};
 async function renewHostCredentials(management, activeHost, target, check, expectedEndpoint) {
   const current = await management.getTunnel({ tunnelId: target.id, clusterId: target.clusterId }, managementOptions(), cancellation.token);
   check();
@@ -39629,13 +39732,13 @@ async function startHost() {
   host.httpAgent = agent;
   const bridge = createPortBridge(ownedPort, active, aborter.signal, bridges);
   host.forwardedPortConnecting(bridge.handle);
-  host.connectionStatusChanged((event) => {
-    if (phase === "closing") return;
-    if (event.status === ConnectionStatus.Disconnected || phase === "running" && event.status !== ConnectionStatus.Connected) fail("disconnected");
-  });
-  host.retryingTunnelConnection((event) => {
-    event.retry = false;
-  });
+  relayRecovery = new RelayRecovery(
+    host,
+    () => phase === "running",
+    aborter.signal,
+    fail,
+    () => host.connect(host.tunnel, { enableRetry: false, enableReconnect: false, httpAgent: agent }, cancellation.token)
+  );
   await host.connect(tunnel, { enableRetry: false, enableReconnect: false, httpAgent: agent }, cancellation.token);
   live();
   if (host.connectionProtocol !== TunnelRelayTunnelHost.webSocketSubProtocol || host.connectionStatus !== ConnectionStatus.Connected) throw new Failure("host");
@@ -39652,6 +39755,7 @@ async function startHost() {
 function shutdown(exitCode) {
   if (shutdownTask) return shutdownTask;
   phase = "closing";
+  relayRecovery?.dispose();
   aborter.abort();
   cancellation.cancel();
   process.stdin.pause();
@@ -39660,6 +39764,7 @@ function shutdown(exitCode) {
   shutdownTask = (async () => {
     await currentOperation.catch(() => {
     });
+    await relayRecovery?.wait();
     disposingHost = true;
     try {
       if (host) await host.dispose();
@@ -39750,6 +39855,7 @@ if (require.main === module) {
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   PortHost,
+  RelayRecovery,
   createPortBridge,
   protocolFixture,
   renewHostCredentials,

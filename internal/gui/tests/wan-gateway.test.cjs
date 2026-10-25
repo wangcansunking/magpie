@@ -1100,3 +1100,21 @@ for (const engine of engines) for (const theme of ["light", "dark"]) {
     assert.deepEqual(errors,[]);
   });
 }
+
+
+for (const engine of engines) for (const lang of ['en','zh','zh-TW','ja','de']) {
+  test(engine+' '+lang+': WAN five-minute reconnect failure alerts once per failure', async t=>{
+    const {page,f,word,errors}=await open(t,engine,lang);
+    await page.evaluate(()=>{window.wanRecoveryNotices=[];const show=window.status;window.status=(...args)=>{wanRecoveryNotices.push(args);return show(...args)}});
+    const message='WAN could not reconnect for 5 minutes; check the network and start WAN again';
+    f.state.state='failed';f.state.error=message;
+    await page.evaluate(()=>pollWAN());
+    assert.equal(await page.locator('#wanState').textContent(),word('WAN failed'));
+    assert.deepEqual(await page.evaluate(()=>wanRecoveryNotices),[[word(message),'err']]);
+    await page.evaluate(()=>pollWAN());assert.equal(await page.evaluate(()=>wanRecoveryNotices.length),1);
+    f.state.state='running';f.state.error='';f.state.endpoint=endpoint;await page.evaluate(()=>pollWAN());
+    f.state.state='failed';f.state.error=message;await page.evaluate(()=>pollWAN());
+    assert.equal(await page.evaluate(()=>wanRecoveryNotices.length),2);
+    assert.deepEqual(errors,[]);
+  });
+}

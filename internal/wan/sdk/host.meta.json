@@ -4827,7 +4827,7 @@
       "format": "cjs"
     },
     "internal/wan/sdk/host.ts": {
-      "bytes": 30522,
+      "bytes": 35084,
       "imports": [
         {
           "path": "wan-dependency:node_modules/@microsoft/dev-tunnels-connections/index.js",
@@ -4878,6 +4878,11 @@
           "path": "wan-dependency:node_modules/@microsoft/dev-tunnels-ssh-tcp/index.js",
           "kind": "require-call",
           "original": "@microsoft/dev-tunnels-ssh-tcp"
+        },
+        {
+          "path": "wan-dependency:node_modules/@microsoft/dev-tunnels-ssh/index.js",
+          "kind": "require-call",
+          "original": "@microsoft/dev-tunnels-ssh"
         }
       ],
       "format": "esm"
@@ -6180,10 +6185,10 @@
           "bytesInOutput": 5843
         },
         "internal/wan/sdk/host.ts": {
-          "bytesInOutput": 24969
+          "bytesInOutput": 28586
         }
       },
-      "bytes": 1557777
+      "bytes": 1561411
     }
   }
 }

@@ -8,6 +8,18 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/services/notifications"
 )
 
+func TestWANRecoveryNoticeOpensWAN(t *testing.T) {
+	for _, goos := range []string{"windows", "darwin", "linux"} {
+		response := notifications.NotificationResponse{ID: wanNotice + "fixture", ActionIdentifier: linuxClick}
+		if got := notificationView(goos, response); got != "wan" {
+			t.Fatalf("%s WAN notice opens %q", goos, got)
+		}
+	}
+	if got := notificationView("linux", notifications.NotificationResponse{ID: wanNotice + "fixture", ActionIdentifier: notifications.DefaultActionIdentifier}); got != "" {
+		t.Fatal("dismissing a WAN alert opened a window")
+	}
+}
+
 // A Linux alert dismissed with its × opened the main window over the
 // desktop with the focus (#2513): Wails reports the dismissal as
 // DefaultActionIdentifier, so there only the click's own id opens Usage.

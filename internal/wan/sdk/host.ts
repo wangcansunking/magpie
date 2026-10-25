@@ -39,7 +39,7 @@ const generationPattern = /^[a-f0-9]{32}$/;
 const aborter = new AbortController();
 const cancellation = new CancellationTokenSource();
 
-type Code = 'auth' | 'forbidden' | 'not_found' | 'ports' | 'proxy' | 'disconnected' | 'prepare' | 'host' | 'protocol' | 'dispose' | 'bad_request' | 'conflict' | 'rate_limit' | 'service' | 'network' | 'tls' | 'timeout' | 'runtime' | 'create' | 'read' | 'update' | 'identity' | 'port_options' | 'host_token' | 'redirect';
+type Code = 'auth' | 'forbidden' | 'not_found' | 'ports' | 'proxy' | 'disconnected' | 'reconnect_timeout' | 'host_conflict' | 'prepare' | 'host' | 'protocol' | 'dispose' | 'bad_request' | 'conflict' | 'rate_limit' | 'service' | 'network' | 'tls' | 'timeout' | 'runtime' | 'create' | 'read' | 'update' | 'identity' | 'port_options' | 'host_token' | 'redirect';
 type Config = { version: 2; id: string; clusterId: string; port: number };
 type Phase = 'new' | 'preparing' | 'prepared' | 'hosting' | 'running' | 'closing';
 class Failure extends Error {
@@ -63,6 +63,7 @@ let shutdownTask: Promise<void> | undefined;
 let errorSent = false;
 let preparingOperation: Code = 'prepare';
 let disposingHost = false;
+let relayRecovery: RelayRecovery | undefined;
 const bridges = new Set<Duplex>();
 
 function object(value: unknown): value is Record<string, any> {
@@ -87,7 +88,7 @@ function emit(event: string, fields: Record<string, unknown> = {}): void {
 }
 function codeFor(error: unknown, fallback: Code): Code {
     if (error instanceof Failure) return error.code;
-    const status = (error as any)?.response?.status;
+    const status = (error as any)?.response?.status ?? (error as any)?.errorContext?.statusCode;
     if (status === 401) return 'auth';
     if (status === 403) return 'forbidden';
     if (status === 404) return 'not_found';
@@ -445,6 +446,84 @@ export function serviceAuthorization(provider: string, credential: string): stri
     return (provider === 'microsoft' ? 'Bearer ' : 'github ') + credential;
 }
 export const protocolFixture = { parseLine, endpoint, codeFor, serviceAuthorization };
+
+// Only the SDK's existing connection may recover. This never starts a helper,
+// creates a tunnel, changes identity, or survives parent cancellation. A brief
+// transport outage does not revoke the parent's still-bounded credential lease.
+export class RelayRecovery {
+    private timer: ReturnType<typeof setTimeout> | undefined;
+    private retryTimer: ReturnType<typeof setTimeout> | undefined;
+    private stopped = false;
+    private inFlight = false;
+    private until = 0;
+    private lastAttempt = -Infinity;
+    private pending: Promise<void> = Promise.resolve();
+    private readonly subscriptions: any[] = [];
+    constructor(private readonly relay: any, private readonly running: () => boolean,
+        private readonly signal: AbortSignal, private readonly failure: (code: Code) => void,
+        private readonly reconnect: () => Promise<void>, private readonly schedule = setTimeout,
+        private readonly cancelTimer = clearTimeout, private readonly now = () => performance.now()) {
+        this.subscriptions.push(relay.connectionStatusChanged((event: any) => {
+            if (this.stopped || signal.aborted) return;
+            if (event.status === ConnectionStatus.Connected) { this.reset(); return; }
+            if (event.status !== ConnectionStatus.Disconnected) return;
+            const code = this.category(relay.disconnectError);
+            if (!running() || !this.recoverable(code)) { this.terminate(code); return; }
+            this.begin(); this.queue();
+        }));
+        // One SDK connect call is one attempt. The owner controls both cadence
+        // and deadline, including SDK errors whose own retry loop ends early.
+        this.subscriptions.push(relay.retryingTunnelConnection((event: any) => { event.retry = false; }));
+        signal.addEventListener('abort', this.onAbort, { once: true });
+        if (signal.aborted) this.dispose();
+    }
+    private category(error: any): Code {
+        const reasons = require('@microsoft/dev-tunnels-ssh').SshDisconnectReason;
+        if (this.relay.disconnectReason === reasons.tooManyConnections) return 'host_conflict';
+        return codeFor(error, error?.reason === reasons.connectionLost || this.relay.disconnectReason === reasons.connectionLost ? 'network' : 'disconnected');
+    }
+    private recoverable(code: Code): boolean { return ['network', 'timeout', 'service'].includes(code); }
+    private begin(): void {
+        if (this.timer !== undefined) return;
+        this.until = this.now() + 300000;
+        this.timer = this.schedule(() => {
+            if (!this.stopped && !this.signal.aborted) this.terminate('reconnect_timeout');
+        }, 300000);
+    }
+    private queue(): void {
+        if (this.stopped || this.signal.aborted || this.inFlight || this.retryTimer !== undefined) return;
+        this.retryTimer = this.schedule(() => {
+            this.retryTimer = undefined;
+            if (this.stopped || this.signal.aborted || !this.running()) return;
+            if (this.now() >= this.until) { this.terminate('reconnect_timeout'); return; }
+            this.lastAttempt = this.now(); this.inFlight = true;
+            this.pending = Promise.resolve().then(() => {
+                if (!this.stopped && !this.signal.aborted && this.running()) return this.reconnect();
+            }).catch(error => {
+                if (this.stopped || this.signal.aborted) return;
+                const code = this.category(error);
+                if (!this.recoverable(code)) this.terminate(code);
+            }).finally(() => {
+                this.inFlight = false;
+                if (!this.stopped && !this.signal.aborted && this.timer !== undefined) this.queue();
+            });
+        }, Math.max(0, 20000 - (this.now() - this.lastAttempt)));
+    }
+    private readonly onAbort = () => this.dispose();
+    private reset(): void {
+        if (this.timer !== undefined) this.cancelTimer(this.timer);
+        if (this.retryTimer !== undefined) this.cancelTimer(this.retryTimer);
+        this.timer = undefined; this.retryTimer = undefined; this.until = 0; this.lastAttempt = -Infinity;
+    }
+    private terminate(code: Code): void { this.dispose(); this.failure(code); }
+    wait(): Promise<void> { return this.pending; }
+    dispose(): void {
+        if (this.stopped) return;
+        this.stopped = true; this.reset();
+        this.signal.removeEventListener('abort', this.onAbort);
+        for (const subscription of this.subscriptions) subscription?.dispose();
+    }
+}
 // Replacing metadata updates the SDK's host access token without reconnecting
 // existing streams. Revalidate the same boundary as initial preparation.
 export async function renewHostCredentials(management: any, activeHost: any, target: Config, check: () => void, expectedEndpoint: string): Promise<Tunnel> {
@@ -487,11 +566,8 @@ async function startHost(): Promise<void> {
     host.httpAgent = agent;
     const bridge = createPortBridge(ownedPort, active, aborter.signal, bridges);
     host.forwardedPortConnecting(bridge.handle);
-    host.connectionStatusChanged((event: any) => {
-        if (phase === 'closing') return;
-        if (event.status === ConnectionStatus.Disconnected || (phase === 'running' && event.status !== ConnectionStatus.Connected)) fail('disconnected');
-    });
-    host.retryingTunnelConnection((event: any) => { event.retry = false; });
+    relayRecovery = new RelayRecovery(host, () => phase === 'running', aborter.signal, fail,
+        () => host.connect(host.tunnel, { enableRetry: false, enableReconnect: false, httpAgent: agent }, cancellation.token));
     await host.connect(tunnel, { enableRetry: false, enableReconnect: false, httpAgent: agent }, cancellation.token);
     live();
     if (host.connectionProtocol !== TunnelRelayTunnelHost.webSocketSubProtocol || host.connectionStatus !== ConnectionStatus.Connected) throw new Failure('host');
@@ -509,6 +585,7 @@ async function startHost(): Promise<void> {
 function shutdown(exitCode: number): Promise<void> {
     if (shutdownTask) return shutdownTask;
     phase = 'closing';
+    relayRecovery?.dispose();
     aborter.abort();
     cancellation.cancel();
     process.stdin.pause();
@@ -519,6 +596,7 @@ function shutdown(exitCode: number): Promise<void> {
         // cannot create an endpoint after dispose. The parent bounds this join
         // with proc.Tree.Stop and retains the loopback socket until Wait returns.
         await currentOperation.catch(() => {});
+        await relayRecovery?.wait();
         disposingHost = true;
         try { if (host) await host.dispose(); } catch { exitCode = 1; }
         disposingHost = false;

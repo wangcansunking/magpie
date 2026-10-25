@@ -662,3 +662,12 @@ still follows the existing Not set up folding rules. The dialog explains that
 restoring visibility does not pin an unconfigured agent into the main list.
 See `agent-bulk-visibility.test.cjs` for persistence, partial selection, failed
 saves, narrow layouts and all five languages in Chromium and WebKit.
+
+## WAN recovery notifications
+
+The desktop notifier also observes cached WAN owner status. A five-minute
+[WAN recovery](wan-gateway.md#relay-transport-recovery) exhaustion sends one
+localized system notification per failure; a click opens WAN rather than Usage.
+Closing or hiding the WAN page does not stop this observer. It ends with the
+backend context. The page independently gives a persistent error and one notice
+per observed failure. No notification implies permission to restart a tunnel.
