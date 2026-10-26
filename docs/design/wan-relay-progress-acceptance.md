@@ -49,3 +49,15 @@ wan-recovery-five-minute-final-race-20261026-progress,
 wan-recovery-vet-*-20261026-progress and bun-fixtures-progress-*-20261026.
 The initial unprivileged SDK run could not use sandboxed loopback sockets;
 rerunning with loopback permission passed all 17 tests.
+
+
+## Windows artifact
+
+Source commit: 90998f2c74b02f8926b0867c3ebd69d4d130cf28.
+Output: dist/relay-progress/magpie.exe (59,459,584 bytes).
+Embedded version: magpie wan-gateway-90998f2c.
+Windows x64 PE, GUI subsystem, resources and isolated --version checks passed.
+SHA-256: 45461079eab67142c85dc46536da024ee99d95fa6af249f6fa8ad7eaefc1012b.
+Build evidence: wan-relay-progress-exe-20261026/build-status.json.
+The existing desktop process was left untouched; exit it before running this
+separate new executable.
