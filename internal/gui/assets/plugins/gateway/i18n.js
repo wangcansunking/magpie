@@ -1,5 +1,12 @@
 magpie.strings({
   zh: {
+    "Reconnecting WAN…": "正在重连 WAN…",
+    "Connection interrupted. Retrying automatically for up to 5 minutes.": "连接已中断，正在自动重试，最长持续 5 分钟。",
+    "Attempts started: {count}": "已尝试 {count} 次",
+    "Reconnecting now…": "正在尝试重连…",
+    "Next retry in {seconds}s": "{seconds} 秒后重试",
+    "Waiting for retry status…": "正在等待重试状态…",
+
     "Opening the system browser…": "正在打开系统浏览器…",
     "Complete Microsoft sign-in in your system browser": "请在系统浏览器完成 Microsoft 登录",
     "Continue in your system browser. Return here after Microsoft authorizes this computer.": "请在系统浏览器继续授权，完成后返回此页面。",
@@ -151,6 +158,13 @@ magpie.strings({
     "Disabling, rotating or removing a key takes effect on the next request. Streams already started may finish. Stop ends WAN access and its active requests.": "停用、轮换或删除密钥从下一次请求起生效。已开始的流可能继续完成。停止 WAN 会关闭访问并结束正在处理的请求。"
   },
   "zh-TW": {
+    "Reconnecting WAN…": "正在重新連線 WAN…",
+    "Connection interrupted. Retrying automatically for up to 5 minutes.": "連線已中斷，正在自動重試，最長持續 5 分鐘。",
+    "Attempts started: {count}": "已嘗試 {count} 次",
+    "Reconnecting now…": "正在嘗試重新連線…",
+    "Next retry in {seconds}s": "{seconds} 秒後重試",
+    "Waiting for retry status…": "正在等待重試狀態…",
+
     "Opening the system browser…": "正在開啟系統瀏覽器…",
     "Complete Microsoft sign-in in your system browser": "請在系統瀏覽器完成 Microsoft 登入",
     "Continue in your system browser. Return here after Microsoft authorizes this computer.": "請在系統瀏覽器繼續授權，完成後返回此頁面。",
@@ -302,6 +316,13 @@ magpie.strings({
     "Disabling, rotating or removing a key takes effect on the next request. Streams already started may finish. Stop ends WAN access and its active requests.": "停用、輪替或刪除金鑰從下一次請求起生效。已開始的串流可能繼續完成。停止 WAN 會關閉存取並結束正在處理的請求。"
   },
   ja: {
+    "Reconnecting WAN…": "WAN に再接続中…",
+    "Connection interrupted. Retrying automatically for up to 5 minutes.": "接続が中断されました。最大 5 分間、自動で再試行します。",
+    "Attempts started: {count}": "試行回数: {count}",
+    "Reconnecting now…": "再接続を試行中…",
+    "Next retry in {seconds}s": "{seconds} 秒後に再試行",
+    "Waiting for retry status…": "再試行の状態を確認中…",
+
     "Opening the system browser…": "システムブラウザーを開いています…",
     "Complete Microsoft sign-in in your system browser": "システムブラウザーで Microsoft のログインを完了してください",
     "Continue in your system browser. Return here after Microsoft authorizes this computer.": "システムブラウザーで認証を続け、完了したらこの画面に戻ってください。",
@@ -453,6 +474,13 @@ magpie.strings({
     "Disabling, rotating or removing a key takes effect on the next request. Streams already started may finish. Stop ends WAN access and its active requests.": "キーの無効化・更新・削除は次のリクエストから有効です。開始済みのストリームは完了する場合があります。WAN を停止するとアクセスと処理中のリクエストを終了します。"
   },
   de: {
+    "Reconnecting WAN…": "WAN wird erneut verbunden…",
+    "Connection interrupted. Retrying automatically for up to 5 minutes.": "Verbindung unterbrochen. Automatische Wiederholung für bis zu 5 Minuten.",
+    "Attempts started: {count}": "Gestartete Versuche: {count}",
+    "Reconnecting now…": "Verbindung wird wiederhergestellt…",
+    "Next retry in {seconds}s": "Nächster Versuch in {seconds} s",
+    "Waiting for retry status…": "Warten auf den Wiederholungsstatus…",
+
     "Opening the system browser…": "Systembrowser wird geöffnet…",
     "Complete Microsoft sign-in in your system browser": "Microsoft-Anmeldung im Systembrowser abschließen",
     "Continue in your system browser. Return here after Microsoft authorizes this computer.": "Im Systembrowser fortfahren. Nach der Microsoft-Autorisierung hierher zurückkehren.",

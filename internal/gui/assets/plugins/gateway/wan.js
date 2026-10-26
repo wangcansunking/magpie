@@ -3,6 +3,7 @@
 function registerWANPage(ctx) {
   let page, snapshot = null, fresh = false, busy = "", draft = null, suspended = false, remember = false;
   let generation = 0, actionID = 0, visibilityID = 0, statusVersion = 0, read = null, timer = null, cleanup = null, keysDrawn = "", problem = "";
+  let recoveryTimer = null, retryDue = 0;
   let client = "claude", platform = /Win/i.test(navigator.platform) ? "powershell" : "bash", model = "";
   let modelChoices = "";
 
@@ -24,10 +25,11 @@ function registerWANPage(ctx) {
     signing_out: "Signing out of GitHub for WAN…", unknown: "WAN sign-in status unavailable",
   };
   const states = {
-    stopped: "WAN stopped", starting: "Starting WAN Gateway…", running: "WAN running",
+    stopped: "WAN stopped", starting: "Starting WAN Gateway…", running: "WAN running", reconnecting: "Reconnecting WAN…",
     stopping: "Stopping WAN Gateway…", failed: "WAN failed", unknown: "WAN status unavailable",
   };
   function cancelRead() {
+    clearTimeout(recoveryTimer); recoveryTimer = null;
     generation++;
     read?.abort(); read = null;
     clearTimeout(timer); timer = null;
@@ -43,6 +45,8 @@ function registerWANPage(ctx) {
     const recoveryFailed = masked.state === "failed" && masked.error === "WAN could not reconnect for 5 minutes; check the network and start WAN again";
     if (recoveryFailed && (snapshot?.state !== "failed" || snapshot.error !== masked.error)) status(t(masked.error), "err");
     snapshot = masked; statusVersion++;
+    const recovery = masked.recovery;
+    retryDue = performance.now() + Math.max(0, Date.parse(recovery?.nextRetryAt) - Date.parse(recovery?.serverTime) || 0);
     fresh = true; problem = "";
   }
   async function refresh() {
@@ -136,7 +140,7 @@ function registerWANPage(ctx) {
     // Availability is cached: an external runtime installation can make it
     // stale. Start rechecks locally without downloading; only Install downloads.
     $("#wanStart").disabled = !canChange() || quotaExceeded() || !!snapshot?.keysError || auth?.state !== "signed_in" || !["stopped", "failed"].includes(state);
-    $("#wanStop").disabled = !(canChange() || (fresh && busy === "start" && snapshot?.controllable)) || !["running", "starting"].includes(state);
+    $("#wanStop").disabled = !(canChange() || (fresh && busy === "start" && snapshot?.controllable)) || !["running", "reconnecting", "starting"].includes(state);
     $("#wanInstall").disabled = !canChange() || snapshot.runtimeAvailable || !["stopped", "failed"].includes(state);
     $("#wanLogin").disabled = !canChange() || !["signed_out", "expired", "error"].includes(auth?.state) || !["stopped", "failed"].includes(state);
     $("#wanRemember").disabled = $("#wanMemory").disabled = $("#wanLogin").disabled || !auth?.storageAvailable;
@@ -319,10 +323,11 @@ function registerWANPage(ctx) {
     $("#wanStateDot").classList.toggle("on", current === "running");
     $("#wanStatus").dataset.state = current;
     $("#wanStatus").closest(".wan-status-card").dataset.quota = String(quotaExceeded());
-    $("#wanStart").hidden = ["running", "starting", "stopping"].includes(current);
-    $("#wanStop").hidden = !["running", "starting", "stopping"].includes(current);
+    $("#wanStart").hidden = ["running", "reconnecting", "starting", "stopping"].includes(current);
+    $("#wanStop").hidden = !["running", "reconnecting", "starting", "stopping"].includes(current);
     const note = quotaExceeded() ? "Public requests are blocked by Microsoft. Your provider sign-in is unaffected."
       : current === "failed" ? "WAN is offline. Review the error before starting again."
+      : current === "reconnecting" ? "Connection interrupted. Retrying automatically for up to 5 minutes."
       : current === "starting" ? "Connecting to Microsoft Dev Tunnels…"
       : current === "stopping" ? "Closing the public connection…"
       : current === "running" ? "Public access is enabled. Requests require a WAN key."
@@ -334,7 +339,19 @@ function registerWANPage(ctx) {
     $("#wanProblem").hidden = !$("#wanProblem").textContent || !problem && quotaExceeded() && /429|bandwidth is exhausted/i.test(snapshot?.error || "");
     $("#wanStatusReset").hidden = !quotaExceeded();
     $("#wanStatusReset").textContent = quotaExceeded() ? t("Resets {time}", { time: dateText(snapshot.usage.resetAt) || t("Not reported") }) : "";
+    renderRecovery();
     $("#wanOwnerNote").hidden = !snapshot || !!snapshot.controllable;
+  }
+  function renderRecovery() {
+    clearTimeout(recoveryTimer); recoveryTimer = null;
+    const box = $("#wanRecovery"), progress = snapshot?.recovery;
+    box.hidden = !fresh || snapshot?.state !== "reconnecting" || !progress;
+    if (box.hidden) return;
+    $("#wanRecoveryAttempts").textContent = t("Attempts started: {count}", { count: progress.attempts });
+    const seconds = Math.max(0, Math.ceil((retryDue - performance.now()) / 1000));
+    $("#wanRecoveryNext").textContent = progress.retrying ? t("Reconnecting now…")
+      : seconds ? t("Next retry in {seconds}s", { seconds }) : t("Waiting for retry status…");
+    if (visible() && !progress.retrying && seconds > 0) recoveryTimer = setTimeout(renderRecovery, 1000);
   }
   function keyForm() {
     const box = el("div", "acc adding"), fields = el("div", "kf"), bar = el("div", "kb");
@@ -432,13 +449,13 @@ function registerWANPage(ctx) {
     $("#wanExamplePlatform").setAttribute("aria-label", t("WAN example platform"));
     $("#wanModelHelp").textContent = t(modelsProblem ? "Unable to load WAN models. Other WAN controls remain available."
       : !modelCatalog ? "Loading WAN models…" : choices.length ? "Use a WAN key below with a model from your signed-in providers." : "No WAN models are available. Add a provider or sign in to a subscription in Providers.");
-    const endpoint = fresh && snapshot?.state === "running" ? snapshot.endpoint : "https://YOUR_WAN_ENDPOINT";
+    const endpoint = fresh && ["running", "reconnecting"].includes(snapshot?.state) ? snapshot.endpoint : "https://YOUR_WAN_ENDPOINT";
     const base = client === "openai" ? endpoint + "/v1" : endpoint;
     const box = $("#wanEndpoint");
     if (box.dataset.client !== client || box.dataset.base !== base || box.dataset.locale !== locale) {
       box.dataset.client = client; box.dataset.base = base; box.dataset.locale = locale;
-      box.replaceChildren(el("code", "", fresh && snapshot?.state === "running" ? base : t("Available after WAN Gateway starts")));
-      if (fresh && snapshot?.state === "running") {
+      box.replaceChildren(el("code", "", fresh && ["running", "reconnecting"].includes(snapshot?.state) ? base : t("Available after WAN Gateway starts")));
+      if (fresh && ["running", "reconnecting"].includes(snapshot?.state)) {
         const copyAddress = copyBtn(base, t("WAN client address"));
         copyAddress.append(el("span", "", t("Copy WAN address")));
         box.append(copyAddress);
@@ -465,7 +482,7 @@ function registerWANPage(ctx) {
 <header class="wan-page-heading"><h1 data-t>WAN Gateway</h1><p class="usage-note wan-intro" data-t>Let remote clients use your models.</p></header>
 <section id="wanRuntimeDetails" class="wan-runtime-details" role="alert" hidden><div class="wan-runtime-status"><span class="wan-runtime-dot" aria-hidden="true"></span><span id="wanRuntimeState"></span></div><div class="row" id="wanInstallRow"><button class="text primary" id="wanInstall" data-t disabled>Install WAN runtime</button></div><p class="usage-note" id="wanRuntimeHelp" data-t>WAN runtime is required before starting. Install it once on this computer.</p></section>
 <section class="list gwcard wan-status-card">
-  <div class="row gw" id="wanStatus" role="status"><span class="dot" id="wanStateDot" aria-hidden="true"></span><div class="who"><div class="name" id="wanState" data-t>WAN status unavailable</div><div class="usage-note" id="wanStatusHelp"></div></div><span class="usage-note" id="wanStatusReset" hidden></span><button class="text primary" id="wanStart" data-t disabled>Start</button><button class="text" id="wanStop" data-t disabled>Stop</button></div>
+  <div class="row gw" id="wanStatus" role="status"><span class="dot" id="wanStateDot" aria-hidden="true"></span><div class="who"><div class="name" id="wanState" data-t>WAN status unavailable</div><div class="usage-note" id="wanStatusHelp"></div></div><div class="wan-recovery" id="wanRecovery" hidden><span id="wanRecoveryAttempts"></span><span id="wanRecoveryNext" role="timer" aria-live="off"></span></div><span class="usage-note" id="wanStatusReset" hidden></span><button class="text primary" id="wanStart" data-t disabled>Start</button><button class="text" id="wanStop" data-t disabled>Stop</button></div>
 </section>
 <p class="usage-note" id="wanOwnerNote" hidden data-t>This window does not own the gateway. WAN controls are unavailable.</p>
 <p class="usage-note warn" id="wanProblem" role="alert" hidden></p>

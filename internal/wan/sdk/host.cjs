@@ -39594,7 +39594,8 @@ function serviceAuthorization(provider, credential) {
 }
 var protocolFixture = { parseLine, endpoint, codeFor, serviceAuthorization };
 var RelayRecovery = class {
-  constructor(relay, running, signal, failure, reconnect, schedule = setTimeout, cancelTimer = clearTimeout, now = () => performance.now()) {
+  constructor(relay, running, signal, failure, reconnect, schedule = setTimeout, cancelTimer = clearTimeout, now = () => performance.now(), progress = () => {
+  }) {
     this.relay = relay;
     this.running = running;
     this.signal = signal;
@@ -39603,10 +39604,13 @@ var RelayRecovery = class {
     this.schedule = schedule;
     this.cancelTimer = cancelTimer;
     this.now = now;
+    this.progress = progress;
     this.subscriptions.push(relay.connectionStatusChanged((event) => {
       if (this.stopped || signal.aborted) return;
       if (event.status === ConnectionStatus.Connected) {
+        const recovering = this.timer !== void 0;
         this.reset();
+        if (recovering) this.progress(null);
         return;
       }
       if (event.status !== ConnectionStatus.Disconnected) return;
@@ -39630,6 +39634,7 @@ var RelayRecovery = class {
   inFlight = false;
   until = 0;
   lastAttempt = -Infinity;
+  attempts = 0;
   pending = Promise.resolve();
   subscriptions = [];
   category(error) {
@@ -39649,6 +39654,8 @@ var RelayRecovery = class {
   }
   queue() {
     if (this.stopped || this.signal.aborted || this.inFlight || this.retryTimer !== void 0) return;
+    const delay = Math.max(0, 2e4 - (this.now() - this.lastAttempt));
+    this.progress({ attempts: this.attempts, retryInMs: delay, retrying: false });
     this.retryTimer = this.schedule(() => {
       this.retryTimer = void 0;
       if (this.stopped || this.signal.aborted || !this.running()) return;
@@ -39658,6 +39665,8 @@ var RelayRecovery = class {
       }
       this.lastAttempt = this.now();
       this.inFlight = true;
+      this.attempts++;
+      this.progress({ attempts: this.attempts, retryInMs: 0, retrying: true });
       this.pending = Promise.resolve().then(() => {
         if (!this.stopped && !this.signal.aborted && this.running()) return this.reconnect();
       }).catch((error) => {
@@ -39668,7 +39677,7 @@ var RelayRecovery = class {
         this.inFlight = false;
         if (!this.stopped && !this.signal.aborted && this.timer !== void 0) this.queue();
       });
-    }, Math.max(0, 2e4 - (this.now() - this.lastAttempt)));
+    }, delay);
   }
   onAbort = () => this.dispose();
   reset() {
@@ -39678,6 +39687,7 @@ var RelayRecovery = class {
     this.retryTimer = void 0;
     this.until = 0;
     this.lastAttempt = -Infinity;
+    this.attempts = 0;
   }
   terminate(code) {
     this.dispose();
@@ -39737,7 +39747,11 @@ async function startHost() {
     () => phase === "running",
     aborter.signal,
     fail,
-    () => host.connect(host.tunnel, { enableRetry: false, enableReconnect: false, httpAgent: agent }, cancellation.token)
+    () => host.connect(host.tunnel, { enableRetry: false, enableReconnect: false, httpAgent: agent }, cancellation.token),
+    setTimeout,
+    clearTimeout,
+    () => performance.now(),
+    (progress) => progress ? emit("recovery", progress) : emit("recovered")
   );
   await host.connect(tunnel, { enableRetry: false, enableReconnect: false, httpAgent: agent }, cancellation.token);
   live();

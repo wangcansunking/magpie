@@ -48,6 +48,9 @@ type sdkEvent struct {
 	Endpoint   string        `json:"endpoint,omitempty"`
 	Code       string        `json:"code,omitempty"`
 	Revision   uint64        `json:"revision,omitempty"`
+	Attempts   int           `json:"attempts,omitempty"`
+	RetryInMS  int           `json:"retryInMs,omitempty"`
+	Retrying   bool          `json:"retrying,omitempty"`
 }
 
 // availableRuntime never installs a runtime. InstallRuntime is the only WAN
@@ -88,7 +91,7 @@ type sdkProcess struct {
 	folder   string
 }
 
-func startSDK(ctx context.Context, tool string, command func(string, ...string) *exec.Cmd, startTree func(*exec.Cmd) (sdkTree, error), generation string, config tunnelConfig, revoke func()) (*sdkProcess, error) {
+func startSDK(ctx context.Context, tool string, command func(string, ...string) *exec.Cmd, startTree func(*exec.Cmd) (sdkTree, error), generation string, config tunnelConfig, revoke func(), recoveryChanged func(*RecoveryStatus)) (*sdkProcess, error) {
 	if ctx.Err() != nil {
 		return nil, errors.New("WAN gateway startup was canceled")
 	}
@@ -112,6 +115,7 @@ func startSDK(ctx context.Context, tool string, command func(string, ...string) 
 	}
 	p := &sdkProcess{done: make(chan struct{}), folder: folder}
 	p.output = &sdkOutput{generation: generation, expected: config, prepared: make(chan sdkEvent, 1), ready: make(chan string, 1), bad: make(chan struct{}), revoke: revoke}
+	p.output.recoveryChanged = recoveryChanged
 	cmd := command(tool, "--no-env-file", script)
 	cmd.Dir = folder
 	cmd.Env = sdkEnvironment()
@@ -241,6 +245,8 @@ type sdkOutput struct {
 	ready           chan string
 	bad             chan struct{}
 	revoke          func()
+	recovery        *RecoveryStatus
+	recoveryChanged func(*RecoveryStatus)
 }
 
 func (o *sdkOutput) closeAdmission() {
@@ -338,6 +344,9 @@ func (o *sdkOutput) Write(p []byte) (int, error) {
 		if ready != "" {
 			o.ready <- ready
 		}
+		if o.recoveryChanged != nil {
+			o.recoveryChanged(o.recovery)
+		}
 		if refreshed {
 			o.refreshed <- struct{}{}
 		}
@@ -385,6 +394,22 @@ func (o *sdkOutput) consume(line []byte) (sdkEvent, error) {
 			return event, bad
 		}
 		o.ackRevision, o.pendingRevision = event.Revision, 0
+	case "recovery":
+		if o.phase != 3 || event.Attempts < 0 || event.Attempts > 15 || event.RetryInMS < 0 || event.RetryInMS > 20000 || (event.Retrying && (event.Attempts == 0 || event.RetryInMS != 0)) {
+			return event, bad
+		}
+		if o.recovery != nil && (event.Attempts < o.recovery.Attempts || event.Attempts > o.recovery.Attempts+1) {
+			return event, bad
+		}
+		if o.recovery == nil && event.Attempts != 0 {
+			return event, bad
+		}
+		o.recovery = &RecoveryStatus{Attempts: event.Attempts, Retrying: event.Retrying, NextRetryAt: time.Now().Add(time.Duration(event.RetryInMS) * time.Millisecond)}
+	case "recovered":
+		if o.phase != 3 || o.recovery == nil {
+			return event, bad
+		}
+		o.recovery = nil
 	case "disconnected", "error":
 		if event.Config != nil || event.Endpoint != "" {
 			return event, bad
@@ -419,6 +444,12 @@ func validEventFields(data []byte, event string) bool {
 		allowed["endpoint"] = true
 	case "credentials":
 		allowed["revision"] = true
+	case "recovery":
+		if len(fields) != 6 || bytes.Equal(fields["attempts"], []byte("null")) || bytes.Equal(fields["retryInMs"], []byte("null")) || bytes.Equal(fields["retrying"], []byte("null")) {
+			return false
+		}
+		allowed["attempts"], allowed["retryInMs"], allowed["retrying"] = true, true, true
+	case "recovered":
 	case "error", "disconnected":
 		allowed["code"] = true
 	default:

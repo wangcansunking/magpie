@@ -33,15 +33,25 @@ import (
 // by the official dev tunnels SDK. It is not a subscription provider's OAuth app.
 const DefaultGitHubClientID = "Iv1.e7b89e013f801f03"
 
-// Status is a cached, credential-free snapshot. Endpoint exists only while running.
+// RecoveryStatus describes actual helper attempts. NextRetryAt is used only
+// while waiting; ServerTime lets remote pages display a clock-skew-free countdown.
+type RecoveryStatus struct {
+	Attempts    int       `json:"attempts"`
+	Retrying    bool      `json:"retrying"`
+	NextRetryAt time.Time `json:"nextRetryAt"`
+	ServerTime  time.Time `json:"serverTime"`
+}
+
+// Status is a cached, credential-free snapshot. Endpoint exists while running or reconnecting.
 type Status struct {
-	State            string      `json:"state"`
-	Endpoint         string      `json:"endpoint"`
-	Error            string      `json:"error"`
-	RuntimeAvailable bool        `json:"runtimeAvailable"`
-	Auth             AuthStatus  `json:"auth"`
-	Usage            Usage       `json:"usage"`
-	Tunnel           *TunnelInfo `json:"tunnel,omitempty"`
+	State            string          `json:"state"`
+	Recovery         *RecoveryStatus `json:"recovery,omitempty"`
+	Endpoint         string          `json:"endpoint"`
+	Error            string          `json:"error"`
+	RuntimeAvailable bool            `json:"runtimeAvailable"`
+	Auth             AuthStatus      `json:"auth"`
+	Usage            Usage           `json:"usage"`
+	Tunnel           *TunnelInfo     `json:"tunnel,omitempty"`
 }
 
 // Manager is inert until the actual gateway attaches its lifetime with Own.
@@ -82,6 +92,7 @@ type hosting struct {
 	cancel         context.CancelFunc
 	requests       context.Context
 	cancelRequests context.CancelFunc
+	recovery       atomic.Pointer[RecoveryStatus]
 	admitted       atomic.Bool
 	done           chan struct{}
 	ready          chan struct{}
@@ -233,6 +244,13 @@ func (m *Manager) Close() {
 func (m *Manager) Status() Status {
 	m.mu.Lock()
 	status, a := m.status, m.auth
+	if m.current != nil && status.State == "running" {
+		if progress := m.current.recovery.Load(); progress != nil {
+			copy := *progress
+			copy.ServerTime = time.Now()
+			status.State, status.Recovery = "reconnecting", &copy
+		}
+	}
 	if status.Tunnel != nil {
 		copy := *status.Tunnel
 		status.Tunnel = &copy
@@ -593,7 +611,7 @@ func (m *Manager) run(r *hosting) {
 		failure = errors.New("WAN proxy configuration is unavailable")
 		return
 	}
-	child, err = startSDK(startup, tool, m.command, m.startTree, hex.EncodeToString(generation[:]), wireConfig, r.revoke)
+	child, err = startSDK(startup, tool, m.command, m.startTree, hex.EncodeToString(generation[:]), wireConfig, r.revoke, r.recovery.Store)
 	if err != nil {
 		failure = err
 		return

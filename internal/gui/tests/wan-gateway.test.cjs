@@ -1118,3 +1118,39 @@ for (const engine of engines) for (const lang of ['en','zh','zh-TW','ja','de']) 
     assert.deepEqual(errors,[]);
   });
 }
+
+
+for (const engine of engines) for (const lang of ['en','zh','zh-TW','ja','de']) {
+  test(engine+' '+lang+': WAN reconnect progress counts actual attempts and counts down locally', async t=>{
+    const {page,f,word,events,errors}=await open(t,engine,lang);
+    // The browser and backend clocks deliberately differ by decades.
+    const server=new Date('2050-01-01T00:00:00Z');
+    f.state.state='reconnecting';f.state.endpoint=endpoint;
+    f.state.recovery={attempts:4,retrying:false,serverTime:server.toISOString(),nextRetryAt:new Date(+server+20000).toISOString()};
+    await page.evaluate(()=>pollWAN());
+    assert.equal(await page.locator('#wanState').textContent(),word('Reconnecting WAN…'));
+    assert.equal(await page.locator('#wanRecoveryAttempts').textContent(),word('Attempts started: {count}').replace('{count}','4'));
+    assert.equal(await page.locator('#wanRecoveryNext').textContent(),word('Next retry in {seconds}s').replace('{seconds}','20'));
+    assert.equal(await page.locator('#wanStateDot').evaluate(e=>e.classList.contains('on')),false);
+    assert.equal(await page.locator('#wanStop').isEnabled(),true);
+    assert.equal(await page.locator('#wanStart').isVisible(),false);
+    const reads=events.filter(e=>e.action==='wan:read').length;
+    await page.waitForFunction(text=>document.querySelector('#wanRecoveryNext').textContent!==text,word('Next retry in {seconds}s').replace('{seconds}','20'));
+    assert.equal(events.filter(e=>e.action==='wan:read').length,reads,'countdown does not poll or start WAN');
+    assert.equal(await page.locator('#wanRecoveryAttempts').textContent(),word('Attempts started: {count}').replace('{count}','4'));
+    f.state.recovery={...f.state.recovery,attempts:5,retrying:true};await page.evaluate(()=>pollWAN());
+    assert.equal(await page.locator('#wanRecoveryNext').textContent(),word('Reconnecting now…'));
+    assert.equal(await page.locator('#wanRecoveryAttempts').textContent(),word('Attempts started: {count}').replace('{count}','5'));
+    f.state.recovery={...f.state.recovery,retrying:false,nextRetryAt:server.toISOString()};await page.evaluate(()=>pollWAN());
+    assert.equal(await page.locator('#wanRecoveryNext').textContent(),word('Waiting for retry status…'));
+    f.state.state='running';delete f.state.recovery;await page.evaluate(()=>pollWAN());
+    assert.equal(await page.locator('#wanRecovery').isVisible(),false);
+    assert.equal(await page.locator('#wanState').textContent(),word('WAN running'));
+    assert.equal(await page.locator('#wanStateDot').evaluate(e=>e.classList.contains('on')),true);
+    f.state.state='failed';f.state.error='WAN could not reconnect for 5 minutes; check the network and start WAN again';await page.evaluate(()=>pollWAN());
+    assert.equal(await page.locator('#wanRecovery').isVisible(),false);
+    assert.equal(await page.locator('#wanStart').isEnabled(),true);
+    assert.equal(events.some(e=>e.action==='wan:start'),false);
+    assert.deepEqual(errors,[]);
+  });
+}

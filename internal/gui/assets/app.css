@@ -4526,3 +4526,9 @@ body .row.agent .ag-prefs .row.pref .who { display: block; }
 @media(max-width:900px) { #view-wan .wan-overview { grid-template-columns:minmax(0,1fr); } #view-wan .wan-tunnel-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } #view-wan .wan-tunnel-grid > div + div { border-left:0; padding-left:0; } #view-wan .wan-overview > .wan-quota-card { order:0; } #view-wan .wan-overview > .wan-session-card { order:1; } }
 @media(max-width:600px) { #view-wan button.text { min-height:44px; } #view-wan .wan-page-heading h1 { font-size:25px; } #view-wan .wan-session-card, #view-wan .wan-quota-card, #view-wan .wan-tunnel-card, #view-wan .wan-client-card, #view-wan .wan-keys-card { padding:16px; } #view-wan .row-head { flex-wrap:wrap; gap:8px; } #view-wan .wan-runtime-details { grid-template-columns:minmax(0,1fr); padding:16px; } #view-wan #wanInstallRow { grid-column:1; grid-row:3; } #view-wan .wan-session-meta > div, #view-wan .wan-auth-summary > div { grid-template-columns:minmax(0,1fr); } }
 @media(max-width:600px) { #view-wan #wanConnect button.copy, #view-wan .wan-key-actions button.copy { min-height:44px; } }
+
+/* Relay recovery keeps Stop available and distinguishes the outage from running. */
+#view-wan #wanStatus[data-state="reconnecting"] .dot { background: var(--amber); }
+#view-wan .wan-recovery { display: flex; flex-wrap: wrap; gap: 8px 16px; color: var(--amber); font-variant-numeric: tabular-nums; }
+#view-wan .wan-recovery[hidden] { display: none; }
+#view-wan .wan-recovery span { padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; }

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func testSDKOutput() *sdkOutput {
@@ -164,5 +165,86 @@ func TestSDKCannotAdoptDifferentSavedCanonicalIdentity(t *testing.T) {
 		if out.failure() == nil {
 			t.Fatal("adopted a different canonical tunnel")
 		}
+	}
+}
+
+func TestSDKRecoveryProgressProjectsStatusWithoutRevoking(t *testing.T) {
+	out := testSDKOutput()
+	out.phase = 3
+	r := &hosting{}
+	r.admitted.Store(true)
+	out.revoke = r.revoke
+	out.recoveryChanged = r.recovery.Store
+	m := &Manager{status: Status{State: "running", Endpoint: preparedEvent().Endpoint}, current: r}
+	send := func(fields string) {
+		out.Write([]byte(`{"version":1,"generation":"` + out.generation + `",` + fields + "\n"))
+	}
+	send(`"event":"recovery","attempts":0,"retryInMs":0,"retrying":false}`)
+	if s := m.Status(); s.State != "reconnecting" || s.Recovery == nil || s.Recovery.Attempts != 0 || s.Endpoint == "" {
+		t.Fatalf("missing reconnect status: %+v", s)
+	}
+	send(`"event":"recovery","attempts":1,"retryInMs":0,"retrying":true}`)
+	if s := m.Status(); !s.Recovery.Retrying || s.Recovery.Attempts != 1 {
+		t.Fatal(s.Recovery)
+	}
+	send(`"event":"recovery","attempts":1,"retryInMs":20000,"retrying":false}`)
+	s := m.Status()
+	remaining := s.Recovery.NextRetryAt.Sub(s.Recovery.ServerTime)
+	if remaining <= 0 || remaining > 20*time.Second {
+		t.Fatal(remaining)
+	}
+	s.Recovery.Attempts = 99
+	if m.Status().Recovery.Attempts != 1 {
+		t.Fatal("status exposed mutable recovery")
+	}
+	if !r.admitted.Load() || out.failed != nil {
+		t.Fatal("transient outage revoked the credential lease", out.failed)
+	}
+	send(`"event":"recovered"}`)
+	if s = m.Status(); s.State != "running" || s.Recovery != nil {
+		t.Fatalf("recovery did not clear: %+v", s)
+	}
+	send(`"event":"recovery","attempts":0,"retryInMs":0,"retrying":false}`)
+	writeSDKEvent(t, out, sdkEvent{Version: 1, Generation: out.generation, Event: "disconnected", Code: "reconnect_timeout"})
+	if r.admitted.Load() || out.failed == nil {
+		t.Fatal("terminal timeout did not revoke")
+	}
+	m.status.State = "failed"
+	if s = m.Status(); s.Recovery != nil || s.State != "failed" {
+		t.Fatal("failed status retained recovery", s)
+	}
+}
+
+func TestSDKRecoveryProgressRejectsInvalidOrStaleOutput(t *testing.T) {
+	for _, fields := range []string{
+		`"attempts":null,"retryInMs":0,"retrying":false`,
+		`"attempts":0,"retryInMs":null,"retrying":false`,
+		`"attempts":0,"retryInMs":0,"retrying":null`,
+		`"attempts":16,"retryInMs":0,"retrying":false`,
+		`"attempts":0,"retryInMs":20001,"retrying":false`,
+		`"attempts":0,"retryInMs":0,"retrying":true`,
+		`"attempts":2,"retryInMs":0,"retrying":true`,
+		`"attempts":0,"retryInMs":0,"retrying":false,"token":"forbidden"`,
+	} {
+		t.Run(fields, func(t *testing.T) {
+			out := testSDKOutput()
+			out.phase = 3
+			var progress atomic.Pointer[RecoveryStatus]
+			out.recoveryChanged = progress.Store
+			out.Write([]byte(`{"version":1,"generation":"` + out.generation + `","event":"recovery",` + fields + "}\n"))
+			if out.failed == nil || progress.Load() != nil {
+				t.Fatal("invalid progress was published")
+			}
+		})
+	}
+	out := testSDKOutput()
+	out.phase = 3
+	out.Write([]byte(`{"version":1,"generation":"` + out.generation + `","event":"recovery","attempts":0,"retryInMs":0,"retrying":false}` + "\n"))
+	m := &Manager{status: Status{State: "running"}, current: &hosting{}}
+	retired := &hosting{}
+	out.recoveryChanged = retired.recovery.Store
+	out.Write([]byte(`{"version":1,"generation":"` + out.generation + `","event":"recovery","attempts":1,"retryInMs":0,"retrying":true}` + "\n"))
+	if m.Status().Recovery != nil {
+		t.Fatal("retired generation changed current status")
 	}
 }

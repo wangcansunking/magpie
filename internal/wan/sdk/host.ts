@@ -457,15 +457,22 @@ export class RelayRecovery {
     private inFlight = false;
     private until = 0;
     private lastAttempt = -Infinity;
+    private attempts = 0;
     private pending: Promise<void> = Promise.resolve();
     private readonly subscriptions: any[] = [];
     constructor(private readonly relay: any, private readonly running: () => boolean,
         private readonly signal: AbortSignal, private readonly failure: (code: Code) => void,
         private readonly reconnect: () => Promise<void>, private readonly schedule = setTimeout,
-        private readonly cancelTimer = clearTimeout, private readonly now = () => performance.now()) {
+        private readonly cancelTimer = clearTimeout, private readonly now = () => performance.now(),
+        private readonly progress: (value: { attempts: number; retryInMs: number; retrying: boolean } | null) => void = () => {}) {
         this.subscriptions.push(relay.connectionStatusChanged((event: any) => {
             if (this.stopped || signal.aborted) return;
-            if (event.status === ConnectionStatus.Connected) { this.reset(); return; }
+            if (event.status === ConnectionStatus.Connected) {
+                const recovering = this.timer !== undefined;
+                this.reset();
+                if (recovering) this.progress(null);
+                return;
+            }
             if (event.status !== ConnectionStatus.Disconnected) return;
             const code = this.category(relay.disconnectError);
             if (!running() || !this.recoverable(code)) { this.terminate(code); return; }
@@ -492,11 +499,15 @@ export class RelayRecovery {
     }
     private queue(): void {
         if (this.stopped || this.signal.aborted || this.inFlight || this.retryTimer !== undefined) return;
+        const delay = Math.max(0, 20000 - (this.now() - this.lastAttempt));
+        this.progress({ attempts: this.attempts, retryInMs: delay, retrying: false });
         this.retryTimer = this.schedule(() => {
             this.retryTimer = undefined;
             if (this.stopped || this.signal.aborted || !this.running()) return;
             if (this.now() >= this.until) { this.terminate('reconnect_timeout'); return; }
             this.lastAttempt = this.now(); this.inFlight = true;
+            this.attempts++;
+            this.progress({ attempts: this.attempts, retryInMs: 0, retrying: true });
             this.pending = Promise.resolve().then(() => {
                 if (!this.stopped && !this.signal.aborted && this.running()) return this.reconnect();
             }).catch(error => {
@@ -507,13 +518,13 @@ export class RelayRecovery {
                 this.inFlight = false;
                 if (!this.stopped && !this.signal.aborted && this.timer !== undefined) this.queue();
             });
-        }, Math.max(0, 20000 - (this.now() - this.lastAttempt)));
+        }, delay);
     }
     private readonly onAbort = () => this.dispose();
     private reset(): void {
         if (this.timer !== undefined) this.cancelTimer(this.timer);
         if (this.retryTimer !== undefined) this.cancelTimer(this.retryTimer);
-        this.timer = undefined; this.retryTimer = undefined; this.until = 0; this.lastAttempt = -Infinity;
+        this.timer = undefined; this.retryTimer = undefined; this.until = 0; this.lastAttempt = -Infinity; this.attempts = 0;
     }
     private terminate(code: Code): void { this.dispose(); this.failure(code); }
     wait(): Promise<void> { return this.pending; }
@@ -567,7 +578,9 @@ async function startHost(): Promise<void> {
     const bridge = createPortBridge(ownedPort, active, aborter.signal, bridges);
     host.forwardedPortConnecting(bridge.handle);
     relayRecovery = new RelayRecovery(host, () => phase === 'running', aborter.signal, fail,
-        () => host.connect(host.tunnel, { enableRetry: false, enableReconnect: false, httpAgent: agent }, cancellation.token));
+        () => host.connect(host.tunnel, { enableRetry: false, enableReconnect: false, httpAgent: agent }, cancellation.token),
+        setTimeout, clearTimeout, () => performance.now(),
+        progress => progress ? emit('recovery', progress) : emit('recovered'));
     await host.connect(tunnel, { enableRetry: false, enableReconnect: false, httpAgent: agent }, cancellation.token);
     live();
     if (host.connectionProtocol !== TunnelRelayTunnelHost.webSocketSubProtocol || host.connectionStatus !== ConnectionStatus.Connected) throw new Failure('host');

@@ -158,12 +158,12 @@ async function actualV1(t, providedPort, exercise, recover = false) {
         reportEvent: () => {},
     };
     const host = new PortHost(management, port, () => active && !abort.signal.aborted);
-    const failures = [];
+    const failures = [], progress = [];
     let recoveryClock = 0;
     if (recover) new RelayRecovery(host, () => running, abort.signal, code => failures.push(code),
       () => host.connect(host.tunnel, { enableRetry: false, enableReconnect: false }),
       (fn, ms) => setTimeout(() => { recoveryClock += ms; fn(); }, ms >= 300000 ? ms : Math.min(ms, 10)),
-      clearTimeout, () => recoveryClock);
+      clearTimeout, () => recoveryClock, value => progress.push(value));
     host.forwardConnectionsToLocalPorts = false;
     const bridge = createPortBridge(port, () => active, abort.signal);
     const firstStream = deferred();
@@ -213,7 +213,7 @@ async function actualV1(t, providedPort, exercise, recover = false) {
     assert.equal(event.isIncoming, false, 'released V1 event does not describe inbound as true');
     assert.equal(event.cancellation, undefined, 'helper lifetime must supply cancellation for V1');
     if (exercise) {
-        await exercise(remote, { abort, host, forwarding, port, failures, dropRelay: () => wireHost.destroy() });
+        await exercise(remote, { abort, host, forwarding, port, failures, progress, dropRelay: () => wireHost.destroy() });
     } else {
         const payload = Buffer.from('actual released SDK manual stream');
         const echoed = collect(remote, payload.length);
@@ -483,7 +483,7 @@ test('actual management adapter sends the provider-specific service authorizatio
 
 
 function relayRecoveryFixture() {
-    const statuses=new Set(), retries=new Set(), timers=new Map(), failures=[], attempts=[];
+    const statuses=new Set(), retries=new Set(), timers=new Map(), failures=[], attempts=[], progress=[];
     let next=0, running=false, now=0, succeeds=false, held;
     const abort=new AbortController();
     const relay={disconnectReason:sdk.SshDisconnectReason.connectionLost,
@@ -495,8 +495,8 @@ function relayRecoveryFixture() {
       if(held)return held.promise;
       if(succeeds){status(sdk.ConnectionStatus.Connected);return}
       throw Object.assign(new Error('fixture transport failure'),{code:'ECONNRESET'});
-    },(fn,ms)=>{const id=next++;timers.set(id,{fn,at:now+ms});return id},id=>timers.delete(id),()=>now);
-    return {relay,policy,abort,timers,failures,attempts,status,start:()=>{running=true},succeed:()=>{succeeds=true},
+    },(fn,ms)=>{const id=next++;timers.set(id,{fn,at:now+ms});return id},id=>timers.delete(id),()=>now,value=>progress.push(value));
+    return {relay,policy,abort,timers,failures,attempts,progress,status,start:()=>{running=true},succeed:()=>{succeeds=true},
       hold:()=>{held=deferred();return held},lose:()=>status(sdk.ConnectionStatus.Disconnected),
       retry:error=>{const e={error,retry:true,delayMs:20000};for(const fn of [...retries])fn(e);return e},
       advance:async target=>{for(;;){const entry=[...timers].filter(([,t])=>t.at<=target).sort((a,b)=>a[1].at-b[1].at||a[0]-b[0])[0];if(!entry)break;now=entry[1].at;timers.delete(entry[0]);entry[1].fn();for(let i=0;i<12;i++)await Promise.resolve()}now=target}};
@@ -537,7 +537,7 @@ test('relay recovery refuses authentication, policy, TLS, host takeover and rate
 });
 
 test('actual pinned SDK V1 reconnects the same tunnel after transport loss and one failed network retry',{timeout:20000},async t=>{
-  await actualV1(t,undefined,async(remote,{host,port,failures,dropRelay})=>{
+  await actualV1(t,undefined,async(remote,{host,port,failures,progress,dropRelay})=>{
     remote.on('error',()=>{});
     const [newHost,newRelay]=pair();
     const relay=new sdk.MultiChannelStream(new sdk.NodeStream(newRelay));
@@ -556,7 +556,7 @@ test('actual pinned SDK V1 reconnects the same tunnel after transport loss and o
     const relayConnected=relay.connect();
     await host.sshSession.close(sdk.SshDisconnectReason.connectionLost, 'simulated relay transport loss');
     await Promise.all([relayConnected,connected]);
-    assert.equal(attempts,2);assert.deepEqual(failures,[]);assert.equal(host.tunnel.tunnelId,'offline-contract-fixture');
+    assert.equal(attempts,2);assert.deepEqual(failures,[]);assert.deepEqual(progress.filter(p=>p?.retrying).map(p=>p.attempts),[1,2]);assert.equal(progress.at(-1),null);assert.equal(host.tunnel.tunnelId,'offline-contract-fixture');
     stream=await relay.openStream(sdk.TunnelRelayTunnelHost.clientStreamChannelType);
     const cfg=new sdk.SshSessionConfiguration();cfg.addService(sdk.PortForwardingService);
     session=new sdk.SshClientSession(cfg);session.trace=()=>{};
@@ -569,4 +569,17 @@ test('actual pinned SDK V1 reconnects the same tunnel after transport loss and o
     const data=Buffer.from('new request after relay recovery'),received=collect(forwarded,data.length);
     forwarded.write(data);assert.deepEqual(await received,data);
   },true);
+});
+
+
+test('relay recovery reports actual attempts, waiting cadence and successful recovery',async()=>{
+  const f=relayRecoveryFixture();f.start();f.lose();
+  assert.deepEqual(f.progress,[{attempts:0,retryInMs:0,retrying:false}]);
+  await f.advance(0);
+  assert.deepEqual(f.progress.slice(-2),[{attempts:1,retryInMs:0,retrying:true},{attempts:1,retryInMs:20000,retrying:false}]);
+  await f.advance(19999);assert.equal(f.attempts.length,1);
+  f.succeed();await f.advance(20000);
+  assert.deepEqual(f.progress.slice(-2),[{attempts:2,retryInMs:0,retrying:true},null]);
+  assert.equal(f.timers.size,0);
+  f.policy.dispose();assert.equal(f.progress.at(-1),null);
 });

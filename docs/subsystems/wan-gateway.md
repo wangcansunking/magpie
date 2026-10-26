@@ -492,7 +492,14 @@ would give up early. Initial Start still fails on its first failed connection.
 Authentication, permission, rate-limit, TLS and host-takeover failures are
 terminal, rather than retrying a credential/policy problem for five minutes.
 
-The owner retains its running state and endpoint during recovery. Existing
+The owner retains its endpoint and credential lease during recovery. Cached
+status exposes `state: reconnecting` and a credential-free `recovery` snapshot:
+actual attempts started (0–15), whether a connect is in flight, the next retry
+time while waiting, and server time for a clock-skew-free browser countdown.
+Validated helper progress belongs to its current hosting generation; malformed
+or terminal output cannot publish recovery or revive admission. The internal
+lifecycle remains running so recovery never triggers a second Start. Successful
+SDK connection clears progress and restores public `running` status. Existing
 streams may fail and clients may need to retry requests. Recovery never
 extends the parent's credential lease or creates another tunnel. Stop, EOF,
 logout and credential expiry cancel recovery, clear both timers, and join the
@@ -500,7 +507,14 @@ in-flight connect before disposal. Failure at five full minutes emits the fixed
 reconnect_timeout error and revokes admission; late events cannot revive the
 generation. Startup after process exit never auto-publishes.
 
-The WAN page displays the persistent failure and a one-shot in-page notice.
+The WAN page shows an amber reconnecting state, the actual attempt count, and
+a locally ticking next-retry countdown (or an in-flight label). It retains Stop
+and the existing endpoint, hides Start, and never increments attempts or starts
+a connection from its timer. At zero it waits for authoritative status rather
+than inventing another attempt. Hidden/unmounted pages cancel the countdown;
+returning reads fresh backend progress. Successful recovery and terminal states
+clear the progress display. The page displays persistent failure and a one-shot
+in-page notice.
 The desktop independently watches cached owner status and sends one native
 notification per recovery failure, even when the WAN page is closed. Clicking
 the native notification opens WAN. Repeated polls do not repeat it; a later
