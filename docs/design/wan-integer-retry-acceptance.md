@@ -36,3 +36,14 @@ it sends 20000 and schedules at 20000.25; it cannot retry earlier than the
 
 Ignored evidence: bun-fixtures-integer-*-20261027 and the matching
 node_modules/.wan-validation/runs/*integer*20261027 directories.
+
+
+## Windows artifact
+
+Source commit: 2faf5064cb9bfa0832c7b32505211ecce07694bf.
+Output: dist/retry-protocol-fix/magpie.exe (59,459,584 bytes).
+Version: magpie wan-gateway-2faf5064.
+Windows x64 PE, GUI subsystem, embedded resources and isolated --version passed.
+SHA-256: 88dba220cc3f221abdd44341095c432b18aff8c5d0e39adcccb7c585a449f40b.
+Build evidence: wan-integer-retry-exe-20261027/build-status.json.
+The user's existing Desktop/magpie.exe was neither overwritten nor restarted.
