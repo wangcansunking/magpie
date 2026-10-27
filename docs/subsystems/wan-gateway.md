@@ -497,7 +497,10 @@ status exposes `state: reconnecting` and a credential-free `recovery` snapshot:
 actual attempts started (0–15), whether a connect is in flight, the next retry
 time while waiting, and server time for a clock-skew-free browser countdown.
 Validated helper progress belongs to its current hosting generation; malformed
-or terminal output cannot publish recovery or revive admission. The internal
+or terminal output cannot publish recovery or revive admission. Retry delays
+are whole milliseconds on the wire: the helper rounds its fractional monotonic
+clock calculation upward before both publishing and scheduling the delay. This
+keeps the strict Go integer schema and the minimum 20-second interval aligned. The internal
 lifecycle remains running so recovery never triggers a second Start. Successful
 SDK connection clears progress and restores public `running` status. Existing
 streams may fail and clients may need to retry requests. Recovery never

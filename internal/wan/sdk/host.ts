@@ -499,7 +499,9 @@ export class RelayRecovery {
     }
     private queue(): void {
         if (this.stopped || this.signal.aborted || this.inFlight || this.retryTimer !== undefined) return;
-        const delay = Math.max(0, 20000 - (this.now() - this.lastAttempt));
+        // performance.now() has sub-millisecond precision; the Go wire schema
+        // requires integer milliseconds. Round up to preserve the minimum gap.
+        const delay = Math.ceil(Math.max(0, 20000 - (this.now() - this.lastAttempt)));
         this.progress({ attempts: this.attempts, retryInMs: delay, retrying: false });
         this.retryTimer = this.schedule(() => {
             this.retryTimer = undefined;

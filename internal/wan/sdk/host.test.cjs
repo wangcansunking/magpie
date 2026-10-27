@@ -583,3 +583,18 @@ test('relay recovery reports actual attempts, waiting cadence and successful rec
   assert.equal(f.timers.size,0);
   f.policy.dispose();assert.equal(f.progress.at(-1),null);
 });
+
+
+test('relay recovery serializes whole milliseconds after a fractional-clock failed attempt',async()=>{
+  const f=relayRecoveryFixture();f.start();const held=f.hold();f.lose();await f.advance(0);
+  await f.advance(0.25);
+  held.reject(Object.assign(new Error('fixture transport reset'),{code:'ECONNRESET'}));await f.policy.wait();
+  const waiting=f.progress.at(-1);
+  assert.equal(waiting.attempts,1);
+  assert.equal(waiting.retrying,false);
+  assert.equal(Number.isInteger(waiting.retryInMs),true,'Go protocol rejects fractional retryInMs: '+JSON.stringify(waiting));
+  assert.equal(waiting.retryInMs,20000,'round up without starting another attempt before 20 seconds');
+  await f.advance(20000);assert.equal(f.attempts.length,1);
+  await f.advance(20000.25);assert.equal(f.attempts.length,2);
+  f.abort.abort();await f.policy.wait();
+});

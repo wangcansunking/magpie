@@ -222,6 +222,7 @@ func TestSDKRecoveryProgressRejectsInvalidOrStaleOutput(t *testing.T) {
 		`"attempts":0,"retryInMs":0,"retrying":null`,
 		`"attempts":16,"retryInMs":0,"retrying":false`,
 		`"attempts":0,"retryInMs":20001,"retrying":false`,
+		`"attempts":0,"retryInMs":19999.75,"retrying":false`,
 		`"attempts":0,"retryInMs":0,"retrying":true`,
 		`"attempts":2,"retryInMs":0,"retrying":true`,
 		`"attempts":0,"retryInMs":0,"retrying":false,"token":"forbidden"`,

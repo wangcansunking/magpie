@@ -4827,7 +4827,7 @@
       "format": "cjs"
     },
     "internal/wan/sdk/host.ts": {
-      "bytes": 36465,
+      "bytes": 36637,
       "imports": [
         {
           "path": "wan-dependency:node_modules/@microsoft/dev-tunnels-connections/index.js",
@@ -6185,10 +6185,10 @@
           "bytesInOutput": 5843
         },
         "internal/wan/sdk/host.ts": {
-          "bytesInOutput": 29125
+          "bytesInOutput": 29136
         }
       },
-      "bytes": 1561950
+      "bytes": 1561961
     }
   }
 }

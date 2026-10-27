@@ -39654,7 +39654,7 @@ var RelayRecovery = class {
   }
   queue() {
     if (this.stopped || this.signal.aborted || this.inFlight || this.retryTimer !== void 0) return;
-    const delay = Math.max(0, 2e4 - (this.now() - this.lastAttempt));
+    const delay = Math.ceil(Math.max(0, 2e4 - (this.now() - this.lastAttempt)));
     this.progress({ attempts: this.attempts, retryInMs: delay, retrying: false });
     this.retryTimer = this.schedule(() => {
       this.retryTimer = void 0;
