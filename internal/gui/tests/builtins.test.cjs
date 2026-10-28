@@ -14,6 +14,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { reach } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 
@@ -111,7 +112,7 @@ function server(lang, posts, broken) {
 // the pages' tabs shown, the page shown
 const tabs = (page) => page.evaluate(() => [...document.querySelectorAll("#nav button[data-view]")].filter((b) => !b.hidden && b.offsetParent && getComputedStyle(b).display !== "none").map((b) => b.dataset.view));
 const viewShown = (page) => page.evaluate(() => [...document.querySelectorAll("main.view")].filter((v) => !v.hidden).map((v) => v.id));
-const KEPT = ["agents", "providers", "routing", "gateway", "usage", "plugins"];
+const KEPT = ["agents", "providers", "routing", "gateway", "wan", "usage", "plugins"];
 const rowsOf = (page) => page.evaluate(() => [...document.querySelectorAll("#builtinList .feat-row")].map((r) => {
   const b = r.querySelector('[role="switch"]');
   return { id: r.dataset.id, name: r.querySelector(".name").textContent, on: b.getAttribute("aria-checked"), disabled: b.disabled, why: r.querySelector(".feat-why")?.textContent || "" };
@@ -214,12 +215,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // Its row and Usage's can be below the fold: the reader scrolls to
         // them with the wheel, since the page puts back a scroll that isn't
         // the reader's (scrollOnPurpose), a click's own too
-        const wheelTo = async (id) => {
-          const list = await page.locator("#builtinList").boundingBox();
-          await page.mouse.move(list.x + 20, list.y + 20);
-          await page.mouse.wheel(0, 400);
-          await page.waitForFunction((id) => { const r = document.querySelector(`#builtinList [data-id="${id}"] [role="switch"]`).getBoundingClientRect(), foot = document.querySelector("footer.foot"); return r.bottom <= Math.min(document.getElementById("view-plugins").getBoundingClientRect().bottom, foot && foot.offsetParent ? foot.getBoundingClientRect().top : Infinity); }, id);
-        };
+        // Wait for actual wheel movement and check both edges and the hit
+        // point. A fixed 400px step and a bottom-edge check don't establish
+        // that the switch is clear before Playwright presses it.
+        const wheelTo = (id) => reach(page, page.locator(`#builtinList [data-id="${id}"] [role="switch"]`));
         await wheelTo("routing");
         await page.locator('#builtinList [data-id="routing"] [role="switch"]').click();
         await page.waitForSelector('#builtinList [data-id="routing"] [aria-checked="false"]');

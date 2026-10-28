@@ -120,15 +120,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       // page puts back a scroll that isn't the reader's (scrollIntoView,
       // Playwright's own before a click)
       const pressOn = async (btn) => {
-        const [y, top, bottom] = await btn.evaluate((e) => {
-          const r = e.getBoundingClientRect(), v = e.closest(".view").getBoundingClientRect();
-          return [r.top + r.height / 2, v.top, Math.min(v.bottom, document.querySelector("footer.foot")?.getBoundingClientRect().top ?? v.bottom)];
-        });
-        if (y < top + 20 || y > bottom - 20) {
-          await page.mouse.move(width / 2, (top + bottom) / 2);
-          await page.mouse.wheel(0, y - (top + bottom) / 2);
-          await page.waitForTimeout(300);
-        }
+        await reach(page, btn);
         await btn.click();
       };
 

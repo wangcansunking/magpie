@@ -77,6 +77,7 @@ function server(lang, theme, size, posts) {
     if (url.pathname === "/api/usage/quotas") return json([]);
     if (url.pathname === "/api/groups") return json({ groups: [], models: [] });
     if (url.pathname === "/api/providers") return json(providers);
+    if (url.pathname === "/api/wan" && req.method() === "GET") return json({ state: "stopped", endpoint: "", error: "", runtimeAvailable: true, controllable: true, keys: [], auth: { state: "signed_out", error: "", userCode: "", verificationURI: "", expiresAt: "0001-01-01T00:00:00Z", attemptID: 0, storage: "memory", storageAvailable: false } });
     if (url.pathname === "/api/gateway/trace") {
       if (url.searchParams.get("wait")) await new Promise((r) => setTimeout(r, 20e3));
       return json({ mine: true, now: new Date().toISOString(), seq: 0, totals: { requests: 0, rerouted: 0, errors: 0 }, routes: [] });
@@ -260,7 +261,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           // the smallest window at 150% is 840×630 points, 560×420 CSS pixels
           for (const [zoom, size] of [[1, 100], [1.5, 150]]) {
             const page = await open(lang, theme, size, [], { width: Math.round(840 / zoom), height: Math.round(630 / zoom), zoom });
-            for (const v of ["agents", "providers", "gateway", "routing", "usage", "library", "settings"]) {
+            for (const v of ["agents", "providers", "gateway", "wan", "routing", "usage", "library", "settings"]) {
               await page.locator(v === "settings" ? "#prefs" : `[data-view="${v}"]`).click();
               await page.waitForTimeout(250);
               assert.deepEqual(await overflow(page), [], `${v} at ${size}%`);

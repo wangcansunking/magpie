@@ -2942,6 +2942,65 @@ function routingPage(part) {
   function modelRest(a, m, rest, when) {
     if ((a.mrests.get(m)?.at || 0) <= when) a.mrests.set(m, { rest, at: when });
   }
+  // Account rows and their actions outlive countdown redraws. Replacing a
+  // pressed button loses the native click; reusing it for a different rest
+  // would be worse, sending the old press to a new target.
+  const actRows = new Map();
+  function restActions(kept, lifts, scope) {
+    const wanted = new Set(), buttons = [];
+    const button = (id, text, title, activate) => {
+      wanted.add(id);
+      let b = kept.actions.get(id);
+      if (!b) { b = el("button", "link"); kept.actions.set(id, b); }
+      // An error remains readable through countdowns until this action is
+      // retried. A changed target gets another node, never that error.
+      if (!b.restError) setText(b, text);
+      b.title = title;
+      b.onclick = activate(b);
+      buttons.push(b);
+    };
+    const rest = lifts[0];
+    if (rest?.link) {
+      const url = rest.link;
+      button(JSON.stringify(["open", url]), t("Verify the account ↗"), "", () => () => api("open", { url }).catch(() => {}));
+    }
+    if (rest) {
+      const keys = lifts.map((x) => x.key);
+      const id = JSON.stringify(["unrest", [...new Set(scope)].sort()]);
+      const text = t(rest.why === "restricted" ? "The restriction is lifted — try it again"
+        : rest.why === "verify" ? "It's verified — try it again" : "Try now");
+      const title = rest.why !== "restricted" && rest.why !== "verify"
+        ? t("Ends the rest: the next request asks it again. Refused again, it rests again.") : "";
+      button(id, text, title, (b) => async () => {
+        b.restError = false;
+        setText(b, text);
+        try {
+          // This activation owns its snapshot, even if another read arrives
+          // while its requests are on the way.
+          for (const key of keys) { await api("gateway/unrest", { key }); liftedAt.set(key, Date.now()); }
+          render();
+        } catch (e) {
+          if (kept.actions.get(id) === b && b.isConnected) { b.restError = true; setText(b, e.message); }
+        }
+      });
+    }
+    for (const [id, b] of kept.actions) if (!wanted.has(id)) { b.remove(); kept.actions.delete(id); }
+    // Don't move an unchanged button, even through a detached new wrapper:
+    // its pointer capture/focus must survive the whole redraw.
+    buttons.forEach((b, i) => { if (kept.fix.children[i] !== b) kept.fix.insertBefore(b, kept.fix.children[i] || null); });
+    return rest ? kept.fix : null;
+  }
+  function updateAct(kept, fresh) {
+    const kids = [...fresh.children].map((c, i) => {
+      if (c.className === "fix") return kept.fix;
+      const old = kept.row.children[i];
+      return old && c.isEqualNode(old) ? old : c;
+    });
+    for (const c of [...kept.row.children]) if (!kids.includes(c)) c.remove();
+    kids.forEach((c, i) => { if (kept.row.children[i] !== c) kept.row.insertBefore(c, kept.row.children[i] || null); });
+    kept.row.title = fresh.title;
+    return kept.row;
+  }
   // each account or key the kept requests weighed: how often it was
   // tried, answered and failed in them, and how the latest found it
   function renderActs(rs) {
@@ -2997,7 +3056,7 @@ function routingPage(part) {
     }
     const n = now();
     let prov = "";
-    const out = [];
+    const out = [], present = new Set();
     for (const a of list) {
       const w = a.w;
       if (w.provider !== prov) {
@@ -3024,6 +3083,15 @@ function routingPage(part) {
           if (ks[0] === a) out.push(keysRow(ks, pk, open, n, w.kind));
           if (!open) continue;
         }
+      }
+      const identity = JSON.stringify([w.kind, keyOf(w)]);
+      present.add(identity);
+      let kept = actRows.get(identity);
+      if (!kept) {
+        kept = { row: el("div", "rt-act"), fix: el("div", "fix"), actions: new Map() };
+        // Lifting removes this line; keep the account row in place, not its shrinking last line.
+        kept.fix.dataset.unrolls = "";
+        actRows.set(identity, kept);
       }
       const row = el("div", "rt-act");
       const name = el("div", "nm");
@@ -3077,27 +3145,13 @@ function routingPage(part) {
         row.append(ms);
       }
       const lifts = resting ? (a.rest.key ? [a.rest] : []) : parts.map(([, x]) => x.rest).filter((x) => x.key);
-      if (lifts.length) {
-        // any rest can be lifted by hand (#1869): a quota, a backoff, a
-        // Retry-After, a network blip read as down. It only ends the rest;
-        // the vendor refusing again rests it again as before. The vendor
-        // wants the account verified (#152), or restricted it until an
-        // appeal lifts it (#1849): where, and the way to stop its rest
-        // once it is
-        const fix = el("div", "fix"), rest = lifts[0];
-        if (rest.link) { const b = el("button", "link", t("Verify the account ↗")); b.onclick = () => api("open", { url: rest.link }).catch(() => {}); fix.append(b); }
-        const go = el("button", "link", t(rest.why === "restricted" ? "The restriction is lifted — try it again"
-          : rest.why === "verify" ? "It's verified — try it again" : "Try now"));
-        if (rest.why !== "restricted" && rest.why !== "verify") go.title = t("Ends the rest: the next request asks it again. Refused again, it rests again.");
-        go.onclick = async () => {
-          try {
-            for (const x of lifts) { await api("gateway/unrest", { key: x.key }); liftedAt.set(x.key, Date.now()); }
-            render();
-          } catch (e) { go.textContent = e.message; }
-        };
-        fix.append(go);
-        row.append(fix);
-      }
+      // Scope comes from the aggregate's classification, including legacy
+      // rests whose model was derived from the key suffix, not Rest.model.
+      const scope = resting ? lifts.map(x => JSON.stringify(["account", x.key]))
+        : parts.filter(([, x]) => x.rest.key).map(([m, x]) => JSON.stringify(["model", m, x.rest.key]));
+      // A placeholder orders the live fix block without moving it out of
+      // its row while the new countdown and tally are prepared.
+      if (restActions(kept, lifts, scope)) row.append(el("div", "fix"));
       if (w.known) {
         const bar = el("div", "bar"), bi = el("i");
         bi.style.width = fill(w);
@@ -3105,7 +3159,11 @@ function routingPage(part) {
         row.append(bar);
       }
       row.title = w.id;
-      out.push(row);
+      out.push(updateAct(kept, row));
+    }
+    for (const [id, kept] of actRows) if (!present.has(id)) {
+      kept.actions.clear();
+      actRows.delete(id);
     }
     patch(acts, out);
   }
@@ -3169,7 +3227,7 @@ function routingPage(part) {
   // the page, a frame at a time, as if the list had been shorter
   function patch(box, rows) {
     const old = [...box.children];
-    const same = (r, o) => o && !r.querySelector("button") && r.isEqualNode(o);
+    const same = (r, o) => r === o || (o && !r.querySelector("button") && r.isEqualNode(o));
     if (old.length === rows.length && rows.every((r, i) => same(r, old[i]))) return;
     rows = rows.map((r, i) => (same(r, old[i]) ? old[i] : r));
     rows.forEach((r, i) => { if (box.children[i] !== r) box.insertBefore(r, box.children[i] || null); });

@@ -20,6 +20,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { reach } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const GH = require("./fixtures/plugins-github-31.json");
@@ -31,7 +32,7 @@ const INSTALLED = HERE
   .map((repo) => GH.repos.find((r) => r.repo === repo))
   .map((r) => ({ spec: r.spec, package: r.package, providers: [], version: "1.0.0", moved: [] }));
 
-function server(lang, fetched, installed = INSTALLED) {
+function server(lang, fetched, installed = INSTALLED, metadata = Promise.resolve(), githubReady = Promise.resolve()) {
   return async (route) => {
     const url = new URL(route.request().url());
     const json = (data) => route.fulfill({ json: data });
@@ -43,9 +44,9 @@ function server(lang, fetched, installed = INSTALLED) {
     if (url.pathname === "/api/gateway/trace") return json({ routes: [] });
     if (url.pathname === "/api/plugins") return json({ bun: true, bunVersion: "1.4.2", plugins: installed, picker: false, movable: [] });
     if (url.pathname === "/api/plugins/listings") return json({ listings: [{ package: "@magpie-community/opencode-zed-auth", name: "Zed", community: true }] });
-    // npm answers late, while the field is being typed in: the page is drawn again under it
-    if (url.pathname === "/api/plugins/npm") { await new Promise((r) => setTimeout(r, 1500)); return json({ npm: {} }); }
-    if (url.pathname === "/api/plugins/github") return json(GH);
+    // The fixture decides when metadata arrives, not the runner's speed.
+    if (url.pathname === "/api/plugins/npm") { await metadata; return json({ npm: { "@magpie-community/opencode-zed-auth": { version: "9.9.9" } } }); }
+    if (url.pathname === "/api/plugins/github") { await githubReady; return json(GH); }
     if (url.pathname === "/api/plugins/search") return json({ hits: [] });
     if (url.pathname.startsWith("/api/")) return json({});
     if (url.host !== "magpie.test" || !/^\/[\w./-]*$/.test(url.pathname)) { fetched.push(url.href); return route.fulfill({ status: 404, body: "" }); }
@@ -67,6 +68,42 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     assert(["chromium", "webkit"].includes(engine), "BROWSER must be chromium or webkit");
     const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || "chromium" }));
     t.after(() => browser.close());
+    // Metadata answers while a choice is pressed, not after an arbitrary
+    // sleep. Both strips and cards keep their click targets through it.
+    for (const pick of [".pm-ghkinds .opt:nth-of-type(3)", ".pm-ghhave .opt:nth-of-type(3)"]) await t.test("late metadata during " + pick, async () => {
+      const context = await browser.newContext({ viewport: { width: 980, height: 860 }, reducedMotion: "reduce" });
+      const page = await context.newPage();
+      page.setDefaultTimeout(6000);
+      const errors = [], fetched = [];
+      page.on("pageerror", (e) => errors.push(e.message));
+      let release, arrived;
+      const held = new Promise((r) => { release = r; }), started = new Promise((r) => { arrived = r; });
+      const fixture = server("en", fetched);
+      await page.route("**/*", async (route) => {
+        if (new URL(route.request().url()).pathname === "/api/plugins/npm") {
+          arrived(); await held;
+          return route.fulfill({ json: { npm: { "@magpie-community/opencode-zed-auth": { version: "9.9.9" } } } });
+        }
+        await fixture(route);
+      });
+      try {
+        await page.goto("http://magpie.test/?view=plugins");
+        await started;
+        const choice = page.locator(".pm-ghsec " + pick);
+        await choice.waitFor();
+        const pressed = await choice.elementHandle(), box = await choice.boundingBox();
+        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+        await page.mouse.down();
+        release();
+        await page.locator('.pm-card[data-pkg="@magpie-community/opencode-zed-auth"] .pm-ver', { hasText: "9.9.9" }).waitFor();
+        assert.equal(await pressed.evaluate((e) => e.isConnected), true, "metadata keeps the pressed filter choice");
+        await page.mouse.up();
+        const count = pick.includes("ghkinds") ? 3 : 29;
+        await page.waitForFunction((n) => document.querySelectorAll(".pm-ghsec .pm-card").length === n, count);
+        assert.equal(await page.locator(".pm-ghsec .pm-card").count(), count);
+        assert.deepEqual(errors, []);
+      } finally { release(); await context.close(); }
+    });
     // nothing from GitHub installed: Not installed would be All again, so
     // there is no strip to pick it from, only the kinds and the field
     await t.test("nothing installed", async () => {
@@ -75,17 +112,22 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       page.setDefaultTimeout(6000);
       const errors = [], fetched = [];
       page.on("pageerror", (e) => errors.push(e.message));
-      await page.route("**/*", server("en", fetched, []));
+      let releaseGitHub;
+      const githubReady = new Promise((resolve) => { releaseGitHub = resolve; });
+      await page.route("**/*", server("en", fetched, [], Promise.resolve(), githubReady));
       try {
         await page.goto("http://magpie.test/?view=plugins");
         const sec = page.locator("#view-plugins .pm-ghsec");
-        await sec.locator(".pm-card").first().waitFor();
+        await sec.locator(".pm-card.ghost").first().waitFor();
+        assert.equal(await sec.locator(".pm-ghkinds").count(), 0, "GitHub is still held; these cards are placeholders");
+        releaseGitHub();
+        await sec.locator(".pm-card[data-pkg]").first().waitFor();
         assert.equal(await sec.locator(".pm-ghkinds").count(), 1);
         assert.equal(await sec.locator(".pm-ghhave").count(), 0);
         assert.equal(await sec.locator(".pm-card").count(), GH.repos.length);
         assert.deepEqual(errors, []);
       } finally {
-        await ctx.close();
+        releaseGitHub(); await ctx.close();
       }
     });
     for (const lang of ["en", "zh", "zh-TW", "ja", "de"]) for (const width of [1100, 980, 420]) {
@@ -95,12 +137,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         page.setDefaultTimeout(6000);
         const errors = [], fetched = [];
         page.on("pageerror", (e) => errors.push(e.message));
-        await page.route("**/*", server(lang, fetched));
+        let release;
+        const metadata = new Promise((r) => { release = r; });
+        await page.route("**/*", server(lang, fetched, INSTALLED, metadata));
         try {
           await page.goto("http://magpie.test/?view=plugins");
           const sec = page.locator("#view-plugins .pm-ghsec");
           const cards = sec.locator(".pm-card");
-          await cards.first().waitFor();
+          await sec.locator(".pm-ghkinds .opt").first().waitFor();
           assert.equal(await cards.count(), 31);
           const tr = (s) => page.evaluate((s) => t(s), s);
           if (lang !== "en") for (const s of ["Kind of plugin", "Installed or not", "Not installed", "Filter by name, author or description", "Filter the plugins on GitHub", "No plugin on GitHub matches"]) assert.notEqual(await tr(s), s, `${s} in ${lang}`);
@@ -127,13 +171,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           // scroll by code, as a click's own scrolling into view, is put
           // back (no unasked scroll), and the footer took WebKit's click
           const press = async (b) => {
-            await page.mouse.move(width / 2, 400);
-            for (let i = 0; i < 12; i++) {
-              const [at, foot] = [await b.boundingBox(), await page.locator(".foot").boundingBox()];
-              if (at && (!foot || at.y + at.height <= foot.y)) break;
-              await page.mouse.wheel(0, 200);
-              await page.waitForTimeout(80);
-            }
+            await reach(page, b);
             await b.click();
           };
           const field = sec.locator(".pm-ghfind input");
@@ -177,8 +215,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           // node keeps its focus and every key; the kinds count what it leaves
           await field.evaluate((x) => { window.__field = x; });
           await field.click();
-          await page.keyboard.type("doubao", { delay: 120 });
-          await page.waitForTimeout(800);
+          await page.keyboard.type("doubao");
+          release();
+          await page.locator('.pm-card[data-pkg="@magpie-community/opencode-zed-auth"] .pm-ver', { hasText: "9.9.9" }).waitFor();
           assert(await field.evaluate((x) => x === window.__field && document.activeElement === x && x.value === "doubao"), "the field kept its node, focus and text");
           const doubao = GH.repos.filter((r) => has(r, "doubao"));
           assert.deepEqual(await kinds.allTextContents(), await want(doubao));
@@ -225,6 +264,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           assert.deepEqual(over.map((x) => Math.max(0, x)), [0, 0, 0], JSON.stringify(over));
           assert.deepEqual(errors, []);
         } finally {
+          release();
           await ctx.close();
         }
       });

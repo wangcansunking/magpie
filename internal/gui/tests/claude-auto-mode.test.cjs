@@ -13,6 +13,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { watchReplies, repliesConsumed } = require("./lifecycle.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const models = [{ value: "magpie/v/glm", label: "GLM", ref: "v/glm" }, { value: "magpie/v/flash", label: "Flash", ref: "v/flash" }];
@@ -80,6 +81,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           }
           await browser.close();
         });
+        await watchReplies(page, ["/api/set"]);
         await page.goto("http://magpie.test/");
         await page.locator(cc).waitFor();
         // not through magpie: nothing to pick, so nothing shows
@@ -109,6 +111,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.ok(first.includes(w.def) && first.includes(w.note), first);
         await page.locator("#pop #list li", { hasText: "Flash" }).first().click();
         await page.waitForFunction(() => document.querySelector('.row.agent[data-id="claude"] .ag-exp .field[data-key="auto_mode"] .v:not(.empty)'));
+        await repliesConsumed(page, ["/api/set"]);
         assert.deepEqual(sets, [{ agent: "claude", field: "auto_mode", value: "magpie/v/flash" }]);
         assert.equal(await page.locator(`${cc} .ag-exp .field.ag-pick[data-key="auto_mode"]`).getAttribute("title"), w.set);
 
@@ -117,6 +120,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.locator("#pop:not([hidden]) #list li").first().waitFor();
         await page.locator("#pop #list li").first().click();
         await page.waitForFunction(() => document.querySelector('.row.agent[data-id="claude"] .ag-exp .field[data-key="auto_mode"] .v.empty'));
+        await repliesConsumed(page, ["/api/set"]);
         assert.deepEqual(sets.at(-1), { agent: "claude", field: "auto_mode", value: "" });
         assert.equal(await page.evaluate(() => scrollY), y, "a pick scrolled the page");
         assert.deepEqual(errors, []);

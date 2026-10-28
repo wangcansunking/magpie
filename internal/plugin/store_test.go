@@ -276,7 +276,10 @@ func TestLoadConcurrentWithSavesAndEdits(t *testing.T) {
 		defer wg.Done()
 		defer close(stop)
 		for i := range 60 {
-			_ = save(List{Plugins: []Entry{{Spec: fmt.Sprintf("p%d", i%2)}}})
+			if err := save(List{Plugins: []Entry{{Spec: fmt.Sprintf("p%d", i%2)}}}); err != nil {
+				t.Errorf("save: %v", err)
+				return
+			}
 			if _, err := Add(context.Background(), plug); err != nil {
 				t.Errorf("add: %v", err)
 				return

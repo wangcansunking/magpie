@@ -14,6 +14,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { watchReplies, repliesConsumed } = require("./lifecycle.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const own = [{ value: "gpt-5.5", label: "GPT-5.5", ref: "openai/gpt-5.5" }];
@@ -134,6 +135,7 @@ for (const engine of engines) {
           }
           await browser.close();
         });
+        await watchReplies(page, ["/api/set"]);
         await page.goto("http://magpie.test/");
         await page.locator(codex).waitFor();
         await page.locator(`${codex} .ag-link`).click();
@@ -172,6 +174,7 @@ for (const engine of engines) {
 
         await page.locator("#pop #list li", { hasText: "GPT-6 Astra" }).first().click();
         await page.waitForFunction(() => document.querySelector('.row.agent[data-id="codex"] .field.extra.set[data-key="subagent_model"]'));
+        await repliesConsumed(page, ["/api/set"]);
         assert.deepEqual(sets, [{ agent: "codex", field: "subagent_model", value: "codex/gpt-6-astra" }]);
         assert.equal(await square.getAttribute("aria-label"), w.set + "\nme@example.com · via magpie");
 
@@ -180,6 +183,7 @@ for (const engine of engines) {
         await page.locator("#pop:not([hidden]) #list li").first().waitFor();
         await page.locator("#pop #list li").first().click();
         await page.waitForFunction(() => !document.querySelector('.row.agent[data-id="codex"] .field.extra.set[data-key="subagent_model"]'));
+        await repliesConsumed(page, ["/api/set"]);
         assert.deepEqual(sets.at(-1), { agent: "codex", field: "subagent_model", value: "" });
         assert.equal(await page.evaluate(() => scrollY), y);
 

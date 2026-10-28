@@ -51,6 +51,8 @@ function serve(lang, ctl) {
     }
     if (url.pathname === "/api/provider/save") { ctl.saved.push(req.postDataJSON().id); return json({ providers: [account], presets: [], excluded: [], gateway: { running: true, window: true } }); }
     if (url.pathname === "/api/open") { ctl.opened.push(req.postDataJSON().url); return json({}); }
+    // The Windows host's title-bar paint is not a sign-in/config mutation.
+    if (url.pathname === "/api/window/titlebar" && req.method() === "POST") return route.fulfill({ status: 204 });
     if (url.pathname.startsWith("/api/")) { ctl.other.push(req.method() + " " + url.pathname); return json({}); }
     const file = path.join(assets, url.pathname === "/" ? "index.html" : url.pathname);
     const contentType = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png" }[path.extname(file)];

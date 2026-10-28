@@ -60,11 +60,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
       const page = await (await browser.newContext({ viewport: { width: 900, height: 760 }, reducedMotion: "reduce" })).newPage();
       t.after(async () => {
-        if (process.env.ARTIFACT_DIR) {
-          await fs.mkdir(process.env.ARTIFACT_DIR, { recursive: true });
-          await page.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `${engine}-${lang}-key-weight.png`) });
-        }
-        await browser.close();
+        try {
+          await page.evaluate(() => { window.releaseWeightState?.(); window.restoreWeightAction?.(); });
+          if (process.env.ARTIFACT_DIR) {
+            await fs.mkdir(process.env.ARTIFACT_DIR, { recursive: true });
+            await page.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `${engine}-${lang}-key-weight.png`) });
+          }
+        } finally { await browser.close(); }
       });
       page.setDefaultTimeout(5000);
       const errors = [];
@@ -96,13 +98,38 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(await box.getAttribute("aria-label"), lang === "zh" ? "密钥权重" : "Key weight");
       assert.equal(await scrolled(), sc, "a click scrolled");
       await box.fill("2");
+      // The weights redraw before accountAction's final state read and notice.
+      // Hold that read: a changed chip alone must not mean the action finished.
+      await page.evaluate(() => {
+        const action = accountAction, fetch0 = fetch;
+        window.weightDone = false;
+        window.restoreWeightAction = () => { accountAction = action; window.fetch = fetch0; };
+        accountAction = function (...args) {
+          const result = action.apply(this, args);
+          if (args[0] === "keys/weight") window.weightFinished = result.finally(() => { window.weightDone = true; });
+          return result;
+        };
+        window.fetch = async function (input, init) {
+          const url = new URL(typeof input === "string" ? input : input.url, location.href);
+          if (url.pathname === "/api/state") {
+            window.fetch = fetch0;
+            await new Promise((resolve) => { window.releaseWeightState = resolve; });
+          }
+          return fetch0.apply(this, arguments);
+        };
+      });
       await box.press("Enter");
-      for (let i = 0; i < 60 && !posts.length; i++) await new Promise((r) => setTimeout(r, 50));
+      await page.waitForFunction(() => typeof releaseWeightState === "function");
       assert.deepEqual(posts.at(-1), { id: "relay", ref: "bbbbbbbbbb", weight: 2 });
       await page.locator(`.acc[data-account-id="bbbbbbbbbb"] .key-weight`, { hasText: w.b2 }).waitFor();
       assert.equal((await chip("aaaaaaaaaa").textContent()).trim(), w.a2);
       // still shown: the routing picked stays in the editor's draft
       assert.equal(await chip("bbbbbbbbbb").isVisible(), true);
+      assert.equal(await page.evaluate(() => weightDone), false, "the changed weights precede action completion");
+      assert.equal((await page.locator("#status").textContent()).trim(), "", "the final read still holds the notice");
+      await page.evaluate(() => releaseWeightState());
+      await page.waitForFunction(() => weightDone);
+      assert.equal(await page.evaluate(() => weightFinished), true);
       assert.equal((await page.locator("#status").textContent()).trim(), w.note);
 
       if (process.env.ARTIFACT_DIR) await page.locator(".editor .accts").screenshot({ path: path.join(process.env.ARTIFACT_DIR, `${engine}-${lang}-key-weight-rows.png`) });

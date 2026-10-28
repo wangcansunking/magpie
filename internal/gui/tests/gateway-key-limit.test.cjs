@@ -117,6 +117,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await row("server").getByRole("button", { name: w.change, exact: true }).click();
       await row("server").locator(".key-limit-ed").waitFor();
       await page.setViewportSize({ width: 560, height: 740 });
+      // fitTop's ResizeObserver puts the longer navigation into the row.
+      // setViewportSize can return before that layout runs in WebKit.
+      await page.waitForFunction(() => innerWidth === 560 && document.querySelector(".top.inrow"));
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth), false);
       assert.deepEqual(errors, []);
     });

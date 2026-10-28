@@ -46,7 +46,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.route("**/*", serve(lang, posts));
       await page.goto("http://magpie.test/?view=providers");
       const zh = lang === "zh";
-      await page.locator(".row.provider").click();
+      await page.locator('.row.provider[data-id="relay"]').click();
       const label = page.getByText(zh ? "最大输出" : "Max output", { exact: true });
       assert(await label.isVisible(), "the field is there");
       const box = page.locator("input.outputs");
@@ -79,7 +79,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", serve(lang, []));
         await page.goto("http://magpie.test/?view=providers");
-        await page.locator(".row.provider").click();
+        await page.locator('.row.provider[data-id="relay"]').click();
         const box = page.locator("input.outputs");
         await box.waitFor();
         const hint = await box.evaluate((b) => document.getElementById(b.getAttribute("aria-describedby").split(" ").pop()).textContent);

@@ -96,12 +96,40 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.ok(box.x >= 0 && box.x + box.width <= width, `the tick fits across ${width}`);
         const scrollers = () => page.evaluate(() => [...document.querySelectorAll("*")].filter((e) => e.scrollTop).map((e) => e.scrollTop).concat(document.scrollingElement.scrollTop));
         const before = await scrollers();
-        await only.locator("input").click();
-        await page.waitForFunction(() => document.querySelector(".editor .accts .switch-only input")?.checked === true);
+        const change = async (checked) => {
+          const sent = [...posts];
+          // A checkbox changes before its request has even left the page.
+          // Hold that dispatch, then await the real action through its redraw.
+          await only.locator("input").evaluate((cb) => {
+            const fetch0 = window.fetch, change = cb.onchange;
+            window.switchOnlyBefore = cb;
+            window.releaseSwitchOnly = null;
+            window.fetch = async function (url, ...args) {
+              if (url === "/api/provider/switchonly") {
+                window.fetch = fetch0;
+                await new Promise((resolve) => { window.releaseSwitchOnly = resolve; });
+              }
+              return fetch0.call(this, url, ...args);
+            };
+            window.switchOnlyDone = false;
+            cb.onchange = function (...args) {
+              return window.switchOnlyFinished = change.apply(this, args).finally(() => { window.switchOnlyDone = true; });
+            };
+          });
+          await only.locator("input").click();
+          await page.waitForFunction(() => typeof releaseSwitchOnly === "function");
+          assert.equal(await only.locator("input").isChecked(), checked, "the native tick precedes the save");
+          assert.deepEqual(posts, sent, "the native tick is not proof the request arrived");
+          await page.evaluate(() => releaseSwitchOnly());
+          await page.waitForFunction(() => switchOnlyDone);
+          await page.evaluate(() => switchOnlyFinished);
+          assert.equal(await page.evaluate(() => switchOnlyBefore.isConnected), false, "the saved response redrew the checkbox");
+          assert.equal(await only.locator("input").isChecked(), checked, "the redraw keeps the saved value");
+        };
+        await change(true);
         assert.deepEqual(posts, [{ id: "codex", switchOnly: true }]);
         assert.deepEqual(await scrollers(), before, "the page doesn't move");
-        await page.locator(".editor .accts .switch-only input").click();
-        await page.waitForFunction(() => document.querySelector(".editor .accts .switch-only input")?.checked === false);
+        await change(false);
         assert.deepEqual(posts, [{ id: "codex", switchOnly: true }, { id: "codex", switchOnly: false }]);
         assert.deepEqual(errors, []);
       });

@@ -60,8 +60,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(await menu.isVisible(), true, "a pick closed the menu");
       await page.keyboard.press("Escape");
       await menu.waitFor({ state: "detached" });
-      assert.deepEqual(events.filter((e) => e.action === "models-key").map((e) => e.body), [{ key: "work", models: ["relay/*", "openai/gpt-5"] }]);
+      // Closing the menu starts the request; the rendered badge confirms its reply.
       await page.waitForFunction(() => document.querySelector('#gatewayKeys .acc[data-key="work"] .key-models.set'));
+      assert.deepEqual(events.filter((e) => e.action === "models-key").map((e) => e.body), [{ key: "work", models: ["relay/*", "openai/gpt-5"] }]);
       assert.equal((await badge("work").textContent()).trim(), w.two);
       assert.deepEqual(await scrolled(), at, "a pick moved the page");
       // All models takes it off
@@ -70,11 +71,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(await menu.locator(".pm-item.on").count(), 2);
       await menu.locator(".pm-item", { hasText: w.all }).first().click();
       await menu.waitFor({ state: "detached" });
+      await page.waitForFunction(() => document.querySelector('#gatewayKeys .acc[data-key="server"] .key-models:not(.set)'));
       assert.deepEqual(events.filter((e) => e.action === "models-key").at(-1).body, { key: "server", models: [] });
-      await page.waitForFunction(() => !document.querySelector('#gatewayKeys .acc[data-key="server"] .key-models.set'));
       assert.deepEqual(await scrolled(), at, "no click moved the page");
       // narrow: the row fits
       await page.setViewportSize({ width: 560, height: 740 });
+      // The header's ResizeObserver fits the longer navigation after resize.
+      await page.waitForFunction(() => innerWidth === 560 && document.querySelector(".top.inrow"));
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth), false);
       assert.deepEqual(errors, []);
     });

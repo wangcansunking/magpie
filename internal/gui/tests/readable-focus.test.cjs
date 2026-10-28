@@ -4,7 +4,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
-const { watchSettingsReads, settingsDrawn } = require("./reader.cjs");
+const { reach, watchSettingsReads, settingsDrawn } = require("./reader.cjs");
 const assets = path.resolve(__dirname, "../assets");
 const settings = { theme: "light", lang: "en", tray: "panel", textSize: 100, currency: "usd",
   dir: "/config/magpie", gateway: "http://127.0.0.1:3999", version: "0.1.900",
@@ -135,17 +135,21 @@ for (const engine of process.env.BROWSER ? [process.env.BROWSER] : ["chromium", 
     await t.test("keyboard focus can enter the view without allowing pointer clicks to scroll", async () => {
       // each step starts from a fresh page: macOS WebKit doesn't Tab to
       // buttons, and the page keeps the reader's place against a script's scroll
-      const setup = async () => {
+      const setup = async (reverse = false) => {
         await watchSettingsReads(page);
         await page.goto("http://magpie.test/?view=settings");
         await settingsDrawn(page); // rows found are the ones that stay (#1659)
         await page.locator(":is(#setTab-general, .nav-s[data-of=setTab-general]):visible").waitFor();
-        await page.locator("#view-settings").evaluate((v) => {
+        await page.locator("#view-settings").evaluate((v, reverse) => {
           const first = document.createElement("button"); first.id = "focus-start"; first.textContent = "Edit";
           const spacer = document.createElement("div"); spacer.style.cssText = "flex:none;height:1400px";
           const field = document.createElement("input"); field.id = "focus-end";
           first.onclick = () => field.focus();
-          v.replaceChildren(first, spacer, field);
+          v.replaceChildren(...(reverse ? [field, spacer, first] : [first, spacer, field]));
+        }, reverse);
+        await page.evaluate(async () => {
+          await document.fonts.ready;
+          await Promise.all(document.querySelector("#view-settings").getAnimations().map((a) => a.finished));
         });
       };
       const start = page.locator("#focus-start"), end = page.locator("#focus-end");
@@ -156,20 +160,48 @@ for (const engine of process.env.BROWSER ? [process.env.BROWSER] : ["chromium", 
         return document.activeElement === f && r.top >= v.top - 2 && r.bottom <= v.bottom + 2;
       });
       const focusDetails = () => end.evaluate((f) => ({ focus: document.activeElement.id, scroll: f.closest(".view").scrollTop, top: f.getBoundingClientRect().top, bottom: f.getBoundingClientRect().bottom, view: f.closest(".view").getBoundingClientRect().bottom }));
+      // keyboardFocus inspects the native result over two frames. Await the
+      // following frame, not the desired geometry, so a broken reveal fails
+      // the assertion rather than hiding behind a successful native scroll.
+      const focused = () => page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(resolve)))));
       await setup();
       await start.focus();
       await page.keyboard.press("Tab");
-      await page.waitForTimeout(600);
+      await focused();
       assert.equal(await visibleFocus(), true, "Tab's focused field stays in sight: " + JSON.stringify(await focusDetails()));
       await setup();
+      // Some native WebKit focus scrolls leave the bottom border clipped by
+      // 2.375px. Inject that recorded native result before the helper's second
+      // frame, instead of rerunning until the engine chooses it again.
+      await end.evaluate((field) => field.addEventListener("focus", (event) => {
+        window.clippedTrusted = event.isTrusted;
+        requestAnimationFrame(() => {
+          const view = field.closest(".view"), r = field.getBoundingClientRect(), v = view.getBoundingClientRect();
+          view.scrollTop += Math.round(r.bottom - v.bottom - 2.375);
+          window.clippedFocus = field.getBoundingClientRect().bottom - v.bottom;
+        });
+      }, { once: true }));
+      await start.focus();
+      await page.keyboard.press("Tab");
+      await focused();
+      assert.equal(await page.evaluate(() => clippedTrusted), true, "the clipped result follows a real keyboard focus transition");
+      assert.equal(await page.evaluate(() => clippedFocus), 2.375, "the recorded native scroll clips the field by 2.375px");
+      assert.equal(await visibleFocus(), true, "Tab's focused field stays in sight after a clipped native reveal: " + JSON.stringify(await focusDetails()));
+      await setup(true);
+      await reach(page, start);
+      await start.focus();
+      await page.keyboard.press("Shift+Tab");
+      await focused();
+      assert.equal(await visibleFocus(), true, "Shift+Tab reveals the previous field: " + JSON.stringify(await focusDetails()));
+      await setup();
       await start.click();
-      await page.waitForTimeout(600);
+      await focused();
       assert.equal(await scroll(), 0, "a pointer click keeps the reader's position");
       for (const key of ["Enter", "Space"]) {
         await setup();
         await start.focus();
         await page.keyboard.press(key);
-        await page.waitForTimeout(600);
+        await focused();
         assert.equal(await visibleFocus(), true, `${key}: the field focused by the keyboard action is in sight: ${JSON.stringify(await focusDetails())}`);
       }
     });

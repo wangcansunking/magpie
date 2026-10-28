@@ -105,7 +105,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.goto("http://magpie.test/?view=providers");
       await page.locator(".row.provider", { hasText: name }).first().click();
       await page.locator(".editor .mchips .mchip").first().waitFor();
-      await page.waitForTimeout(300); // the editor is drawn again once its provider is in
+      await page.locator("#modal .dialog").evaluate(async (d) => {
+        await Promise.all(d.getAnimations({ subtree: true }).map((a) => a.finished.catch(() => {})));
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      });
       return { page, errors };
     };
     const chip = (page, id) => page.locator(".editor .mchips .mchip", { hasText: new RegExp(`^${id}`) });
@@ -122,8 +125,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await menu.waitFor();
       const item = menu.getByRole("menuitem", { name: w.item });
       assert(await item.isEnabled(), "the account's model can be tested");
+      const reply = page.waitForResponse((r) => new URL(r.url()).pathname === "/api/provider/test" && r.request().method() === "POST");
       await item.click();
-      for (let i = 0; i < 60 && !tests.length; i++) await page.waitForTimeout(50);
+      await reply;
       assert.deepEqual({ id: tests[0]?.id, test: tests[0]?.test }, { id: "codex", test: ["gpt-6-mini"] });
       await c.locator(".tdot.ok").waitFor();
       assert.equal(await page.locator("#status").textContent(), w.ok);
@@ -156,7 +160,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert(box.width <= 300 && box.x >= 0 && box.x + box.width <= 900, `the menu fits: ${JSON.stringify(box)}`);
       const border = await page.evaluate(() => [...document.querySelectorAll(".pop.row-menu, .pop.row-menu *")].map((e) => getComputedStyle(e).borderLeftWidth).filter((b) => parseFloat(b) > 1));
       assert.deepEqual(border, [], "no left-border accent");
-      await item.click({ force: true });
+      const disabled = await item.boundingBox();
+      const point = { x: disabled.x + disabled.width / 2, y: disabled.y + disabled.height / 2 };
+      assert.equal(await item.evaluate((e, p) => e.contains(document.elementFromPoint(p.x, p.y)), point), true, "the disabled menu item is under the pointer");
+      // A real pointer press on a disabled button is inert; locator.click
+      // waits for enabledness and cannot exercise that native behavior.
+      await page.mouse.click(point.x, point.y);
       await page.keyboard.press("Escape");
       await menu.waitFor({ state: "detached" });
       assert(await page.locator(".editor").isVisible(), "Esc closed the menu, not the editor");
@@ -165,7 +174,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const all = page.locator(".editor .mfoot").getByRole("button", { name: w.all, exact: true });
       assert(await all.isDisabled(), "Test models is shown, off");
       assert.equal(await all.getAttribute("title"), w.own);
-      await page.waitForTimeout(150);
+      await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
       assert.equal(tests.length, 0, "nothing was sent");
       const missing = await page.evaluate(() => [
         "{name} is reached through its own API, which magpie translates each agent request for, so a test request can't be sent to it on its own. Ask the model from an agent to try it.",
@@ -184,14 +193,16 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await menu.waitFor();
       const item = menu.getByRole("menuitem", { name: w.item });
       assert(await item.isEnabled(), "the decision model can be tested");
+      const reply = page.waitForResponse((r) => new URL(r.url()).pathname === "/api/provider/test" && r.request().method() === "POST");
       await item.click();
-      for (let i = 0; i < 60 && !tests.length; i++) await page.waitForTimeout(50);
+      await reply;
       assert.deepEqual({ id: tests[0]?.id, test: tests[0]?.test }, { id: "or-decide", test: ["respan/span-01"] });
       await c.locator(".tdot.ok").waitFor();
       const all = page.locator(".editor .mfoot").getByRole("button", { name: w.all, exact: true });
       assert(await all.isEnabled(), "Test models is offered");
+      const allReply = page.waitForResponse((r) => new URL(r.url()).pathname === "/api/provider/test" && r.request().method() === "POST");
       await all.click();
-      for (let i = 0; i < 60 && tests.length < 2; i++) await page.waitForTimeout(50);
+      await allReply;
       assert.deepEqual(tests[1]?.test, ["respan/span-01"], "Test models asks the picked decision model");
       assert.deepEqual(errors, []);
     });
@@ -204,7 +215,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await menu.waitFor();
       assert(await menu.locator(".rm-item").first().isDisabled(), "Test this model is off");
       await page.keyboard.press("Escape");
-      await page.waitForTimeout(150);
+      await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
       assert.equal(tests.length, 0, "nothing was sent");
       assert.deepEqual(errors, []);
     });

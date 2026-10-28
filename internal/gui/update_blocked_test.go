@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -23,6 +24,16 @@ import (
 // a check asked for tries it once more.
 func TestUpdateThatWontStart(t *testing.T) {
 	body := []byte("new magpie")
+	if runtime.GOOS == "windows" {
+		// Installation first asks Windows to create the staged program
+		// suspended. Supply a real native program so the refusal below
+		// happens at relaunch, not at this earlier executability check.
+		var err error
+		body, err = os.ReadFile(filepath.Join(os.Getenv("SystemRoot"), "System32", "PING.EXE"))
+		if err != nil {
+			t.Fatal("native executable fixture:", err)
+		}
+	}
 	sum := sha256.Sum256(body)
 	var downloads atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

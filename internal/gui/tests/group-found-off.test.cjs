@@ -12,6 +12,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
+const { watchReplies, repliesConsumed } = require("./lifecycle.cjs");
 const { chromium, webkit } = require("playwright");
 
 const assets = path.resolve(__dirname, "../assets");
@@ -78,6 +79,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       page.setDefaultTimeout(5000);
       const errors = [], posts = [];
       page.on("pageerror", (e) => errors.push(e.message));
+      await watchReplies(page, ["/api/groups/found"]);
       await page.route("**/*", serve(lang, posts));
       await page.goto("http://magpie.test/?view=routing");
       const card = (name) => page.locator(".rt-group", { hasText: name });
@@ -105,6 +107,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
       await sw.click();
       await page.waitForFunction(() => document.querySelector(".rt-gfound button[role=switch]")?.getAttribute("aria-checked") === "false");
+      await repliesConsumed(page, ["/api/groups/found"]);
       assert.deepEqual(posts, [{ on: false }]);
       await card("Model M").waitFor({ state: "detached" }); // the found group left the list
       assert.equal(await card("Mine").count(), 1, "the user's group stays");
@@ -114,6 +117,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
       await box.locator("button[role=switch]").click();
       await card("Model M").waitFor();
+      await repliesConsumed(page, ["/api/groups/found"]);
       assert.deepEqual(posts, [{ on: false }, { on: true }]);
       assert.equal(await box.locator("button[role=switch]").getAttribute("aria-checked"), "true");
       await page.waitForFunction((m) => document.querySelector("#status").textContent.includes(m), w.back);

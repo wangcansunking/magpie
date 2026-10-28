@@ -10,7 +10,7 @@ const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
 
 const assets = path.resolve(__dirname, "../assets");
-const VIEWS = ["agents", "sessions", "library", "providers", "routing", "gateway", "usage", "plugins", "settings"];
+const VIEWS = ["agents", "sessions", "library", "providers", "routing", "gateway", "wan", "usage", "plugins", "settings"];
 
 function serve(lang) {
   const state = { agents: [], profiles: [], settings: { lang, theme: "light" } };
@@ -21,6 +21,7 @@ function serve(lang) {
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
     if (url.pathname === "/api/state") return json(state);
     if (url.pathname === "/api/providers") return json({ providers: [], presets: [], excluded: [], gateway: { url: "http://127.0.0.1:3425", running: true, window: true } });
+    if (url.pathname === "/api/wan" && route.request().method() === "GET") return json({ state: "stopped", endpoint: "", error: "", runtimeAvailable: true, controllable: true, keys: [], auth: { state: "signed_out", error: "", userCode: "", verificationURI: "", expiresAt: "0001-01-01T00:00:00Z", attemptID: 0, storage: "memory", storageAvailable: false } });
     if (url.pathname === "/api/groups") return json({ groups: [] });
     if (url.pathname.startsWith("/api/usage/quotas")) return json([]);
     if (url.pathname.startsWith("/api/")) return json({});
@@ -64,7 +65,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           await page.waitForFunction((v) => !document.querySelector(`#view-${v}`).hidden, v);
           got[v] = await box(page, v);
         }
-        assert.ok(["sessions", "routing", "usage", "agents", "settings"].every((v) => got[v]), `the pages reached: ${Object.keys(got)}`);
+        assert.ok(["sessions", "routing", "wan", "usage", "agents", "settings"].every((v) => got[v]), `the pages reached: ${Object.keys(got)}`);
         const ref = got.agents;
         for (const [v, b] of Object.entries(got)) {
           if (width >= 1600) {

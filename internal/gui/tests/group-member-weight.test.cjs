@@ -59,8 +59,8 @@ function serve(lang, posts) {
 }
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
-  for (const [lang, width] of [["en", 1100], ["zh", 1100], ["en", 420], ["de", 420]]) {
-    test(`${engine} ${lang} ${width}: a group routes by its members' weights`, async (t) => {
+  for (const [lang, width, active] of [["en", 1100], ["zh", 1100], ["en", 420], ["de", 420], ["en", 420, true], ["de", 420, true]]) {
+    test(`${engine} ${lang} ${width}${active ? " held active scale" : ""}: a group routes by its members' weights`, async (t) => {
       const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
       const height = 1400;
       const page = await (await browser.newContext({ viewport: { width, height }, reducedMotion: "reduce" })).newPage();
@@ -87,6 +87,22 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(await ed.locator("button.rt-weight").count(), 0, "In order shows no weights");
 
       const byWeight = ed.locator(".segs .opt", { hasText: await tr("By weight") });
+      // WebKit can retain :active's scale through click capture. Hold that
+      // ordering across a real press, then release it after the click; the
+      // unscaled segment must keep exactly the same place, in both engines.
+      if (active) await byWeight.evaluate((e) => {
+        e.style.transition = "none";
+        e.addEventListener("pointerdown", (event) => {
+          window.weightPressTrusted = event.isTrusted;
+          e.style.transform = "scale(.96)";
+        }, { once: true });
+        e.addEventListener("click", () => {
+          window.weightActiveScale = new DOMMatrixReadOnly(getComputedStyle(e).transform).m22;
+          window.weightHeldSame = held?.chain[0]?.[0] === e;
+          window.weightHeldAtRest = atRest(e);
+          queueMicrotask(() => { e.style.transform = ""; });
+        }, { once: true });
+      });
       // what is clicked is wheeled into view by the test, as the reader
       // would, and the click itself moves nothing: its row stays under
       // the pointer (rows above it that grow are held by the view)
@@ -96,8 +112,17 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const top = async () => Math.round((await row.boundingBox()).y);
         const before = await top();
         await act();
-        await page.waitForTimeout(200);
-        assert.equal(await top(), before, why);
+        try {
+          if (active && await what.evaluate((e) => e.classList.contains("opt"))) {
+            assert.equal(await page.evaluate(() => weightPressTrusted), true, "the active state followed a real pointer press");
+            assert.equal(await page.evaluate(() => weightActiveScale), .96, "click capture saw the recorded active scale");
+            assert.equal(await page.evaluate(() => weightHeldSame && weightHeldAtRest), true, "the held candidate is the pressed, non-animating button");
+          }
+          await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+          assert.equal(await top(), before, why);
+        } finally {
+          if (active) await byWeight.evaluate((e) => { e.style.transform = e.style.transition = ""; });
+        }
       };
       await still(byWeight, () => byWeight.click(), "picking By weight moved nothing");
       assert.equal(await byWeight.getAttribute("aria-pressed"), "true");
@@ -163,4 +188,124 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.deepEqual(errors, []);
     });
   }
+  test(`${engine}: a view holds the same transformed anchor without undoing the reader`, async (t) => {
+    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+    t.after(() => browser.close());
+    const page = await browser.newPage({ viewport: { width: 1100, height: 760 }, reducedMotion: "reduce" });
+    page.setDefaultTimeout(5000);
+    const errors = [];
+    page.on("pageerror", (e) => errors.push(e.message));
+    await page.route("**/*", serve("en", []));
+    await page.goto("http://magpie.test/?view=routing");
+    await page.locator(".rt-group").waitFor();
+    await page.evaluate(async () => {
+      await document.fonts.ready;
+      const v = document.querySelector("#view-routing");
+      await Promise.all(v.getAnimations().map((a) => a.finished));
+      const stage = document.createElement("div");
+      stage.id = "coordinate-stage";
+      stage.style.cssText = "position:relative;flex:none;height:2400px";
+      stage.innerHTML = '<div id="coordinate-parent" style="position:absolute;top:400px;left:20px"><button id="coordinate-anchor" style="height:44px;width:120px">Anchor</button></div>';
+      v.replaceChildren(stage);
+      keepInView(v, () => document.querySelector("#coordinate-anchor"));
+      window.coordinateView = v;
+    });
+    const v = page.locator("#view-routing");
+    const box = await v.boundingBox();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.wheel(0, 100);
+    await page.waitForFunction(() => coordinateView.scrollTop === 100);
+    const samples = await page.evaluate(() => {
+      const v = coordinateView, parent = document.querySelector("#coordinate-parent"), a = document.querySelector("#coordinate-anchor"), samples = [];
+      held = null;
+      for (const transform of ["scale(.96)", "translateY(11.5px) scale(.5)"]) {
+        for (const delta of [-1, 1, -1.015625, 1.015625]) {
+          const before = v.scrollTop;
+          v.scrollTop = before + delta;
+          const expected = v.scrollTop; // each engine's native scroll quantization
+          v.scrollTop = before;
+          a.style.transformOrigin = "7px 3px";
+          parent.style.transformOrigin = "19px 31px";
+          a.style.transform = transform;
+          parent.style.transform = "translateY(7px) scale(.9)";
+          const baseline = onScreen(a, v), h = { v, chain: [[a, baseline, pathIn(v, a)]], top: false };
+          a.style.transform = parent.style.transform = "";
+          parent.style.top = (400 + delta) + "px";
+          hold(h);
+          samples.push({ transform, delta, before, expected, after: v.scrollTop, baseline, same: h.chain[0][0] === a });
+          parent.style.top = "400px";
+          hold(h);
+        }
+      }
+      const baseline = onScreen(a, v);
+      v.style.transform = "translateY(5px)";
+      samples.push({ rootTranslation: onScreen(a, v) === baseline });
+      v.style.transform = "";
+      for (const [element, transform] of [[a, "rotate(4deg)"], [parent, "scale(0)"], [v, "scale(.9)"], [document.body, "rotate(1deg)"]]) {
+        const h = { v, chain: [[a, baseline, pathIn(v, a)], [parent, onScreen(parent, v), pathIn(v, parent)]], top: false }, before = v.scrollTop;
+        element.style.transform = transform;
+        const unknown = onScreen(a, v);
+        hold(h);
+        samples.push({ transform, unknown, unchanged: before === v.scrollTop, same: h.chain[0][0] === a, baselineKept: h.chain[0][1] === baseline });
+        element.style.transform = "";
+      }
+      // A real representable fraction remains in the measured layout.
+      parent.style.top = "400.015625px";
+      samples.push({ subpixel: onScreen(a, v) - baseline });
+      parent.style.top = "400px";
+      // A whole redraw keeps the recorded depth, but follows the replacement.
+      const h = { v, chain: [[a, onScreen(a, v), pathIn(v, a)]], top: false }, before = v.scrollTop;
+      const copy = a.cloneNode(true);
+      a.replaceWith(copy);
+      parent.style.top = "408px";
+      hold(h);
+      samples.push({ replaced: h.chain[0][0] === copy, replacementMove: v.scrollTop - before });
+      parent.style.top = "400px";
+      hold(h);
+      readerLeaves(v);
+      const pin = pinAt.get(v);
+      copy.style.transform = "rotate(4deg)";
+      readerLeaves(v);
+      samples.push({ unknownPin: pinnedAt(v), keptSamePin: pinAt.get(v) === pin });
+      return samples;
+    });
+    for (const s of samples) {
+      if ("delta" in s) {
+        // Scroll positions are integer CSS pixels in both engines. The hold
+        // threshold still counts a full pixel on either side of zero.
+        assert.equal(s.after, s.expected, JSON.stringify(s));
+        assert.equal(s.same, true);
+      }
+      if ("rootTranslation" in s) assert.equal(s.rootTranslation, true);
+      if ("unknown" in s) assert.deepEqual([s.unknown, s.unchanged, s.same, s.baselineKept], [null, true, true, true], JSON.stringify(s));
+      if ("subpixel" in s) assert.equal(s.subpixel, 1 / 64);
+      if ("replaced" in s) assert.deepEqual([s.replaced, s.replacementMove], [true, 8]);
+      if ("unknownPin" in s) assert.deepEqual([s.unknownPin, s.keptSamePin], [null, true]);
+    }
+    const beforeWheel = await v.evaluate((v) => {
+      const before = v.scrollTop;
+      window.coordinateWheelRead = false;
+      const read = () => {
+        if (v.scrollTop !== before + 50) return;
+        v.removeEventListener("scroll", read);
+        window.coordinateWheelRead = true;
+      };
+      v.addEventListener("scroll", read);
+      return before;
+    });
+    await page.mouse.wheel(0, 50);
+    // The compositor can update scrollTop before dispatching scroll. The
+    // production reader handler must receive that event before recovery.
+    await page.waitForFunction(() => coordinateWheelRead);
+    assert.equal(await v.evaluate((v) => v.scrollTop), beforeWheel + 50);
+    const recovered = await page.evaluate(() => {
+      const v = coordinateView, cleared = pinAt.get(v) == null, before = v.scrollTop;
+      document.querySelector("#coordinate-anchor").style.transform = "";
+      backToReader(v);
+      return { cleared, before, after: v.scrollTop };
+    });
+    assert.equal(recovered.after, recovered.before, "restoring the transform never undoes the reader's wheel");
+    assert.equal(recovered.cleared, true, "a real wheel clears an unmeasurable pin");
+    assert.deepEqual(errors, []);
+  });
 }

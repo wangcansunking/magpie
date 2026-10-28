@@ -131,7 +131,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const posts = [];
         const { page, errors, tr } = await launch(t, engine, lang, width, OFF, {}, posts);
         await page.goto("http://magpie.test/?view=providers");
-        await page.locator(".row.provider").click();
+        // Loading placeholders share .row.provider; only the saved provider
+        // has this identity and opens the editor this test is about.
+        await page.locator('.row.provider[data-id="relay"]').click();
         if (!(await page.locator(".mnames:not([hidden])").count())) await page.getByRole("button", { name: await tr("Names & levels"), exact: true }).click();
         const sfx = page.locator(".mnames:not([hidden]) .msuffix");
         await sfx.waitFor();

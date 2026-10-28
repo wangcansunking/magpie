@@ -54,8 +54,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const baseURL = ed.locator(".base-url");
       const api = (v) => ed.locator(`.segs .opt[data-api="${v}"]`).click();
       const more = () => ed.locator("details.more input[type=url]").evaluateAll((is) => is.map((i) => i.value));
-      const sent = async (n) => {
-        for (let i = 0; i < 60 && posts.filter((p) => p.path === "/api/provider/save").length < n; i++) await page.waitForTimeout(50);
+      const sent = async (n, name, isNew) => {
+        // providerAction reports success after both the save reply and its
+        // state refresh. Recording the request alone is too early to reload.
+        await page.waitForFunction(([name, isNew]) => document.querySelector("#status")?.textContent === t(isNew ? "{name} added" : "{name} saved", { name }), [name, isNew]);
         const all = posts.filter((p) => p.path === "/api/provider/save");
         assert.equal(all.length, n, "saved");
         return all[n - 1].body;
@@ -77,7 +79,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await baseURL.fill(ROOT + "/claude");
       assert((await more()).includes(ROOT + "/v1"), "OpenAI's URL is back under More endpoints: " + (await more()));
       await press(L.add);
-      let body = await sent(1);
+      let body = await sent(1, "Relay", true);
       assert.equal(body.chat, ROOT + "/v1", "the OpenAI URL is saved too (#1231)");
       assert.equal(body.anthropic, ROOT + "/claude");
       assert.equal(body.baseAPI, "anthropic");
@@ -88,7 +90,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await api("responses");
       assert.equal(await baseURL.inputValue(), ROOT + "/v1");
       await press(L.add);
-      body = await sent(2);
+      body = await sent(2, "Responses only", true);
       assert.equal(body.responses, ROOT + "/v1");
       assert.equal(body.chat || "", "", "the URL moved to Responses (#73)");
       assert.equal(body.baseAPI, "responses");
@@ -103,7 +105,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await api("openai");
       assert.equal(await baseURL.inputValue(), ROOT + "/v2", "OpenAI's tab shows its new URL");
       await press(L.save);
-      body = await sent(3);
+      body = await sent(3, "Plain", false);
       assert.equal(body.chat, ROOT + "/v2");
       assert.equal(body.anthropic, ROOT + "/claude");
       assert.deepEqual(errors, []);

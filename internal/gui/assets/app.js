@@ -99,9 +99,17 @@ const modelFavorites = new Set(Array.isArray(savedModelFavorites) ? savedModelFa
 const favoriteKey = (o) => o.ref || o.value;
 const isFavorite = (o) => modelFavorites.has(favoriteKey(o)) || modelFavorites.has(o.value);
 
+// Once pagehide runs this guard, a late read's continuation must not start
+// another request from the departing document. pageshow restores API access,
+// including when the document comes back from the back-forward cache.
+let apiSuspended = false;
+addEventListener("pagehide", () => { apiSuspended = true; });
+addEventListener("pageshow", () => { apiSuspended = false; });
+
 // heads, when given, is shown the answer's headers (loadQuotas' X-Magpie-Reading);
 // signal, when given, cancels the request (a read the reader moved on from)
 async function api(path, body, heads, signal) {
+  if (apiSuspended) throw new DOMException("The page is no longer active", "AbortError");
   if (web && path === "open") { window.open(body.url, "_blank", "noopener"); return null; }
   // a segment may be an agent id, and omp's named profiles are omp#<name>:
   // left raw, the browser reads #work as the fragment and the request
@@ -293,7 +301,7 @@ function maskSpan(src, failed) {
   if (failed) load.then((ok) => ok || failed());
   return m;
 }
-const pngIcons = new Set(["crush", "zcode", "alma", "hanako", "cindy", "lody", "typesafe", "atomcode", "snow", "mlx-serve", "mothx"]);
+const pngIcons = new Set(["crush", "zcode", "alma", "hanako", "cindy", "lody", "typesafe", "atomcode", "snow", "mlx-serve", "mothx", "zoo-code"]);
 
 function icon(name) {
   const kept = keptIcons?.get(name || "")?.shift();
@@ -8488,8 +8496,25 @@ let modalOrigin = null, modalDone = null;
 function originRect(o) {
   const at = o && (o.el.isConnected ? o.el : o.find ? document.querySelector(o.find) : null);
   if (!at || at.closest("[hidden]")) return null;
-  const r = at.getBoundingClientRect();
+  const r = at.matches(".row.provider") ? rowOwnRect(at) : at.getBoundingClientRect();
   return r.width && r.height && r.bottom > 0 && r.top < innerHeight ? r : null;
+}
+// rowOwnRect: a provider row as a tile in the add sheet is, its icon and
+// name. The whole row is wider than the dialog, so the dialog couldn't
+// shrink into it and opened as a full-size strip widening (the owner: "太
+// 生硬", the add sheet's tiles "特别完美"); out of this it zooms as they do.
+function rowOwnRect(row) {
+  const r = row.getBoundingClientRect(), who = row.querySelector(".who");
+  if (!who) return r;
+  // where its words end: a range over the block itself spans its width
+  let end = who.getBoundingClientRect().left;
+  const text = document.createRange(), walk = document.createTreeWalker(who, NodeFilter.SHOW_TEXT);
+  for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+    text.selectNodeContents(n);
+    end = Math.max(end, text.getBoundingClientRect().right);
+  }
+  const right = Math.min(r.right, end + 12);
+  return new DOMRect(r.left, r.top, right - r.left, r.height);
 }
 // fromRect: the transform putting the dialog (at `to`) over the rect `from`
 function fromRect(from, to) {
@@ -8498,10 +8523,8 @@ function fromRect(from, to) {
   return `translate(${dx}px, ${dy}px) scale(${s})`;
 }
 // morphFrom: the dialog drawn as the rect it grows out of — moved over it,
-// scaled, and clipped to its shape. A provider row is wider than the
-// dialog, so scale alone left it a full-size dialog sliding in from the
-// row's middle (the owner: "从右上角弹出"); clipped, it opens as a strip
-// the row's height that grows into the dialog, and closes back into it.
+// scaled, and clipped to its shape, so it opens as that rect growing into
+// the dialog and closes back into it.
 // At rest the clip stands clear of the dialog so its shadow shows all the
 // way (inset can go negative in both engines).
 const MORPH_REST = "inset(-100px round 14px)";
@@ -8569,27 +8592,51 @@ $("#modal").addEventListener("keydown", (e) => {
 // goes with what grows above it, as nothing a click does scrolls. Centred all along, a dialog
 // shorter than the window moved by half of every change, the line just
 // clicked sliding from under the pointer. Its place is a relative top and
-// a cap on its height. A change made in the page is held before it is
-// drawn (a mutation's microtask); one that only resizes (an animation, the
-// window) a frame later, as an observer can't resize what it observes.
-const modalHold = { off: 0, at: null, y: 0, cap: null, capSet: "" };
-// how far down the dialog an element sits, to the fraction of a pixel,
-// what moves it in an animation (a row coming in) left out. An element
-// that scales (a Copy button's pop) is measured by what holds it, as its
-// top moves round its middle by more than the matrix says.
+// a cap on its height. Observer-driven changes share the next frame: a
+// class mutation can come from resize delivery too, where changing the
+// dialog's height would resize an ancestor already delivered to WebKit.
+// Opening or redrawing an editor still places it directly before paint.
+const modalHold = { off: 0, at: null, y: 0, cap: null, capSet: "", frame: 0 };
+// How far down the dialog the same marked element sits, to a fraction of
+// a pixel, without the controls' positive axis-aligned scales/translations.
+// A pressed chip scales around its centre; measuring its parent instead
+// compares that parent's depth with the marked label's and moves the dialog.
+// Other transforms are temporarily unmeasurable, not a different anchor.
+const modalAnchor = (a, d) => !!(a?.isConnected && d.contains(a) && a !== d && a.offsetParent);
+// The same element's depth without its controls' CSS transform scales/translations.
+// A root's entrance translation cancels between the two rects. A root or
+// outer ancestor scaled/rotated isn't in these CSS units: leave it unknown.
+function contentDepth(a, root) {
+  if (!a?.isConnected || !root?.contains(a) || !a.offsetParent) return null;
+  for (let x = root; x; x = x.parentElement) {
+    const transform = getComputedStyle(x).transform;
+    if (transform === "none") continue;
+    const m = new DOMMatrixReadOnly(transform);
+    if (!m.is2D || m.m11 !== 1 || m.m22 !== 1 || m.m12 || m.m21) return null;
+  }
+  const transforms = [];
+  for (let x = a; x && x !== root; x = x.parentElement) {
+    const cs = getComputedStyle(x);
+    if (cs.transform === "none") continue;
+    const m = new DOMMatrixReadOnly(cs.transform);
+    if (!m.is2D || m.m11 <= 0 || m.m22 <= 0 || m.m12 || m.m21) return null;
+    transforms.push({ x, m, origin: parseFloat(cs.transformOrigin.split(" ")[1]) });
+  }
+  // Undo outer transforms first: every inner rect/origin went through them.
+  let scale = 1, offset = 0;
+  for (const { x, m, origin } of transforms.reverse()) {
+    const top = x.getBoundingClientRect().top * scale + offset;
+    offset = (offset - top) / m.m22 + top - m.m42 - origin * (1 - m.m22);
+    scale /= m.m22;
+  }
+  const y = a.getBoundingClientRect().top * scale + offset - root.getBoundingClientRect().top;
+  return Number.isFinite(y) ? y : null;
+}
 function modalDepth(a, d) {
-  if (!a?.isConnected || !d.contains(a) || a === d || !a.offsetParent) return null;
+  if (!modalAnchor(a, d)) return null;
   if (getComputedStyle(d).transform === "none") {
-    const moves = [];
-    for (let x = a; x && x !== d; x = x.parentElement) {
-      const t = getComputedStyle(x).transform;
-      if (t === "none") continue;
-      const m = new DOMMatrixReadOnly(t);
-      if (m.m11 === 1 && m.m22 === 1 && !m.m12 && !m.m21) moves.push(m.m42);
-      else { a = x.parentElement; moves.length = 0; }
-    }
-    if (a === d) return null;
-    return moves.reduce((y, m) => y - m, a.getBoundingClientRect().top - d.getBoundingClientRect().top - d.clientTop);
+    const y = contentDepth(a, d);
+    return y == null ? null : y - d.clientTop;
   }
   // the dialog itself coming in: whole pixels, by offsets
   let y = 0;
@@ -8606,13 +8653,25 @@ function modalMark(a) {
 }
 const modalCap = () => modalHold.cap == null ? `calc(100% - ${modalHold.off}px)` : `min(calc(100% - ${modalHold.off}px), ${modalHold.cap}px)`;
 function holdModal(later) {
+  if (later) {
+    if (!modalHold.frame) modalHold.frame = requestAnimationFrame(() => { modalHold.frame = 0; holdModal(); });
+    return;
+  }
+  // A direct redraw supersedes a pending observer fit. The frame reads the
+  // current editor, never the cap or element of one already closed/replaced.
+  cancelAnimationFrame(modalHold.frame);
+  modalHold.frame = 0;
   const m = $("#modal"), d = m.firstElementChild;
-  if (m.hidden || !m.classList.contains("held")) return;
+  if (m.hidden || m.classList.contains("out") || !m.classList.contains("held")) return;
   // what was pressed, or failing that what has the focus (a redraw swaps
   // the pressed element for its copy, and gives that copy the focus)
   let y = modalDepth(modalHold.at, d);
-  if (y == null && d.contains(document.activeElement)) { modalHold.at = document.activeElement; y = modalDepth(modalHold.at, d); }
-  const want = modalHold.off + (y == null ? 0 : modalHold.y - y);
+  if (y == null && !modalAnchor(modalHold.at, d) && modalAnchor(document.activeElement, d)) { modalHold.at = document.activeElement; y = modalDepth(modalHold.at, d); }
+  const delta = y == null ? 0 : modalHold.y - y;
+  // Inverting a painted transform leaves float roundoff below a layout
+  // unit. Do not turn 11px into 10.99999px: CSS can lay that out one whole
+  // unit lower. Keep real subpixel movement (including 1/64px) unchanged.
+  const want = modalHold.off + (Math.abs(delta) < 0.001 ? 0 : delta);
   const c = getComputedStyle(m), h = d.getBoundingClientRect().height;
   const space = m.clientHeight - parseFloat(c.paddingTop) - parseFloat(c.paddingBottom);
   // grown to the window's foot it stays, capped there, its fields scrolling;
@@ -8623,24 +8682,27 @@ function holdModal(later) {
     const body = d.querySelector(".ebody");
     if (body && !body.contains(modalHold.at)) modalHold.cap = Math.max(0, h + want);
   }
-  d.style.top = modalHold.off + "px";
-  const cap = () => {
-    if (!m.classList.contains("held") || modalCap() === modalHold.capSet) return;
-    d.style.maxHeight = modalHold.capSet = modalCap();
-  };
-  if (later) requestAnimationFrame(cap);
-  else cap();
+  const top = modalHold.off + "px", cap = modalCap();
+  if (d.style.top !== top) d.style.top = top;
+  if (cap !== modalHold.capSet) d.style.maxHeight = modalHold.capSet = cap;
   if (y != null) modalHold.y = modalDepth(modalHold.at, d) ?? y;
 }
 {
   const m = $("#modal"), d = m.firstElementChild, later = () => holdModal(true);
   new ResizeObserver(later).observe(d);
   new ResizeObserver(later).observe(m);
-  new MutationObserver(() => holdModal()).observe(d, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["class", "hidden", "open"] });
+  new MutationObserver(later).observe(d, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["class", "hidden", "open"] });
   m.addEventListener("pointerdown", (e) => modalMark(e.target), true);
   m.addEventListener("focusin", (e) => modalMark(e.target), true);
-  // a scroll moves the marked element, not the dialog
-  m.addEventListener("scroll", () => modalMark(modalHold.at), true);
+  // Only vertical scrolling rebases the vertical anchor. WebKit can clamp
+  // horizontal overflow while content above it reflows; accepting that as
+  // a new depth discards the movement holdModal still needs to compensate.
+  const scrollTops = new WeakMap();
+  m.addEventListener("scroll", (e) => {
+    const top = e.target.scrollTop || 0, before = scrollTops.get(e.target) || 0;
+    scrollTops.set(e.target, top);
+    if (top !== before) modalMark(modalHold.at);
+  }, true);
 }
 function openModal(content) {
   const m = $("#modal"), d = m.firstElementChild;
@@ -8819,10 +8881,11 @@ const thumbGlide = (th) => th.getAnimations().find((a) => a.id === "thumb" && a.
 // a thumb put at p at once, any glide of it stopped
 function thumbPut(th, p) {
   for (const a of th.getAnimations()) if (a.id === "thumb") a.cancel();
-  th.classList.add("still");
-  Object.assign(th.style, thumbAt(p), { height: p.h ? p.h + "px" : "" });
-  void th.offsetWidth;
-  th.classList.remove("still");
+  // Only opacity has a CSS transition; position is slide()'s animation.
+  // Toggling .still here wakes a dialog's mutation observer during a fit.
+  for (const [key, value] of Object.entries({ ...thumbAt(p), height: p.h ? p.h + "px" : "" })) {
+    if (th.style[key] !== value) th.style[key] = value;
+  }
 }
 // where a thumb in the page is drawn now, partway through a glide included
 function thumbNow(th) {
@@ -8835,19 +8898,30 @@ const thumbPick = (box, on) => [...box.children].filter((c) => !c.classList.cont
 const thumbSame = (a, b) => Math.abs(a.x - b.x) < 0.5 && Math.abs((a.y || 0) - (b.y || 0)) < 0.5 && Math.abs(a.w - b.w) < 0.5;
 // a control shown, or sized again (the fonts come in, the language changes,
 // the window narrows): its thumb is put under its option, still
+const thumbFits = new Set();
+let thumbFitFrame = 0;
 const thumbFit = new ResizeObserver((es) => {
-  for (const { target: box } of es) {
-    if (!box.isConnected) { thumbFit.unobserve(box); continue; }
-    const th = box.querySelector(":scope > .thumb"), on = box.querySelector(":scope > .on");
-    const to = th && on && thumbTo(box, on);
-    if (!to) continue;
-    const control = thumbKey(box, thumbKeys.get(box));
-    const last = control && thumbs.get(control);
-    const pick = thumbPick(box, on);
-    if (last?.th === th && last.pick === pick && thumbSame(last.to, to) && th.style.width) continue;
-    thumbPut(th, to);
-    if (control) thumbs.set(control, { th, pick, to });
-  }
+  for (const { target } of es) thumbFits.add(target);
+  if (thumbFitFrame) return;
+  thumbFitFrame = requestAnimationFrame(() => {
+    thumbFitFrame = 0;
+    const boxes = [...thumbFits];
+    thumbFits.clear();
+    for (const box of boxes) {
+      if (!box.isConnected) { thumbFit.unobserve(box); continue; }
+      // Read the current pick and thumb: a direct slide or redraw may have
+      // happened since delivery, and must not be undone by a stale fit.
+      const th = box.querySelector(":scope > .thumb"), on = box.querySelector(":scope > .on");
+      const to = th && on && thumbTo(box, on);
+      if (!to) continue;
+      const control = thumbKey(box, thumbKeys.get(box));
+      const last = control && thumbs.get(control);
+      const pick = thumbPick(box, on);
+      if (last?.th === th && last.pick === pick && thumbSame(last.to, to) && last.to.h === to.h && th.style.width) continue;
+      thumbPut(th, to);
+      if (control) thumbs.set(control, { th, pick, to });
+    }
+  });
 });
 function slide(box, key) {
   const control = thumbKey(box, key);
@@ -14557,10 +14631,12 @@ function protoPicker(p, value, onChange) {
 // redrawn under a still pointer (a search narrowing it) gets a mouseenter
 // too, which took the focus out of the search mid-word (#2439); one where
 // the last mousemove was is a redraw's (mouseenter comes before its move).
+// Compare within the webview: WebKit on Windows reports screenX/Y as zero,
+// even for a real moving pointer.
 let pointerAt = "";
-addEventListener("mousemove", (e) => { pointerAt = e.screenX + "," + e.screenY; }, true);
+addEventListener("mousemove", (e) => { pointerAt = e.clientX + "," + e.clientY; }, true);
 function hoverFocus(b) {
-  b.onmouseenter = (e) => { if (e.screenX + "," + e.screenY !== pointerAt) b.focus({ preventScroll: true }); };
+  b.onmouseenter = (e) => { if (e.clientX + "," + e.clientY !== pointerAt) b.focus({ preventScroll: true }); };
 }
 let protoMenu = null;
 function closeProtoMenu() {
@@ -14682,7 +14758,7 @@ function openProtoMenu(anchor, opts, value, choose, head = "Protocol this key sp
   const keys = (e) => {
     const shown = filter ? items.filter((b) => !b.hidden) : items;
     const i = shown.indexOf(document.activeElement);
-    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeProtoMenu(); anchor.focus(); }
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeProtoMenu(); anchor.focus({ preventScroll: true }); }
     else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault(); e.stopPropagation();
       const n = shown.length, from = i < 0 ? (e.key === "ArrowDown" ? n - 1 : 0) : i;
@@ -15120,18 +15196,22 @@ new IntersectionObserver(([en]) => {
 // it did before the sheet opened. Held, the view kept the sheet's height as
 // empty room under the list (the blank #433 was about).
 function closeAddSheet() {
-  const view = $("#view-providers"), sheet = $("#addSheet");
+  const pane = $("#view-providers"), sheet = $("#addSheet");
   if (!adding) return;
-  if (held?.v === view) held = null;
-  setRoom(view, 0);
+  const closedIn = view;
+  if (held?.v === pane) held = null;
+  setRoom(pane, 0);
   addReturnPick = null;
+  // Closing owns the selection it dismisses, not an editor opened while
+  // the animation runs. Settle that state now, before another row can act.
+  adding = false; editing = null; draft = null; presetQuery = "";
   rollUpSheet(sheet, () => {
-    adding = false; editing = null; draft = null; presetQuery = "";
+    if (adding || editing !== null || importing || importingApps || view !== closedIn) return;
     renderProviders();
-    setRoom(view, 0);
+    setRoom(pane, 0);
     // back from stepping aside now, not when the observer next looks, so it
     // can take the focus
-    view.querySelector(".after-list").classList.remove("away");
+    pane.querySelector(".after-list").classList.remove("away");
     $("#addProvider").focus({ preventScroll: true });
   });
 }
@@ -18648,7 +18728,7 @@ function openSessCombo(anchor, all, opts, value, choose, head) {
   const scroll = (e) => { if (scrollCloses(box, e)) closeProtoMenu(); };
   const keys = (e) => {
     const i = items.indexOf(document.activeElement);
-    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeProtoMenu(); anchor.focus(); }
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeProtoMenu(); anchor.focus({ preventScroll: true }); }
     else if ((e.key === "ArrowDown" || e.key === "ArrowUp") && items.length) {
       e.preventDefault(); e.stopPropagation();
       const n = items.length, from = i < 0 ? (e.key === "ArrowDown" ? n - 1 : 0) : i;
@@ -19323,6 +19403,9 @@ function renderUpdateMirror(r, s) {
 }
 
 function renderSettings() {
+  // General saves own their optimistic controls until the last queued
+  // reply. An unrelated redraw must not send their thumbs back to prefs.
+  if (prefsQueued) return;
   const s = prefs;
   const keep = prefsKeep(s);
   prefsBase = keep;
@@ -19345,7 +19428,7 @@ function renderSettings() {
     s.dock ? "on" : s.dockWindow ? "window" : "off", (v) => savePrefs({ ...keep, dock: v === "on", dockWindow: v === "window" })));
   // a closed window's webview let go (#580): the app's windows alone
   $("#lightweightRow").hidden = web;
-  $("#lightweightSegs").replaceChildren(segs([["off", t("Off")], ["on", t("On")]], s.lightweight !== false ? "on" : "off",
+  $("#lightweightSegs").replaceChildren(segs([["off", t("Off")], ["on", t("On")]], s.lightweight === true ? "on" : "off",
     (v) => savePrefs({ ...keep, lightweight: v === "on" })));
   // the display kept on too (#975): an agent recording the screen found it locked
   $("#keepAwakeSegs").replaceChildren(segs([["off", t("Off")], ["on", t("On")], ["display", t("Screen on too")]],
@@ -23397,7 +23480,8 @@ function arrived(v) {
 }
 const SCROLL_KEYS = new Set(["PageUp", "PageDown", "Home", "End", "ArrowUp", "ArrowDown", " "]);
 // Enter/Space can move focus to another field (opening a form, or validation).
-// Reveal that field only when the keyboard action moved it out of sight.
+// Tab's native reveal can leave a field partly clipped in WebKit. Reveal the
+// changed focus only when that keyboard action leaves it out of sight.
 function keyboardFocus(e) {
   const before = document.activeElement;
   // The click guard first puts back any native focus scroll; inspect its result.
@@ -23487,7 +23571,7 @@ addEventListener("pointermove", (e) => {
 addEventListener("keydown", (e) => {
   const typing = e.target.closest?.("input, textarea, select, [contenteditable]");
   if (e.key === "Tab" || (!typing && SCROLL_KEYS.has(e.key))) readerScrolls(400);
-  if (e.isTrusted && e.key === "Enter") keyboardFocus(e);
+  if (e.isTrusted && (e.key === "Enter" || e.key === "Tab")) keyboardFocus(e);
 }, true);
 addEventListener("keyup", (e) => {
   if (e.isTrusted && e.key === " " && !e.target.closest?.("input, textarea, select, [contenteditable]")) keyboardFocus(e);
@@ -23509,14 +23593,19 @@ function keepInView(v, part) {
   for (const c of v.children) pinSizes.observe(c);
 }
 function readerLeaves(v) {
+  const before = readerAt.get(v);
   readerAt.set(v, v.scrollTop);
   // a view at its top stays at its top: nothing in it is kept in place
   const p = pinOf.has(v) && v.scrollTop >= 1 ? pinOf.get(v)() : null;
-  pinAt.set(v, p ? [p, onScreen(p, v)] : null);
+  const y = p ? onScreen(p, v) : null;
+  if (y != null) pinAt.set(v, [p, y]);
+  // An unknown transform keeps only an unchanged reader's same live anchor.
+  // Keeping its old depth after a wheel would undo the reader's new position.
+  else if (!p?.isConnected || !v.contains(p) || !p.offsetParent || pinAt.get(v)?.[0] !== p || before !== v.scrollTop) pinAt.set(v, null);
 }
 function pinnedAt(v) {
-  const a = pinAt.get(v);
-  return a && a[0].isConnected && a[0].offsetParent ? v.scrollTop + onScreen(a[0], v) - a[1] : null;
+  const a = pinAt.get(v), y = a ? onScreen(a[0], v) : null;
+  return y == null ? null : v.scrollTop + y - a[1];
 }
 // laid out, not yet painted: a view with a part kept in place follows it
 // as soon as what's above it has changed size, before the reader sees it
@@ -23544,7 +23633,10 @@ function backToReader(v) {
 // clicked or, once it's gone or hidden (drawn again), the nearest still
 // there of its neighbours, its parents and theirs; one moving as it plays
 // (a row springing open) is passed over, so the page doesn't follow the play.
-const onScreen = (n, v) => n.getBoundingClientRect().top - v.getBoundingClientRect().top;
+const onScreen = (n, v) => contentDepth(n, v);
+// Inverting a serialized transform can leave an integer just below itself.
+// Snap only arithmetic noise, not genuine subpixel layout or pin baselines.
+const scrollExact = (n) => Math.abs(n - Math.round(n)) < 0.001 ? Math.round(n) : n;
 // Only a play that moves it counts: a colour or a fade easing in (the hover
 // of the button just clicked, its label fading to its new words) leaves it
 // where it is. Were those passed over too, the page would be held by
@@ -23608,9 +23700,11 @@ function hold(h) {
   // once the page was a little taller than the window (#2296)
   const a = h.chain.find(([n]) => atRest(n) && n.offsetHeight) || h.chain.find(([n]) => atRest(n)) || (h.chain.some(([n]) => n.isConnected) ? null : standIn(h));
   if (!a) return;
-  const v = h.v, d = onScreen(a[0], v) - a[1];
+  const v = h.v, y = onScreen(a[0], v);
+  if (y == null) return;
+  const d = scrollExact(y - a[1]);
   if (Math.abs(d) >= 1) {
-    let want = v.scrollTop + d;
+    let want = scrollExact(v.scrollTop + d);
     const max = v.scrollHeight - v.clientHeight;
     // a view at its top when clicked stays at its top: what comes in above
     // what was clicked moves it down rather than scrolling the view to follow
@@ -23703,7 +23797,10 @@ addEventListener("click", (e) => {
   const chain = [];
   const from = at.closest?.("[data-unrolls]")?.parentElement || at;
   for (let n = from; n && n !== v; n = n.parentElement) {
-    for (const m of [n, n.previousElementSibling, n.nextElementSibling]) if (m instanceof HTMLElement && m.offsetParent) chain.push([m, onScreen(m, v), pathIn(v, m)]);
+    for (const m of [n, n.previousElementSibling, n.nextElementSibling]) if (m instanceof HTMLElement && m.offsetParent) {
+      const y = onScreen(m, v);
+      if (y != null) chain.push([m, y, pathIn(v, m)]);
+    }
   }
   held = chain.length ? { v, chain, until: performance.now() + 4000, top: v.scrollTop < 1 } : null;
   heldSizes.disconnect();
@@ -23913,7 +24010,7 @@ $("#prefs").onclick = () => { openSettings(); $("#prefs").blur(); };
 // A newer magpie is looked for on its own, and from Settings › About's Check.
 function refreshKind() {
   if (mode === "panel") return { agents: "agents", usage: "allowances", stats: "requests" }[panelTab] || "models";
-  return { agents: "agents", usage: "usage" }[view] || "models";
+  return { agents: "agents", usage: "usage", wan: "wan" }[view] || "models";
 }
 // syncTitle: the refresh's tooltip says what it reads on the page shown.
 // Called from setPanelTab as the page loads, before this part of it has run.
@@ -23926,6 +24023,7 @@ function syncTitle() {
     allowances: "Read the allowances again now",
     requests: "Read the requests again now",
     models: "Refresh model lists (models.dev and every vendor)",
+    wan: "Read WAN Gateway status again",
   }[refreshKind()];
   b.title = t(b.dataset.enTitle);
   b.setAttribute("aria-label", b.title);
@@ -23937,6 +24035,9 @@ async function refreshPage(kind) {
       renderAgents();
       await Promise.all([loadInstalls(), loadCLIs()]);
       return t("Agents looked for again");
+    case "wan":
+      await magpie.call("wan", "refresh");
+      return t("WAN Gateway status refreshed");
     case "usage":
       await magpie.call("usage", "reload");
       return t("Usage refreshed");
@@ -24050,7 +24151,13 @@ function fitTop() {
   top.classList.add("crowded");
   if (!fits()) top.classList.add("packed");
 }
-const topFit = new ResizeObserver(fitTop);
+// Fitting hides the brand and Update text, resizing the observed elements.
+// Do that on the next frame, not during their resize delivery (WebKit loops).
+let topFitFrame = 0;
+const topFit = new ResizeObserver(() => {
+  if (topFitFrame) return;
+  topFitFrame = requestAnimationFrame(() => { topFitFrame = 0; fitTop(); });
+});
 for (const e of [".top", ".brand", ".actions"]) topFit.observe($(e));
 document.fonts?.ready.then(fitTop);
 // a font picked later (Settings' Font) can still be loading when it's applied

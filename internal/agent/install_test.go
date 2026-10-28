@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -137,10 +138,30 @@ func TestNpmIn(t *testing.T) {
 
 // The command without Node is one line every shell it's run in reads:
 // bash and zsh on a Mac or Linux.
+func installTestShell(name string) (string, error) {
+	if runtime.GOOS != "windows" {
+		return exec.LookPath(name)
+	}
+	// Windows' PATH bash.exe can be the WSL launcher, whose distro and
+	// home are outside this sandbox. Git's native shells parse the line
+	// without starting WSL; the same check uses system shells on Unix.
+	git, err := exec.LookPath("git")
+	if err != nil {
+		return "", err
+	}
+	root := filepath.Dir(filepath.Dir(git))
+	for _, p := range []string{filepath.Join(root, "bin", name+".exe"), filepath.Join(root, "usr", "bin", name+".exe")} {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p, nil
+		}
+	}
+	return "", exec.ErrNotFound
+}
+
 func TestInstallWithoutNodeParses(t *testing.T) {
 	c := npmInstall("@earendil-works/pi-coding-agent", "linux", false).Command
 	for _, sh := range []string{"bash", "zsh", "sh"} {
-		p, err := exec.LookPath(sh)
+		p, err := installTestShell(sh)
 		if err != nil {
 			continue
 		}
@@ -168,7 +189,7 @@ func TestInstallWithoutNodeStopsWhenTheDownloadFails(t *testing.T) {
 	c := strings.Replace(npmInstall("@earendil-works/pi-coding-agent", "linux", false).Command,
 		"https://raw.githubusercontent.com/nvm-sh/nvm/"+nvmVersion+"/install.sh", bad.URL+"/install.sh", 1)
 	for _, sh := range []string{"bash", "zsh", "sh"} {
-		p, err := exec.LookPath(sh)
+		p, err := installTestShell(sh)
 		if err != nil {
 			continue
 		}

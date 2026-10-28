@@ -75,7 +75,7 @@ magpie 通过读取智能体的登录信息（Claude Code 和 Codex 的文件、
 <table>
 <tr><td>
 
-Claude Code · Claude Desktop · Claude Science · Codex · Gemini CLI · Antigravity CLI · OpenCode · OpenChamber · MiMo Code · DevEco Code · Pi · oh-my-pi · StepCode · MothX · Aside · OmO · Prime Agent · Goose · Cursor CLI · Cursor Private Inference · Zed · VS Code Chat · VS Code Insiders · VSCodium Chat · JetBrains Air · Copilot (JetBrains) · Copilot CLI · Crush · DeepSeek Harness · Reasonix Studio · Command Code · fx · Devin · Hermes Agent · Mister Morph · Kimi Code · jcode · Qwen Code · Muse Code · Empryo · MiniMax Code · Droid · Cline · Qoder · Qoder CN · Grok Build · Grok App · ZCode · WorkBuddy · WorkBuddy AI · CodeBuddy Code · Pencil · OpenPencil · Raycast · T3 Code · OpenHanako · AtomCode · Snow CLI · Alma · Cindy · Lody · Ante · AstrBot
+Claude Code · Claude Desktop · Claude Science · Codex · Gemini CLI · Antigravity CLI · OpenCode · OpenChamber · MiMo Code · DevEco Code · Pi · oh-my-pi · StepCode · MothX · Aside · OmO · Prime Agent · Goose · Cursor CLI · Cursor Private Inference · Zed · VS Code Chat · VS Code Insiders · VSCodium Chat · Zoo Code · JetBrains Air · Copilot (JetBrains) · Copilot CLI · Crush · DeepSeek Harness · Reasonix Studio · Command Code · fx · Devin · Hermes Agent · Mister Morph · Kimi Code · jcode · Qwen Code · Muse Code · Empryo · MiniMax Code · Droid · Cline · Qoder · Qoder CN · Grok Build · Grok App · ZCode · WorkBuddy · WorkBuddy AI · CodeBuddy Code · Pencil · OpenPencil · Raycast · T3 Code · OpenHanako · AtomCode · Snow CLI · Alma · Cindy · Lody · Ante · AstrBot
 
 </td></tr>
 </table>
@@ -241,10 +241,39 @@ magpie plugin options model-map '{"mapping": {"fast": "deepseek/deepseek-chat"}}
 
 | | |
 | :-- | :-- |
+| **[WAN Gateway](#wan-gateway)** | 通过 Microsoft Dev Tunnels 向远程客户端提供有独立 Key 保护的公网 API，WAN 登录和密钥与本地网关分开 |
 | **局域网** | 打开「在局域网共享」，给每个客户端一个命名的网关 key，各自设每天、每周或每月的 token 和花费上限 |
 | **[远程 magpie](https://usemagpie.ai/docs/zh/remote)** | 笔记本用台式机上那个 magpie 的 provider、账号和路由组，同时照样配置自己的 Agent |
 | **[Docker](https://usemagpie.ai/docs/zh/docker)** | 在服务器或 NAS 上跑 `ghcr.io/yetone/magpie`，用 Web 界面管理 |
 | **同步** | 备份到文件，或者通过 WebDAV（坚果云、Nextcloud……）或 S3 在多台机器间同步 |
+
+### WAN Gateway
+
+以下步骤需要使用本仓库包含 WAN Gateway 的构建版本。
+
+远程电脑上的 Claude Code、Codex 等兼容客户端，可以通过 **WAN Gateway**
+使用这台电脑配置的 provider 和模型。Microsoft Dev Tunnels 提供公网 HTTPS 地址，
+magpie 只开放模型 API，管理界面保留在本地。
+
+1. 在 **Providers** 添加 provider，再打开 **WAN Gateway**。如果页面提示缺少
+   WAN 运行环境，先安装一次。
+2. 使用 **GitHub** 或 **Microsoft** 单独登录 Dev Tunnels。Microsoft 通过系统浏览器
+   登录，支持个人及工作/学校账号，仍需符合组织的登录策略。选择 **记住登录** 后，
+   续期凭据保存在操作系统凭据库中。
+3. 为每个远程客户端创建独立的 **WAN Key**，点击 **Start**，复制页面提供的公网地址
+   和客户端配置。本地网关 Key 和 provider API Key 不能用于访问 WAN。
+4. 主机上的 magpie 需要保持运行。**Stop** 会关闭公网访问；重启 magpie 后可以恢复
+   已记住的登录，但需要手动点击 Start 才会重新开放 WAN。
+
+每个账号默认保留自己的隧道，切换账号时会选择该账号保存的隧道，也可以手动选择
+**使用新隧道**，更换后公网地址会改变。页面显示服务返回的用量和限额，仍受
+Microsoft Dev Tunnels 配额约束。可恢复的断线会立即重试，之后间隔至少 20 秒，
+最长持续 5 分钟；页面显示重试进度，最终失败时提醒用户。配置目录中的
+`wan-diagnostics.jsonl` 会保存断线、重试和最终结果，不记录 Key 或 Token；
+日志每份最多 1 MiB，保留一份旧日志。
+
+API、凭据保存、自动重连和诊断日志的详细说明见
+[WAN Gateway 参考](docs/subsystems/wan-gateway.md)。
 
 ### 还有
 

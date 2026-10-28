@@ -10,6 +10,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
+const { EventEmitter, once } = require("node:events");
 const { chromium, webkit } = require("playwright");
 
 const assets = path.resolve(__dirname, "../assets");
@@ -24,7 +25,7 @@ const routeOf = (order) => ({
 const card = (used) => [{ provider: "claude", name: "Claude", kind: "subscription", user: "work@example.com", plan: "Max",
   windows: [{ name: "5 hours", used, resetsAt: iso(now + 130 * 60e3) }] }];
 
-function serve(lang, order, asks, held) {
+function serve(lang, order, asks, held, arrived = () => {}) {
   const state = { agents: [{ id: "claude", name: "Claude Code", path: "/test/claude", fields: [] }], profiles: [], settings: { lang, theme: "light", quotaLeft: false } };
   return async (r) => {
     const url = new URL(r.request().url());
@@ -40,6 +41,7 @@ function serve(lang, order, asks, held) {
       const asked = url.searchParams.get("asked") === "1";
       asks.push(asked);
       if (!asked) return json(card(40));
+      arrived();
       await held; // the vendor takes its time
       return json(card(70));
     }
@@ -92,7 +94,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
             let release;
             const held = new Promise((y) => { release = y; });
             page.on("pageerror", (e) => errors.push(e.message));
-            await page.route("**/*", serve(lang, [acct], asks, held));
+            const requests = new EventEmitter();
+            await page.route("**/*", serve(lang, [acct], asks, held, () => requests.emit("asked")));
             await page.goto("http://magpie.test/?view=routing");
             const act = page.locator(".rt-act", { hasText: "work@example.com" }).first();
             await act.locator(".wins span").filter({ hasText: w.before }).waitFor();
@@ -107,8 +110,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
             await wheelTo(page, b);
             const top = await page.locator("#view-routing").evaluate((v) => v.scrollTop);
             const box = await b.boundingBox();
+            const arrived = once(requests, "asked", { signal: AbortSignal.timeout(5000) });
             await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
             await page.waitForFunction(() => document.querySelector("#rtReadAllowances").classList.contains("busy"));
+            await arrived;
             assert.equal(asks.filter(Boolean).length, 1, "one asked read");
             // a second click while it turns asks nothing more
             await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);

@@ -119,6 +119,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         let before = await scrolls(page);
         await every.locator(".opt", { hasText: w.m30 }).click();
         await page.waitForFunction(() => document.querySelector(".update-every-row .opt.on")?.textContent.startsWith("30"));
+        await page.waitForFunction(() => prefsQueued === 0);
         assert.equal(ctl.saves.at(-1).updateEvery, 30);
         assert.equal(ctl.saves.at(-1).noAutoUpdate, false);
         assert.equal(await scrolls(page), before, "the click must not scroll the page");
@@ -129,6 +130,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await auto.locator(".opt", { hasText: w.off }).click();
         await every.locator(".sub", { hasText: w.whileOn }).waitFor();
         assert.equal(await every.evaluate((r) => r.classList.contains("off")), true);
+        await page.waitForFunction(() => prefsQueued === 0);
         assert.equal(ctl.saves.at(-1).noAutoUpdate, true);
         assert.equal(ctl.saves.at(-1).updateEvery, 30);
         assert.equal(await scrolls(page), before, "the click must not scroll the page");
@@ -152,6 +154,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         before = await scrolls(page);
         await auto.locator(".opt", { hasText: w.on }).click();
         await every.locator(".sub", { hasText: w.often }).waitFor();
+        await page.waitForFunction(() => prefsQueued === 0);
         assert.equal(ctl.saves.at(-1).noAutoUpdate, false);
         assert.equal(await every.evaluate((r) => r.classList.contains("off")), false);
         assert.equal((await every.locator(".opt.on").innerText()).trim(), w.m30);
@@ -160,6 +163,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         before = await scrolls(page);
         await every.locator(".opt", { hasText: w.h24 }).click();
         await page.waitForFunction(() => document.querySelector(".update-every-row .opt.on")?.textContent.startsWith("24"));
+        await page.waitForFunction(() => prefsQueued === 0);
         assert.equal(ctl.saves.at(-1).updateEvery, 1440);
         assert.equal(await scrolls(page), before, "the click must not scroll the page");
         assert.deepEqual(errors, []);

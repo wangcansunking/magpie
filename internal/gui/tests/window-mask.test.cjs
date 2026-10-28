@@ -63,6 +63,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         let text = await seen(page);
         for (const name of [...MAIL, "李雷"]) assert.ok(!text.includes(name), `${name} in sight on Providers: ${text}`);
 
+        // The next full navigation must not cancel startup badge reads;
+        // WebKit reports aborted fixture fetches as access-control errors.
+        await page.waitForLoadState("networkidle");
+
         // a provider's editor, its accounts listed
         await page.goto("http://magpie.test/?view=providers&edit=codex");
         await page.waitForFunction((m) => [...document.querySelectorAll(".pii")].filter((e) => m.includes(e.dataset.raw)).length >= 2, MAIL);

@@ -114,6 +114,24 @@ async function click(page, locator) {
   await locator.click();
 }
 
+// Use after the reader has brought the control clear (reach/wheelTo).
+// This sends a real pointer press without Playwright's implicit scrolling
+// or its two-frame stability wait. WebKit can stop delivering those frames
+// under load even while the page's input handlers run (#2150). Read the
+// live node and its hit point together; never force through another control.
+async function pointerClick(page, locator) {
+  await locator.waitFor({ state: "visible" });
+  const at = await locator.evaluateAll((es) => {
+    if (es.length !== 1) return null;
+    const e = es[0], b = e.getBoundingClientRect();
+    const x = b.left + b.width / 2, y = b.top + b.height / 2;
+    const hit = document.elementFromPoint(x, y);
+    return !e.matches(":disabled") && !e.closest('[aria-disabled="true"]') && hit && (hit === e || e.contains(hit)) ? { x, y } : null;
+  });
+  if (!at) throw new Error("the pointer target is not enabled and uncovered: " + locator);
+  await page.mouse.click(at.x, at.y);
+}
+
 // Settings is drawn from each read of the settings, and opening the page
 // reads them twice: the page's own read, then the window's load() once the
 // state is in. Every row is replaced by the second draw, so a row found
@@ -173,4 +191,4 @@ async function openAgentSettings(page, id = "codex") {
   await page.waitForFunction(() => __settingsReads.asked > 0 && __settingsReads.asked === __settingsReads.drawn);
 }
 
-module.exports = { inView, reach, wheelTo, click, openPart, watchSettingsReads, settingsDrawn, agentRow, openAgentSettings };
+module.exports = { inView, reach, wheelTo, click, pointerClick, openPart, watchSettingsReads, settingsDrawn, agentRow, openAgentSettings };

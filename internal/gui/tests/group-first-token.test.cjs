@@ -37,7 +37,10 @@ const custom = { en: "Custom", zh: "自定义", "zh-TW": "自定義", ja: "カ�
 
 function serve(lang, posts) {
   const state = { agents: [{ id: "codex", name: "Codex", path: "/test/codex", fields: [] }], profiles: [], settings: { lang, theme: "light" } };
-  return async (r) => {
+  let release;
+  const stopped = new Promise((resolve) => { release = resolve; });
+  const pending = new Set();
+  const handler = async (r) => {
     const url = new URL(r.request().url());
     const json = (data) => r.fulfill({ json: data });
     if (url.pathname === "/boot.js") return r.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:"${lang}",theme:"light",web:true};` });
@@ -45,7 +48,11 @@ function serve(lang, posts) {
     if (url.pathname === "/api/state") return json(state);
     if (url.pathname === "/api/plugins") return json({ plugins: [] });
     if (url.pathname === "/api/gateway/trace") {
-      if (url.searchParams.get("wait")) return new Promise(() => {}); // nothing more comes
+      if (url.searchParams.get("wait")) {
+        const reply = stopped.then(() => r.abort());
+        pending.add(reply);
+        try { return await reply; } finally { pending.delete(reply); }
+      }
       return json({ mine: true, now: new Date().toISOString(), seq: 1, totals: { requests: 0, rerouted: 0, errors: 0 }, routes: [] });
     }
     if (url.pathname === "/api/gateway/history") return json({ cut: false, days: [], routes: [] });
@@ -62,27 +69,63 @@ function serve(lang, posts) {
     const contentType = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png" }[path.extname(file)];
     await r.fulfill({ body: await fs.readFile(file), contentType });
   };
+  // Close the context first so releasing its held poll cannot start another.
+  handler.settle = async () => { release(); await Promise.all([...pending]); };
+  return handler;
 }
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
   for (const lang of Object.keys(words)) for (const width of [1100, 420]) {
     const w = words[lang];
-    test(`${engine} ${lang} ${width}: a group lets a slow-to-start member go`, async (t) => {
+    test(`${engine} ${lang} ${width}: a group lets a slow-to-start member go`, { timeout: 120000 }, async (t) => {
       saved.firstToken = 0;
+      let active = "launch";
+      const phase = (name) => {
+        active = name;
+        console.info(`[group-first-token ${engine} ${lang} ${width}] ${name}`);
+      };
+      phase("launch");
       const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
-      const page = await (await browser.newContext({ viewport: { width, height: 2000 }, reducedMotion: "reduce" })).newPage();
+      let context, page, fixture, closing;
+      const closeBrowser = () => closing ||= browser.close();
+      const abort = () => {
+        phase(`aborted during ${active}`);
+        closeBrowser().catch((err) => console.error("group-first-token cancellation:", err));
+      };
+      t.signal.addEventListener("abort", abort, { once: true });
       t.after(async () => {
-        if (process.env.ARTIFACT_DIR) {
-          await fs.mkdir(process.env.ARTIFACT_DIR, { recursive: true });
-          await page.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `${engine}-${lang}-${width}-group-first-token.png`) });
+        try {
+          if (!t.signal.aborted && page && process.env.ARTIFACT_DIR) {
+            phase("screenshot");
+            await fs.mkdir(process.env.ARTIFACT_DIR, { recursive: true });
+            await page.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `${engine}-${lang}-${width}-group-first-token.png`) });
+          }
+        } finally {
+          try {
+            if (context && !closing) { phase("close context"); await context.close(); }
+          } finally {
+            phase("close browser");
+            try {
+              await closeBrowser();
+              if (fixture) { phase("settle poll"); await fixture.settle(); }
+            } finally { t.signal.removeEventListener("abort", abort); }
+          }
         }
-        await browser.close();
       });
+      if (t.signal.aborted) abort();
+      phase("new context");
+      context = await browser.newContext({ viewport: { width, height: 2000 }, reducedMotion: "reduce" });
+      phase("new page");
+      page = await context.newPage();
       page.setDefaultTimeout(5000);
       const errors = [], posts = [];
       page.on("pageerror", (e) => errors.push(e.message));
-      await page.route("**/*", serve(lang, posts));
+      phase("install fixture");
+      fixture = serve(lang, posts);
+      await page.route("**/*", fixture);
+      phase("navigate");
       await page.goto("http://magpie.test/?view=routing");
+      phase("inspect group");
       const card = page.locator(".rt-group", { hasText: "Sol" });
       await card.waitFor();
       assert.equal(await card.locator(".tag", { hasText: w.tag }).count(), 0, "off by default");
@@ -101,11 +144,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         return loc;
       };
       const save = async () => {
+        phase("save editor");
         const ed = page.locator(".rt-gedit");
         await (await reach(ed.locator("button.primary", { hasText: w.save }))).click();
         await page.waitForFunction(() => !document.querySelector(".rt-gedit"));
         return posts.filter((p) => p.path === "/api/groups/save").at(-1).body;
       };
+      phase("open editor");
       await (await reach(card.locator("button", { hasText: w.edit }))).click();
       const ed = page.locator(".rt-gedit");
       const row = ed.locator("label", { hasText: w.label }).locator("xpath=following-sibling::div[1]");
@@ -119,6 +164,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal((await save()).firstToken, 60);
       await card.locator(".tag", { hasText: w.tag }).waitFor();
 
+      phase("open editor");
       await (await reach(card.locator("button", { hasText: w.edit }))).click();
       await row.waitFor();
       await reach(row);
@@ -128,6 +174,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.waitForFunction((tag) => ![...document.querySelectorAll(".rt-group .tag")].some((x) => x.textContent === tag), w.tag);
 
       // Custom: as many minutes as are typed, from 5 when it was Wait
+      phase("open editor");
       await (await reach(card.locator("button", { hasText: w.edit }))).click();
       await row.waitFor();
       await reach(row);
@@ -157,6 +204,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const tag150 = w.tag.replace(await secs(60), await secs(150));
       await card.locator(".tag", { hasText: tag150 }).waitFor();
 
+      phase("open editor");
       await (await reach(card.locator("button", { hasText: w.edit }))).click();
       await row.waitFor();
       await reach(row);
@@ -166,6 +214,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(await minutes.isVisible(), false);
       assert.equal((await save()).firstToken, 60);
 
+      phase("verify translations and errors");
       const missing = await page.evaluate(() => [
         "Wait", "30 s", "1 min", "2 min", "Slow to start", "slow to start", "Next after {n} without a first token",
         "Every member is waited for, however long it takes to begin answering.",

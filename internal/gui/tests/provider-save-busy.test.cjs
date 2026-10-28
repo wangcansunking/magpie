@@ -10,11 +10,12 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
+const { once, EventEmitter } = require("node:events");
 const { chromium, webkit } = require("playwright");
 
 const assets = path.resolve(__dirname, "../assets");
 
-function serve(lang, saves) {
+function serve(lang, saves, arrived) {
   const models = ["deepseek-v4-flash", "deepseek-v4-pro"].map((id) => ({ id, name: id, on: true, context: 1000000 }));
   const provider = { id: "deepseek", name: "DeepSeek", icon: "generic", chat: "https://api.deepseek.example/v1", responses: "", anthropic: "", models, agents: [], key: { set: true, masked: "sk-…1234" }, ready: true };
   const providers = { providers: [provider], presets: [], excluded: [], gateway: { running: true, window: true } };
@@ -28,7 +29,7 @@ function serve(lang, saves) {
     if (url.pathname === "/api/groups") return json({ groups: [], models: [] });
     if (url.pathname === "/api/provider/save") {
       // held until the test answers it: ok, or the error to give
-      const err = await new Promise((answer) => saves.push(answer));
+      const err = await new Promise((answer) => { saves.push(answer); arrived(); });
       return err ? json({ error: err }, 502) : json(providers);
     }
     if (url.pathname === "/api/settings") return json({ theme: "light", lang, tray: "panel", currency: "usd", version: "0.1.1080", lanURLs: [], redactWords: [] });
@@ -62,13 +63,16 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         page.setDefaultTimeout(5000);
         const errors = [], saves = [];
         page.on("pageerror", (e) => errors.push(e.message));
-        await page.route("**/*", serve(lang, saves));
+        const arrivals = new EventEmitter();
+        await page.route("**/*", serve(lang, saves, () => arrivals.emit("save")));
         await page.goto("http://magpie.test/?view=providers");
         await page.locator('.row.provider[data-id="deepseek"]').click();
         const bar = page.locator(".editor .bar");
         const save = bar.getByRole("button", { name: w.save, exact: true });
         const top = await page.evaluate(() => document.scrollingElement.scrollTop);
+        const firstSave = once(arrivals, "save", { signal: AbortSignal.timeout(5000) });
         await save.click();
+        await firstSave;
 
         // out: a spinner, what it is doing, not to be clicked again
         const busy = bar.locator("button.saving");
@@ -96,9 +100,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.equal((await save.textContent()).trim(), w.save);
 
         // again, and through: the editor closes
+        const secondSave = once(arrivals, "save", { signal: AbortSignal.timeout(5000) });
         await save.click();
         await busy.waitFor();
-        while (!saves.length) await new Promise((r) => setTimeout(r, 20));
+        await secondSave;
         saves.shift()(null);
         await page.waitForFunction(() => !document.querySelector(".editor .bar"));
         assert.equal(await page.evaluate(() => document.scrollingElement.scrollTop), top, "saving scrolled the page");

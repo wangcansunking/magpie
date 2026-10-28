@@ -1,7 +1,9 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,13 +17,12 @@ import (
 	"github.com/yetone/magpie/internal/usage"
 )
 
-// clsUp is a Chat vendor that classifies: it answers what answer says,
-// after wait, and keeps what it was asked.
+// clsUp is a Chat vendor that classifies: it answers what answer says
+// and keeps what it was asked.
 type clsUp struct {
 	mu     sync.Mutex
 	answer string
 	fail   int
-	wait   time.Duration
 	asked  []string
 	agents []string
 }
@@ -30,15 +31,8 @@ func (u *clsUp) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	b, _ := io.ReadAll(r.Body)
 	u.mu.Lock()
 	u.asked = append(u.asked, string(b))
-	answer, fail, wait := u.answer, u.fail, u.wait
+	answer, fail := u.answer, u.fail
 	u.mu.Unlock()
-	if wait > 0 {
-		select {
-		case <-time.After(wait):
-		case <-r.Context().Done():
-			return
-		}
-	}
 	w.Header().Set("Content-Type", "application/json")
 	if fail != 0 {
 		w.WriteHeader(fail)
@@ -280,17 +274,33 @@ func TestIntentClassifierFails(t *testing.T) {
 	if !strings.Contains(out, "from kb") || r.Rule.N != 1 || r.Rule.Classified.Error != "" {
 		t.Fatalf("rested: %s %+v", out, r.Rule)
 	}
-	// slow: past the timeout it's no answer
-	was := classifyTimeout
+	// The classifier never answers: only its request's deadline lets the
+	// turn continue. Provider discovery and fallback may take arbitrarily
+	// longer than that budget on a busy machine; they aren't timed here.
+	was, transport := classifyTimeout, s.client.Transport
 	classifyTimeout = 200 * time.Millisecond
-	t.Cleanup(func() { classifyTimeout = was })
-	c.mu.Lock()
-	c.wait = 2 * time.Second
-	c.mu.Unlock()
-	t0 := time.Now()
+	t.Cleanup(func() { classifyTimeout, s.client.Transport = was, transport })
+	next := transport
+	if next == nil {
+		next = http.DefaultTransport
+	}
+	s.client.Transport = countTransport(func(req *http.Request) (*http.Response, error) {
+		if req.Header.Get("Authorization") != "Bearer kc" {
+			return next.RoundTrip(req)
+		}
+		if _, ok := req.Context().Deadline(); !ok {
+			t.Error("classifier request has no deadline")
+			return nil, errors.New("classifier request is unbounded")
+		}
+		<-req.Context().Done()
+		if !errors.Is(req.Context().Err(), context.DeadlineExceeded) {
+			t.Errorf("classifier ended without its deadline: %v", req.Context().Err())
+		}
+		return nil, req.Context().Err()
+	})
 	out, r = postOK(t, s, "f4", chat("rename everything", nil, 0, ""))
-	if !strings.Contains(out, "from ka") || !strings.Contains(r.Rule.Classified.Error, "no answer") || time.Since(t0) > 1500*time.Millisecond {
-		t.Fatalf("slow: %s %+v %s", out, r.Rule, time.Since(t0))
+	if !strings.Contains(out, "from ka") || r.Rule.N != 0 || !strings.Contains(r.Rule.Classified.Error, "no answer") {
+		t.Fatalf("slow: %s %+v", out, r.Rule)
 	}
 }
 

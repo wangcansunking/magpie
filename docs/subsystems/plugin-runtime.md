@@ -81,7 +81,13 @@ plugins' scripts and `app.js`, all classic scripts sharing one scope. It is
   `{id, config}`; `applyFeatures` hands each plugin's config to
   `magpie.configure`, which calls its `onConfig` only when it changed.
 
-The Gateway page is `plugins/gateway` with `Client: keys.js, client.js`
+The Gateway plugin also registers a second page, [WAN Gateway](wan-gateway.md),
+through a helper in `wan.js` called by its existing single plugin setup.
+That page reuses the key editor and does not own tunnel lifetime: starting
+or stopping hosting calls the gateway-owning backend. A page or plugin
+being shown never publishes a listener.
+
+The Gateway page is `plugins/gateway` with its key editor and page scripts
 (`internal/gui/assets/plugins/gateway/`): `keys.js` is the gateway-key
 manager that was `caller-keys.js`, and `client.js` is the page's code that
 was in app.js, ending in its `magpie.plugin("gateway", …)`. Still in

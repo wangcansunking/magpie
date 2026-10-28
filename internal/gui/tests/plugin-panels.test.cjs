@@ -15,6 +15,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
+const { reach } = require("./reader.cjs");
+const { watchReplies, repliesConsumed } = require("./lifecycle.cjs");
 const { chromium, webkit } = require("playwright");
 
 const assets = path.resolve(__dirname, "../assets");
@@ -108,6 +110,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
         const seen = { reads: [], options: [], broken: lang === "en" && width === 1100 };
+        await watchReplies(page, ["/api/providers", "/api/plugin-pages/options"]);
         await page.route("**/*", server(lang, seen, { panels: allPanels, pages }));
         await page.goto("http://magpie.test/");
         const tr = (k, v) => page.evaluate(([k, v]) => t(k, v), [k, v]);
@@ -163,7 +166,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // the end of Usage: what it declared it reads
         await page.evaluate(() => show("usage"));
         const spend = await frameReady(page, SPEND);
-        await spend.waitForFunction(() => document.querySelectorAll("#top li").length === 2);
+        await spend.waitForFunction(() => document.querySelectorAll("#top li").length === 2, null, { polling: 100 });
         assert.equal(await spend.locator("#top li").first().textContent(), "gpt-5: 9 calls", where);
         assert.ok(seen.reads.some((r) => r.spec === "/x/magpie-provider-notes" && r.read === "usage:summary"), where);
         assert.equal(await spend.evaluate(() => document.documentElement.lang), lang, `${where}: the window's language`);
@@ -176,10 +179,15 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // a provider's editor: the note panel knows which provider it is in
         await page.evaluate(() => show("providers"));
         await page.waitForFunction(() => providers?.providers?.length === 1);
-        await page.evaluate(() => openModal(renderEditor(providers.providers[0])));
+        await repliesConsumed(page, ["/api/providers"]);
+        const providerRow = page.locator('.row.provider[data-id="openai"]');
+        await reach(page, providerRow);
+        await providerRow.click();
         const notes = await frameReady(page, NOTES);
         assert.equal(await page.locator('#modal .plugin-slot[data-slot="provider"] iframe').getAttribute("sandbox"), "allow-scripts", where);
-        await notes.waitForFunction(() => window.magpie.context?.provider?.id === "openai");
+        // An offscreen sandboxed WebKit frame can suspend animation frames.
+        // Poll readiness by timer while its async bridge finishes.
+        await notes.waitForFunction(() => window.magpie?.context?.provider?.id === "openai" && typeof document.querySelector("#note")?.oninput === "function", null, { polling: 100 });
         assert.equal(await notes.evaluate(() => magpie.context.provider.name), "OpenAI", where);
         await notes.locator("#note").fill("work account");
         await notes.locator("#saved").filter({ hasText: "Saved" }).waitFor();
@@ -202,8 +210,15 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // drawn when the window opened, before the note was written
         await sets.locator("#count").filter({ hasText: /^\d+ notes?$/ }).waitFor();
         await page.waitForTimeout(1100); // options are set once a second at most
+        const cleared = page.waitForResponse(r => {
+          if (new URL(r.url()).pathname !== "/api/plugin-pages/options") return false;
+          const notes = r.request().postDataJSON()?.options?.notes;
+          return notes && Object.keys(notes).length === 0;
+        });
         await sets.locator("#clear").click();
+        await cleared;
         await sets.locator("#count").filter({ hasText: "0 notes" }).waitFor();
+        await repliesConsumed(page, ["/api/plugin-pages/options"]);
         assert.deepEqual(seen.options.at(-1).options.notes, {}, `${where}: cleared`);
         assert.ok(await page.locator("#setPage-plugins").isVisible(), where);
         assert.ok(await fits(page, "#view-settings"), `${where}: Settings fits`);

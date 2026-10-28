@@ -1818,9 +1818,12 @@ magpie.plugin("library", (ctx) => {
       if (sg && (sg.state === "starting" || sg.state === "waiting")) {
         line.append(el("span", "note", sg.state === "starting" ? t("Opening the sign-in…") : t("Finish signing in in your browser…")),
           button(t("Cancel"), "", async () => {
-            if (sg.id) await api("library/mcp-signin/" + sg.id + "/cancel", {}).catch(() => {});
+            if (mcpSigning !== sg) return;
+            // Let go before waiting: neither this reply nor a late start
+            // may revive the attempt or clear a newer one.
             mcpSigning = null;
             draw();
+            if (sg.id) await api("library/mcp-signin/" + sg.id + "/cancel", {}).catch(() => {});
           }));
       } else if (cur.signedIn && !cur.dead) {
         line.append(tag(t("Signed in"), "lib-signed"), el("span", "note", t("The agents given it use magpie's sign-in")), el("span", "grow"), button(t("Sign out"), "", signOut));
@@ -1844,44 +1847,55 @@ magpie.plugin("library", (ctx) => {
       if (sg?.state === "failed") box.append(el("div", "lib-signin-err", sg.error));
     };
     async function start() {
-      const was = name;
-      mcpSigning = { name, state: "starting" };
+      const attempt = { name, state: "starting" };
+      mcpSigning = attempt;
       draw();
       try {
         if (ready) {
           const saved = await ready();
-          // canceled while it was saved
-          if (mcpSigning?.name !== was || mcpSigning.id) return;
+          // Cancel doesn't undo a save, but it stops the sign-in after it.
+          if (mcpSigning !== attempt) return;
           name = saved;
-          mcpSigning = { name, state: "starting" };
+          attempt.name = name;
         }
         const st = await api("library/mcp-signin", { name });
+        if (mcpSigning !== attempt) {
+          // Its id arrived after Cancel or another start. Best-effort
+          // cleanup only: credentials already committed stay signed in.
+          if (st.id) await api("library/mcp-signin/" + st.id + "/cancel", {}).catch(() => {});
+          return;
+        }
         if (web && st.url) api("open", { url: st.url }).catch(() => {});
-        mcpSigning = { ...st, name };
+        Object.assign(attempt, st, { name });
         draw();
-        follow(st.id);
+        follow(attempt);
       } catch (e) {
-        if (!mcpSigning) return; // canceled
+        if (mcpSigning !== attempt) return;
         // magpie's words in the reader's language, where it has them
-        mcpSigning = { name, state: "failed", error: t(e.message) };
+        Object.assign(attempt, { state: "failed", error: t(e.message) });
         draw();
         ready?.failed?.(e.message);
       }
     }
     // followed with the dialog closed too, for the row to say it's signed in
-    async function follow(id) {
-      while (mcpSigning?.id === id) {
+    async function follow(attempt) {
+      const id = attempt.id;
+      while (mcpSigning === attempt) {
         await new Promise((r) => setTimeout(r, 800));
+        if (mcpSigning !== attempt) return;
         let st;
         try { st = await api("library/mcp-signin/" + id); } catch { continue; }
-        if (mcpSigning?.id !== id) return;
+        if (mcpSigning !== attempt) return;
         if (st.state === "waiting") continue;
         if (st.state === "done") {
+          const next = await api("library").catch(() => null);
+          if (mcpSigning !== attempt) return;
+          if (next) take(next);
           mcpSigning = null;
-          await api("library").then(take, () => {});
           status(t("Signed in to {name} — the agents given it use magpie's sign-in", { name }), "ok");
           render();
-        } else mcpSigning = st.state === "canceled" ? null : { ...st, name };
+        } else if (st.state === "canceled") mcpSigning = null;
+        else Object.assign(attempt, st, { name });
         draw();
         return;
       }

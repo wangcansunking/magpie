@@ -29,6 +29,7 @@ import (
 	"github.com/yetone/magpie/internal/shortcut"
 	"github.com/yetone/magpie/internal/stats"
 	"github.com/yetone/magpie/internal/update"
+	"github.com/yetone/magpie/internal/wan"
 	"github.com/yetone/magpie/internal/webview2env"
 )
 
@@ -369,6 +370,7 @@ func Run(version string, showMain bool, link string) error {
 		// magpie is open again (Leon920717 on X). The next start writes it
 		// again (Sync).
 		OnShutdown: func() {
+			wan.Shutdown()
 			proc.EndProbes()
 			if served.Load() != nil {
 				if err := agent.EndCodexFailover(); err != nil {

@@ -126,9 +126,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.locator(".editor").getByRole("button", { name: w.save, exact: true }).click();
         for (let i = 0; i < 40 && !posts.length; i++) await page.waitForTimeout(50);
         assert.deepEqual(posts[0]?.modelPrefs, { "agnes-video-2.5-flash": { kind: "video" } });
+        // The request reaching the fixture isn't the save finishing: its
+        // reply also reads state before reporting success. Reload after that.
+        await page.waitForFunction(() => document.querySelector("#status")?.textContent === t("{name} saved", { name: "Relay" }));
 
         // a subscription's models can't be marked: on a page loaded
-        // afresh, the Save's own reply left aside
+        // afresh after the completed save
         await page.goto("http://magpie.test/?view=providers");
         await open("GitHub Copilot");
         await rclick(chip("GPT-9"));

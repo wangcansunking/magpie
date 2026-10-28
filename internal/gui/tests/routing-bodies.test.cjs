@@ -14,6 +14,7 @@ const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
 const { reach } = require("./reader.cjs");
+const reader = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const now = new Date();
@@ -120,12 +121,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       };
       const pick = (i) => tap(page.locator(".rt-req").nth(i));
       await page.goto("http://magpie.test/?view=routing");
-      await page.locator(".rt-day").nth(1).waitFor({ state: "visible", timeout: 15000 });
-      await page.locator(".rt-day").nth(1).click();
+      const historical = page.locator("#view-routing .rt-days .rt-day").nth(1);
+      await historical.waitFor({ state: "visible", timeout: 15000 });
+      await tap(historical);
       await page.locator(".rt-req").nth(routes.length - 1).waitFor();
 
       // in the recent calls: both bodies, read only when asked
-      await page.locator(".rt-req").nth(0).click();
+      await pick(0);
       const b = page.locator(".rt-log-head .rt-bodies-b");
       await b.waitFor();
       assert.equal(await b.textContent(), w.open);

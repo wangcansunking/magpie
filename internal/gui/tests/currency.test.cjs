@@ -158,12 +158,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 // straight away and before Settings ever is, must show ¥ at that rate —
 // it once read the rate only from inside the settings, found none, and
 // fell back to $ while the Settings row still showed ¥ CNY picked.
-function restartedServer(lang) {
+function restartedServer(lang, stateReady) {
   const cur = settingsPayload({ lang, currency: "cny" });
   const base = server(lang);
   return async (route) => {
     const req = route.request(), url = new URL(req.url());
     if (url.pathname === "/api/state") {
+      await stateReady;
       return route.fulfill({ json: { agents: [], profiles: [], settings: { theme: "light", lang, currency: "cny" }, fx: cur.fx } });
     }
     if (url.pathname === "/api/settings" && req.method() === "GET") return route.fulfill({ json: cur });
@@ -182,11 +183,20 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const page = await context.newPage();
         page.setDefaultTimeout(5000);
         page.on("pageerror", (e) => errors.push(e.message));
-        await page.route("**/*", restartedServer(lang));
+        let releaseState;
+        const stateReady = new Promise((resolve) => { releaseState = resolve; });
+        t.after(releaseState);
+        await page.route("**/*", restartedServer(lang, stateReady));
 
         // no visit to Settings first: the Usage page at start is in ¥
         await page.goto("http://magpie.test/?view=usage");
         await page.locator("#usageCost b").waitFor();
+        assert.equal((await page.locator("#usageCost b").textContent()).trim(), "≈$12.34", "state is still held");
+        releaseState();
+        // Usage can draw before the independent /api/state response has
+        // supplied the saved currency. Observe its repaint, not the first
+        // transient cost (the same element already exists in dollars).
+        await page.waitForFunction(() => document.querySelector("#usageCost b")?.textContent.trim() === "≈¥88.85");
         assert.equal((await page.locator("#usageCost b").textContent()).trim(), "≈¥88.85", "cny at the rate state gave");
 
         // Settings agrees

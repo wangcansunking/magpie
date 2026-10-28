@@ -106,7 +106,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.deepEqual(await cell(0).evaluate((c) => getComputedStyle(c).textAlign), await rows.nth(0).locator("td.duration").evaluate((c) => getComputedStyle(c).textAlign));
 
         // a narrow window: the column goes, the details keep it, the hint says so
-        await p.setViewportSize({ width: 760, height: 800 });
+        // Fitting is measured, not a 760px breakpoint: short Chinese
+        // headings can still fit TTFT there. Exercise the overflow stage.
+        await p.setViewportSize({ width: 420, height: 800 });
         await p.waitForTimeout(300);
         assert.equal(await cell(0).isVisible(), false, "a narrow window leaves it out");
         assert.equal((await p.locator("#ledTight").textContent()).trim(), w.hint);

@@ -500,8 +500,14 @@
     return b;
   }
 
-  function card(l) {
-    const c = el("div", "pm-card");
+  function card(l, kept) {
+    // A background answer must not take a pressed card away. Keep a
+    // package's card, and its action button, while its facts are updated.
+    const stamp = JSON.stringify([document.documentElement.lang, l, entryOf(l.package), subsOf(l.package), movableOf(l.package), !!mine, mine?.bun, mine?.bunVersion, [...busy], checking, topic]);
+    if (kept?.cardStamp === stamp) return kept;
+    const c = kept || el("div", "pm-card");
+    c.className = "pm-card";
+    c.cardStamp = stamp;
     c.tabIndex = 0;
     c.setAttribute("role", "button");
     c.dataset.pkg = l.package;
@@ -521,9 +527,27 @@
     } else by.append(el("span", "", l.npm?.publisher || l.package));
     who.append(by);
     if (l.github) c.classList.add("gh");
-    const go = actionFor(l.package, l.name, l);
-    top.append(logo(l.icon || l.npm?.icon, false, kindOf(l)), who, go);
-    const sum = el("p", "pm-sum", summary(l));
+    let go = actionFor(l.package, l.name, l);
+    const oldGo = kept?.querySelector(".pm-top > .pm-act");
+    if (oldGo) {
+      oldGo.className = go.className;
+      oldGo.type = go.type;
+      oldGo.disabled = go.disabled;
+      oldGo.title = go.title;
+      oldGo.onclick = go.onclick;
+      oldGo.onkeydown = go.onkeydown;
+      if (oldGo.innerHTML !== go.innerHTML) oldGo.replaceChildren(...go.childNodes);
+      go = oldGo;
+    }
+    const oldTop = kept?.querySelector(".pm-top");
+    const drawnTop = oldTop || top;
+    const keepPart = (parent, node) => {
+      const old = [...parent.children].find((x) => x.className === node.className);
+      return old?.isEqualNode(node) ? old : node;
+    };
+    replaceKeeping(drawnTop, [keepPart(drawnTop, logo(l.icon || l.npm?.icon, false, kindOf(l))), keepPart(drawnTop, who), go]);
+    const sum = kept?.querySelector(".pm-sum") || el("p", "pm-sum");
+    if (sum.textContent !== summary(l)) sum.textContent = summary(l);
     const meta = el("div", "pm-meta");
     meta.append(kindChip(kindOf(l)));
     if (l.github) meta.append(unofficial(), stars(l.github.stars));
@@ -546,7 +570,9 @@
       b.title = t("magpie's own sign-in to this subscription is deprecated: this plugin takes its place, and accounts signed in there move to it");
       meta.append(b);
     }
-    c.append(top, sum, meta);
+    const oldMeta = kept?.querySelector(".pm-meta");
+    if (oldMeta) replaceKeeping(oldMeta, [...meta.children].map((n) => keepPart(oldMeta, n)));
+    replaceKeeping(c, [drawnTop, sum, oldMeta || meta]);
     c.onclick = () => detail(l);
     c.onkeydown = (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); detail(l); } };
     return c;
@@ -587,14 +613,21 @@
     return g;
   }
 
+  function cardsIn(grid, list) {
+    // Cards belong to this section, not a global cache: two sources may
+    // name the same package without moving its node out of another grid.
+    const kept = new Map([...grid.children].map((c) => [c.dataset.pkg, c]));
+    replaceKeeping(grid, list.map((l) => card(l, kept.get(l.package))));
+  }
   function section(title, hint, list) {
-    const box = el("section", "pm-sec");
-    const h = el("div", "pm-sechead");
-    h.append(el("h3", "", title));
+    const box = [...page.querySelectorAll(".pm-sec")].find((s) => s.sectionTitle === title) || el("section", "pm-sec");
+    box.sectionTitle = title;
+    const h = box.querySelector(".pm-sechead") || el("div", "pm-sechead");
+    h.replaceChildren(el("h3", "", title));
     if (hint) h.append(el("span", "", hint));
-    const g = el("div", "pm-grid");
-    for (const l of list) g.append(card(l));
-    box.append(h, g);
+    const g = box.querySelector(".pm-grid") || el("div", "pm-grid");
+    cardsIn(g, list);
+    replaceKeeping(box, [h, g]);
     return box;
   }
 
@@ -704,10 +737,29 @@
     }
     return ghSec;
   }
+  // Keep the same choices under a press when npm answers. Their counts and
+  // selected state can change without replacing the buttons being used.
+  function ghPick(cls, items, current, choose, label) {
+    let pick = ghBar.querySelector("." + cls);
+    if (pick?.dataset.kind !== items.map(([id]) => id).join("|")) pick = null;
+    if (!pick) pick = segs(items, current, choose);
+    else {
+      [...pick.querySelectorAll(".opt")].forEach((b, i) => {
+        if (b.textContent !== items[i][1]) b.textContent = items[i][1];
+        b.classList.toggle("on", items[i][0] === current);
+        b.setAttribute("aria-pressed", String(items[i][0] === current));
+      });
+      queueMicrotask(() => slide(pick, segsPlace(pick)));
+    }
+    pick.classList.add(cls);
+    pick.setAttribute("role", "group");
+    pick.setAttribute("aria-label", t(label));
+    return pick;
+  }
   function drawGh() {
     const head = taggedErr ? [ghHead, ghNote()] : [ghHead];
     if ((tagged || []).length <= 6) {
-      ghGrid.replaceChildren(...ghList.map(card));
+      cardsIn(ghGrid, ghList);
       replaceKeeping(ghSec, [...head, ghGrid]);
       return;
     }
@@ -730,19 +782,13 @@
     const n = (k, h) => found.filter((l) => (!k || kindOf(l) === k) && (!h || have(l) === (h === "have"))).length;
     const bar = [];
     if (kinds.length > 1) {
-      const pick = segs([["", t("All") + " · " + n("", ghHave)], ...kinds.map((k) => [k, t(KINDS[k][1]) + " · " + n(k, ghHave)])], ghKind, (k) => { ghKind = k; drawGh(); });
-      pick.classList.add("pm-ghkinds");
-      pick.setAttribute("role", "group");
-      pick.setAttribute("aria-label", t("Kind of plugin"));
+      const pick = ghPick("pm-ghkinds", [["", t("All") + " · " + n("", ghHave)], ...kinds.map((k) => [k, t(KINDS[k][1]) + " · " + n(k, ghHave)])], ghKind, (k) => { ghKind = k; drawGh(); }, "Kind of plugin");
       bar.push(pick);
     }
     // what's installed, on both sides of it: a reader looks for what to
     // add as much as for what they have
     if (both) {
-      const pick = segs([["", t("All") + " · " + n(ghKind, "")], ["have", t("Installed") + " · " + n(ghKind, "have")], ["none", t("Not installed") + " · " + n(ghKind, "none")]], ghHave, (h) => { ghHave = h; drawGh(); });
-      pick.classList.add("pm-ghhave");
-      pick.setAttribute("role", "group");
-      pick.setAttribute("aria-label", t("Installed or not"));
+      const pick = ghPick("pm-ghhave", [["", t("All") + " · " + n(ghKind, "")], ["have", t("Installed") + " · " + n(ghKind, "have")], ["none", t("Not installed") + " · " + n(ghKind, "none")]], ghHave, (h) => { ghHave = h; drawGh(); }, "Installed or not");
       bar.push(pick);
     }
     bar.push(el("span", "grow"), ghFind);
@@ -752,7 +798,7 @@
     replaceKeeping(ghBar, bar);
     const shown = found.filter((l) => (!ghKind || kindOf(l) === ghKind) && (!ghHave || have(l) === (ghHave === "have")));
     if (shown.length) {
-      ghGrid.replaceChildren(...shown.map(card));
+      cardsIn(ghGrid, shown);
       replaceKeeping(ghSec, [...head, ghBar, ghGrid]);
       return;
     }
@@ -925,20 +971,21 @@
     else if (!tagged) out.push(ghWaiting());
     else if (taggedErr && !tagged.length) out.push(ghFailed());
     const known = new Set([...listings.map((l) => l.package), ...(tagged || []).map((l) => l.github.package).filter(Boolean)]);
-    const box = el("section", "pm-sec");
+    const box = body.querySelector(".pm-npm") || el("section", "pm-sec pm-npm");
     const h = el("div", "pm-sechead");
     h.append(el("h3", "", t("On npm")), el("span", "", t("OpenCode plugins and pi packages anyone published — read what one does before you install it")));
-    box.append(h);
-    if (!hits) box.append(el("p", "pm-note", t("Type two letters or more to search npm")));
-    else if (hits.loading) box.append(skeleton(2));
-    else if (hits.error) box.append(el("p", "pm-note bad", hits.error));
+    const content = [h];
+    if (!hits) content.push(el("p", "pm-note", t("Type two letters or more to search npm")));
+    else if (hits.loading) content.push(skeleton(2));
+    else if (hits.error) content.push(el("p", "pm-note bad", hits.error));
     else {
       const list = hits.list.filter((x) => !known.has(x.package));
-      if (!list.length) box.append(el("p", "pm-note", ls.length ? t("Nothing else on npm") : t("No plugin called “{q}”", { q: query.trim() })));
-      const g = el("div", "pm-grid");
-      for (const x of list) g.append(card({ package: x.package, name: x.package, npm: x }));
-      box.append(g);
+      if (!list.length) content.push(el("p", "pm-note", ls.length ? t("Nothing else on npm") : t("No plugin called “{q}”", { q: query.trim() })));
+      const g = box.querySelector(".pm-grid") || el("div", "pm-grid");
+      cardsIn(g, list.map((x) => ({ package: x.package, name: x.package, npm: x })));
+      content.push(g);
     }
+    replaceKeeping(box, content);
     out.push(box);
     replaceKeeping(body, out);
   }

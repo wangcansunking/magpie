@@ -12,6 +12,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { watchReplies, repliesConsumed } = require("./lifecycle.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 
@@ -23,7 +24,7 @@ const magpie = ["pro", "flash"].map((m) => ({ value: "magpie/deepseek/" + m, lab
 const list = magpie.map((o, i) => ({ id: o.ref, name: o.label, group: "DeepSeek", icon: "deepseek-color", inUse: i === 0 }));
 
 function fixture(lang) {
-  let ownHidden = false, late = 0;
+  let ownHidden = false, pendingState = null;
   const posts = [];
   const count = { shown: list.length, listed: list.length };
   const options = () => [...(ownHidden ? [] : own), ...magpie];
@@ -45,7 +46,8 @@ function fixture(lang) {
     if (url.pathname === "/api/state") {
       // the state read after a switch comes late, so what the picker
       // offers before it is the page's own doing
-      if (Date.now() < late) await new Promise((r) => setTimeout(r, late - Date.now()));
+      const gate = pendingState;
+      if (gate) await gate.promise;
       return json(state());
     }
     const m = url.pathname.match(/^\/api\/agent-models\/(\w+)$/);
@@ -56,7 +58,7 @@ function fixture(lang) {
         if (body.ownHidden !== undefined) {
           if (m[1] !== "dsh") return route.fulfill({ status: 500, json: { error: "not dsh's" } });
           ownHidden = body.ownHidden;
-          late = Date.now() + 1500;
+          pendingState = Promise.withResolvers();
           return json({ ownHidden });
         }
         return json({ models: list, count });
@@ -70,7 +72,8 @@ function fixture(lang) {
     const contentType = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png" }[path.extname(file)];
     await route.fulfill({ body: await fs.readFile(file), contentType });
   }
-  return { serve, posts, ownHidden: () => ownHidden };
+  const releaseState = () => { pendingState?.resolve(); pendingState = null; };
+  return { serve, posts, ownHidden: () => ownHidden, releaseState };
 }
 
 const W = {
@@ -92,8 +95,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
         const fx = fixture(lang);
+        await watchReplies(page, ["/api/state", "/api/agent-models/dsh", "/api/agent-models/codex"]);
         await page.route("**/*", fx.serve);
         t.after(async () => {
+          fx.releaseState();
           if (process.env.ARTIFACT_DIR) {
             await fs.mkdir(process.env.ARTIFACT_DIR, { recursive: true });
             await page.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `${engine}-${lang}-${width}-own-models.png`) });
@@ -125,7 +130,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           await page.locator("#pop").waitFor({ state: "hidden" });
           return texts.join("\n");
         };
-        const settle = () => page.waitForTimeout(250);
+        // Join the write without joining the deliberately delayed state
+        // read: the first picker assertion must still prove local filtering.
+        const settle = () => page.waitForFunction(() => __apiReplies
+          .filter(r => r.path.startsWith("/api/agent-models/")).every(r => r.done));
 
         // before: dsh's own beside magpie's
         assert.match(await picked(), /DeepSeek-V4-Pro/);
@@ -158,7 +166,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.doesNotMatch(rows, /DeepSeek-V4-Pro|DeepSeek-Flash/, "dsh's own still offered");
         assert.match(rows, /deepseek-flash/, "magpie's are offered");
         // and so in the state read again
-        await page.waitForTimeout(1800);
+        fx.releaseState();
+        await repliesConsumed(page, ["/api/state"]);
         rows = await picked();
         assert.doesNotMatch(rows, /DeepSeek-V4-Pro/);
 
@@ -170,7 +179,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.deepEqual(fx.posts.at(-1), { id: "dsh", ownHidden: false });
         await close();
         // what was put back comes with the state
-        await page.waitForTimeout(1800);
+        fx.releaseState();
+        await repliesConsumed(page, ["/api/state"]);
         assert.match(await picked(), /DeepSeek-V4-Pro/);
 
         // an agent with no models of its own has no switch

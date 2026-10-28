@@ -69,16 +69,44 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const page = await (await browser.newContext({ viewport: { width: 1360, height: 1700 }, reducedMotion: "reduce" })).newPage();
       t.after(() => browser.close());
       page.setDefaultTimeout(5000);
-      const errors = [], posts = [];
+      const errors = [], posts = [], pending = new Set();
       page.on("pageerror", (e) => errors.push(e.message));
+      page.on("request", (r) => pending.add(r));
+      page.on("requestfinished", (r) => pending.delete(r));
+      page.on("requestfailed", (r) => pending.delete(r));
       await page.route("**/*", serve(lang, posts));
       await page.goto("http://magpie.test/?view=routing");
       const card = page.locator(".rt-group", { hasText: "Sol" });
       const ed = page.locator(".rt-gedit"), head = ed.locator(".ehead");
       const closed = () => page.waitForFunction(() => !document.querySelector(".rt-gedit") && document.querySelector(".rt-group"));
 
+      // Keep the original pointer action and its bound. If stability stalls,
+      // record what the browser was waiting on instead of guessing its cause.
+      // The browser's t.after cleanup also runs when this diagnostic rethrows.
+      try {
+        await card.locator(".main").click();
+      } catch (error) {
+        let timer;
+        try {
+          const snapshot = await Promise.race([page.evaluate(() => {
+          const target = [...document.querySelectorAll(".rt-group")].find((e) => e.textContent.includes("Sol"))?.querySelector(".main");
+          const parents = [];
+          for (let e = target; e; e = e.parentElement) {
+            const s = getComputedStyle(e);
+            parents.push({ tag: e.tagName, class: e.className, connected: e.isConnected, rect: e.getBoundingClientRect().toJSON(), scrollTop: e.scrollTop,
+              style: { display: s.display, visibility: s.visibility, transform: s.transform, overflow: s.overflow, pointerEvents: s.pointerEvents },
+              animations: e.getAnimations().map((a) => ({ state: a.playState, time: a.currentTime, infinite: a.effect?.getComputedTiming().iterations === Infinity, timing: a.effect?.getComputedTiming(), frames: a.effect?.getKeyframes() })) });
+          }
+          return { parents, focus: document.activeElement?.outerHTML.slice(0, 500), visibility: document.visibilityState };
+          }), new Promise((resolve) => { timer = setTimeout(() => resolve({ unavailable: "browser did not answer the diagnostic" }), 1000); })]);
+          console.error("group-fold click diagnostic", JSON.stringify({ snapshot, pending: [...pending].map((r) => ({ method: r.method(), url: r.url() })) }));
+        } finally {
+          clearTimeout(timer);
+          await browser.close();
+        }
+        throw error;
+      }
       // opened from the row, folded from the heading
-      await card.locator(".main").click();
       await head.waitFor();
       assert.equal(await head.getAttribute("title"), w.fold);
       assert.equal(await head.getAttribute("aria-expanded"), "true");

@@ -13,6 +13,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { watchReplies, repliesConsumed } = require("./lifecycle.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const said = {
@@ -48,6 +49,19 @@ function serve(lang, agents, late = 0) {
     if (url.pathname === "/api/groups") return json(groups);
     if (url.pathname === "/api/providers") return json({ providers: [provider], presets: [], excluded: [], gateway: { running: true, window: true, url: "http://127.0.0.1:3999" } });
     if (url.pathname.startsWith("/api/")) return json({});
+    if (url.pathname === "/start.js") {
+      // Observe the actual initial load, which can skip What's New while an
+      // editor is open. Keep the production bootstrap and call load once.
+      const source = await fs.readFile(path.join(assets, "start.js"), "utf8");
+      const initial = /^load\(\);$/gm;
+      assert.equal([...source.matchAll(initial)].length, 1, "one initial load to observe");
+      return r.fulfill({ contentType: "text/javascript", body: source.replace(initial, `
+window.__noNamesStartup = { settled: false };
+load().then(() => { __noNamesStartup.settled = true; }, (error) => {
+  Object.assign(__noNamesStartup, { settled: true, error });
+  throw error;
+});`) });
+    }
     const file = path.join(assets, url.pathname === "/" ? "index.html" : url.pathname);
     const contentType = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png" }[path.extname(file)];
     await r.fulfill({ body: await fs.readFile(file), contentType });
@@ -56,18 +70,24 @@ function serve(lang, agents, late = 0) {
 
 async function launch(t, engine, lang, agents, width = 900, late = 0) {
   const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || "chromium" }));
-  const page = await (await browser.newContext({ viewport: { width, height: 1000 }, reducedMotion: "reduce" })).newPage();
+  let page;
   t.after(async () => {
-    if (process.env.ARTIFACT_DIR) {
-      await fs.mkdir(process.env.ARTIFACT_DIR, { recursive: true });
-      await page.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `${engine}-${lang}-${width}-no-names.png`) });
-    }
-    await browser.close();
+    try {
+      if (page && process.env.ARTIFACT_DIR) {
+        await fs.mkdir(process.env.ARTIFACT_DIR, { recursive: true });
+        await page.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `${engine}-${lang}-${width}-no-names.png`) });
+      }
+    } finally { await browser.close(); }
   });
+  page = await (await browser.newContext({ viewport: { width, height: 1000 }, reducedMotion: "reduce" })).newPage();
   page.setDefaultTimeout(5000);
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.route("**/*", serve(lang, agents, late));
+  // Visible names can precede load()'s second Settings/Providers read and
+  // its downstream sync and Update requests. Join these before departing,
+  // not the Routing trace's deliberately held long poll.
+  await watchReplies(page, ["/api/state", "/api/settings", "/api/providers", "/api/upstream", "/api/davsync", "/api/update", "/api/whatsnew"]);
   return { page, errors };
 }
 
@@ -80,6 +100,13 @@ const agents = [
   { id: "jcode", name: "jcode", path: "/test/jcode", fields: [], noNames: true },
 ];
 const overflows = (page) => page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
+async function startupFinished(page) {
+  await page.waitForFunction(() => window.__noNamesStartup?.settled);
+  await page.evaluate(() => { if (__noNamesStartup.error) throw __noNamesStartup.error; });
+  // What's New is optional with an editor open, but any request it did make
+  // must finish, as must the Settings redraw's sync and Update reads.
+  await repliesConsumed(page);
+}
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
   for (const lang of Object.keys(said)) {
@@ -91,12 +118,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await sub.waitFor();
         assert.equal(await sub.textContent(), said[lang]);
         assert.equal(await overflows(page), false, "the page scrolls sideways");
+        await startupFinished(page);
         await page.goto("http://magpie.test/?view=routing");
         const note = page.locator(".rt-gnames .no-names");
         await note.waitFor();
         assert.equal(await note.textContent(), said[lang]);
         assert.equal(await overflows(page), false, "the page scrolls sideways");
         assert.equal(await note.evaluate((e) => getComputedStyle(e).borderLeftWidth), "0px");
+        await startupFinished(page);
         assert.deepEqual(errors, []);
       });
     }
@@ -105,11 +134,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     test(`${engine} ${lang}: a provider's Names & levels says it too`, async (t) => {
       const { page, errors } = await launch(t, engine, lang, agents);
       await page.goto("http://magpie.test/?view=providers");
-      await page.locator(".row.provider").click();
+      await page.locator('.row.provider[data-id="relay"]').click();
       if (!(await page.locator(".mnames:not([hidden])").count())) await page.getByRole("button", { name: names[lang], exact: true }).click();
       const note = page.locator(".mnames:not([hidden]) .msuffix .no-names");
       await note.waitFor();
       assert.equal(await note.textContent(), said[lang]);
+      await startupFinished(page);
       assert.deepEqual(errors, []);
     });
   }
@@ -117,16 +147,18 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
   test(`${engine}: read after the page is drawn, the agents are named all the same`, async (t) => {
     const { page, errors } = await launch(t, engine, "en", agents, 900, 1500);
     await page.goto("http://magpie.test/?view=providers");
-    await page.locator(".row.provider").click();
+    await page.locator('.row.provider[data-id="relay"]').click();
     if (!(await page.locator(".mnames:not([hidden])").count())) await page.getByRole("button", { name: names.en, exact: true }).click();
     const note = page.locator(".mnames:not([hidden]) .msuffix .no-names");
     await note.waitFor();
     assert.equal(await note.textContent(), said.en);
     for (const [view, sel] of [["routing", ".rt-gnames .no-names"], ["settings", ".row.pref .sub.no-names"]]) {
+      await startupFinished(page);
       await page.goto(`http://magpie.test/?view=${view}`);
       await page.locator(sel).waitFor();
       assert.equal(await page.locator(sel).textContent(), said.en);
     }
+    await startupFinished(page);
     assert.deepEqual(errors, []);
   });
   test(`${engine}: with every connected agent following it, nothing is said`, async (t) => {
@@ -134,9 +166,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     await page.goto("http://magpie.test/?view=settings");
     await page.locator("#plainNamesSegs .opt").first().waitFor();
     assert.equal(await page.locator(".row.pref", { has: page.locator("#plainNamesSegs") }).locator(".sub").count(), 0);
+    await startupFinished(page);
     await page.goto("http://magpie.test/?view=routing");
     await page.locator(".rt-gnames .segs").waitFor();
     assert.equal(await page.locator(".rt-gnames .no-names:visible").count(), 0);
+    await startupFinished(page);
     assert.deepEqual(errors, []);
   });
 }

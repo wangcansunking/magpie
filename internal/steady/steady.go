@@ -76,6 +76,7 @@ func Stat(p string) (fs.FileInfo, error) {
 // ReadThere is ReadFile of a file just found there (Stat): not there now is
 // it being replaced, waited out.
 func ReadThere(p string) ([]byte, error) {
+	defer shareRead(p)()
 	var b []byte
 	err := retryGone(func() (err error) {
 		b, err = readFile(p)
@@ -86,6 +87,7 @@ func ReadThere(p string) ([]byte, error) {
 
 // ReadFile is os.ReadFile, waiting out a file being replaced.
 func ReadFile(p string) ([]byte, error) {
+	defer shareRead(p)()
 	var b []byte
 	err := retry(func() (err error) {
 		b, err = readFile(p)
@@ -94,8 +96,10 @@ func ReadFile(p string) ([]byte, error) {
 	return b, err
 }
 
-// Rename is os.Rename, waiting out a reader holding newpath open.
+// Rename is os.Rename, waiting out a reader holding newpath open. Our own
+// readers leave it a gap; another program's handles are waited out by retry.
 func Rename(oldpath, newpath string) error {
+	defer shareReplace(newpath)()
 	return retry(func() error { return os.Rename(oldpath, newpath) })
 }
 

@@ -89,26 +89,82 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const menu = page.locator(".pop.row-menu");
       // which models, the editor's form aside (see provider-typed)
       const asked = (b) => ({ id: b.id, test: b.test });
-      const wait = async (n) => { for (let i = 0; i < 60 && tests.length < n; i++) await page.waitForTimeout(50); };
+      const tested = () => page.waitForResponse((r) => new URL(r.url()).pathname === "/api/provider/test" && r.request().method() === "POST");
       const picked = () => page.locator(".editor .mchips .mchip.on").count();
 
       assert((await chip("gpt-5.1").getAttribute("title") || "").includes(w.tip), "the chip says how to test it alone");
+
+      // Pointerdown marks the text inside the chip before :active scales it.
+      // Make that ordering explicit so both engines exercise the same anchor,
+      // regardless of when they apply their native right-button active style.
+      const anchors = await chip("gpt-5.1").evaluate(async (c) => {
+        const d = c.closest(".dialog"), parent = c.parentElement, label = c.querySelector("span");
+        await Promise.all(d.getAnimations({ subtree: true }).map((a) => a.finished.catch(() => {})));
+        const samples = [];
+        c.style.transition = "none";
+        const transforms = [["scale(.96)", ""], ["translateY(11.5px)", ""], ["scale(.96)", "translateY(7px) scale(.9)"], ["rotate(4deg)", ""], ["scale(0)", ""], ["scaleY(-1)", ""]];
+        transforms.push(...Array.from({ length: 20 }, () => ["scale(.96)", "translateY(7px) scale(.9)"]));
+        const original = d.getBoundingClientRect().top;
+        for (const [transform, outer] of transforms) {
+          d.querySelector("input").focus({ preventScroll: true });
+          modalMark(label);
+          const before = d.getBoundingClientRect().top;
+          c.style.transformOrigin = "7px 3px";
+          parent.style.transformOrigin = "19px 31px";
+          c.style.transform = transform;
+          parent.style.transform = outer;
+          holdModal();
+          const down = d.getBoundingClientRect().top, same = modalHold.at === label;
+          c.style.transform = parent.style.transform = "";
+          holdModal();
+          const up = d.getBoundingClientRect().top;
+          // A temporarily unmeasurable transform must not freeze the anchor:
+          // once gone, a real layout change is still measured and compensated.
+          parent.style.marginTop = "-8px";
+          holdModal();
+          const moved = d.getBoundingClientRect().top;
+          parent.style.marginTop = "";
+          holdModal();
+          const restored = d.getBoundingClientRect().top;
+          parent.style.marginTop = "-0.015625px";
+          holdModal();
+          const subpixel = d.getBoundingClientRect().top;
+          parent.style.marginTop = "";
+          holdModal();
+          samples.push({ transform, outer, original, before, down, up, same, moved, restored, subpixel, subpixelRestored: d.getBoundingClientRect().top });
+        }
+        c.style.transition = c.style.transformOrigin = parent.style.transformOrigin = "";
+        return samples;
+      });
+      for (const sample of anchors) {
+        assert.equal(sample.down, sample.before, "an active chip keeps its dialog in place: " + JSON.stringify(sample));
+        assert.equal(sample.up, sample.before, "releasing the chip keeps its dialog in place");
+        assert.equal(sample.same, true, "the same text remains the anchor even with another input focused");
+        assert.equal(sample.moved, sample.before + 8, "real layout changes still move the held dialog");
+        assert.equal(sample.restored, sample.before, "restoring the layout returns the held dialog");
+        assert.equal(sample.before, sample.original, "repeated transform cycles accumulate no dialog drift");
+        assert.equal(sample.subpixel, sample.before + 1 / 64, "real subpixel layout movement is still compensated");
+        assert.equal(sample.subpixelRestored, sample.before, "restoring subpixel layout returns the held dialog");
+      }
 
       // a right-click that neither picks the chip nor moves the page
       const tryOne = async (id) => {
         const c = chip(id);
         await c.scrollIntoViewIfNeeded();
-        await page.waitForTimeout(150);
+        await c.evaluate(async (e) => {
+          await Promise.all(e.closest(".dialog").getAnimations({ subtree: true }).map((a) => a.finished.catch(() => {})));
+          await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        });
         const before = await c.evaluate((e) => e.getBoundingClientRect().top);
         const on = await picked();
         await c.click({ button: "right" });
         await menu.waitFor();
-        await page.waitForTimeout(200);
+        await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
         assert.equal(await c.evaluate((e) => e.getBoundingClientRect().top), before, `${id} moved on its right-click`);
         assert.equal(await picked(), on, "a right-click doesn't pick");
-        const n = tests.length;
+        const reply = tested();
         await menu.getByRole("menuitem", { name: w.item }).click();
-        await wait(n + 1);
+        await reply;
         assert(await menu.count() === 0, "the menu closes");
         return asked(tests.at(-1));
       };
@@ -145,8 +201,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert(await page.locator(".editor").isVisible(), "Esc closed the menu, not the editor");
 
       // Test models still asks every one
+      const allReply = tested();
       await page.locator(".editor .mfoot").getByRole("button", { name: w.all, exact: true }).click();
-      await wait(3);
+      await allReply;
       assert.deepEqual(asked(tests.at(-1)), { id: "relay", test: IDS });
 
       const missing = await page.evaluate(() => [

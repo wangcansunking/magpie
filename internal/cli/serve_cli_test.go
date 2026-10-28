@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/settings"
 )
 
@@ -15,14 +16,18 @@ func TestKeyNote(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("USERPROFILE", os.Getenv("HOME"))
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	remote := "from others, an enabled gateway key"
+	if gateway.InContainer() {
+		remote = "from its host and other machines, an enabled gateway key"
+	}
 	for _, c := range []struct{ addr, want string }{
 		{"", "only listens on localhost"},
 		{"127.0.0.1:3426", "only listens on localhost"},
 		{"localhost:3426", "only listens on localhost"},
 		{"[::1]:3426", "only listens on localhost"},
-		{"0.0.0.0:3425", "from others, an enabled gateway key"},
-		{":3425", "from others, an enabled gateway key"},
-		{"192.168.1.5:3425", "from others, an enabled gateway key"},
+		{"0.0.0.0:3425", remote},
+		{":3425", remote},
+		{"192.168.1.5:3425", remote},
 	} {
 		t.Setenv("MAGPIE_ADDR", c.addr)
 		if n := keyNote(); !strings.Contains(n, c.want) || strings.Contains(n, "anyone") {

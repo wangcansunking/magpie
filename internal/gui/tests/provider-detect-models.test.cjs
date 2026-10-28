@@ -99,7 +99,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         via: zh ? "m-both 通过 Responses 协议在 123 毫秒内响应" : "m-both answered via Responses in 123 ms",
         viaTitle: zh ? "通过 Responses 协议在 123 毫秒内响应" : "Answered via Responses in 123 ms",
       };
-      await page.locator(".row.provider").click();
+      await page.locator('.row.provider[data-id="relay"]').click();
       const ed = page.locator(".editor");
       await ed.locator(".detect").waitFor();
       const row = (id) => page.locator(".mname", { has: page.locator("code", { hasText: id }) });

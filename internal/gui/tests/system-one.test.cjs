@@ -67,6 +67,26 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         page.setDefaultTimeout(5000);
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
+        await page.addInitScript(() => {
+          const Native = ResizeObserver;
+          window.modalResizeWrites = [];
+          window.ResizeObserver = class extends Native {
+            constructor(deliver) {
+              super((entries, observer) => {
+                const modal = document.querySelector("#modal");
+                const mutations = new MutationObserver(() => {});
+                if (modal) mutations.observe(modal, { subtree: true, attributes: true, attributeFilter: ["style", "class"] });
+                try { deliver(entries, observer); }
+                finally {
+                  for (const { target, attributeName } of mutations.takeRecords()) {
+                    if (target.matches(".dialog, .thumb")) modalResizeWrites.push(target.className + ":" + attributeName);
+                  }
+                  mutations.disconnect();
+                }
+              });
+            }
+          };
+        });
         await page.route("**/*", server(lang, posted));
         await page.goto("http://magpie.test/?view=providers");
         const sheet = page.locator("#addSheet");
@@ -128,6 +148,31 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await ed.locator("input.detect-model").fill("my-decider");
         await ed.locator(".detect button", { hasText: new RegExp("^" + w.detect + "$") }).click();
         await ed.locator(".detect-out .ep[data-api=decide] .res.ok").waitFor();
+        // Narrow the real editor so its Base URL options wrap again. Fitting
+        // their thumb must not write during resize delivery or move the next
+        // editor with a stale fit; at rest no more layout frames are needed.
+        await page.setViewportSize({ width: 440, height: 600 });
+        await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+        await page.setViewportSize({ width: 900, height: 760 });
+        const settled = await page.locator("#modal").evaluate(async (m) => {
+          await Promise.all(m.getAnimations({ subtree: true }).map((a) => a.finished.catch(() => {})));
+          const raf = window.requestAnimationFrame.bind(window);
+          const frame = () => new Promise((done) => raf(done));
+          for (let i = 0; i < 4; i++) await frame();
+          let writes = 0, resizes = 0, frames = 0;
+          const mutations = new MutationObserver((es) => { writes += es.length; });
+          mutations.observe(m, { subtree: true, attributes: true, attributeFilter: ["style", "class"] });
+          const sizes = new ResizeObserver(() => { resizes++; });
+          sizes.observe(m.firstElementChild);
+          await frame(); await frame(); // this observer's first delivery
+          writes = resizes = 0;
+          const previous = window.requestAnimationFrame;
+          window.requestAnimationFrame = (callback) => { frames++; return raf(callback); };
+          try { for (let i = 0; i < 6; i++) await frame(); }
+          finally { window.requestAnimationFrame = previous; mutations.disconnect(); sizes.disconnect(); }
+          return { writes, resizes, frames };
+        });
+        assert.deepEqual(settled, { writes: 0, resizes: 0, frames: 0 }, "the editor and its thumb stop fitting at rest");
         const d = posted.find((x) => x.action === "detect").body;
         assert.equal(d.decide, "https://decide.example.com/v1/systemone");
         assert.equal(d.model, "my-decider");
@@ -139,6 +184,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.equal(c.name, "My Decider");
         assert.equal(c.decide, "https://decide.example.com/v1");
         assert.equal(c.chat, "");
+        assert.deepEqual(await page.evaluate(() => window.modalResizeWrites), [], "resize delivery never writes the dialog or its thumb");
         assert.deepEqual(errors, []);
         await page.context().close();
       });

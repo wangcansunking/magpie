@@ -14,6 +14,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
+const { watchReplies, repliesConsumed } = require("./lifecycle.cjs");
 const { chromium, webkit } = require("playwright");
 
 const assets = path.resolve(__dirname, "../assets");
@@ -73,6 +74,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         pages.push(page);
         page.setDefaultTimeout(5000);
         page.on("pageerror", (e) => errors.push(e.message));
+        await watchReplies(page, ["/api/profile/save", "/api/profile/delete", "/api/profile/use", "/api/window/hide"]);
         await page.route("**/*", server(lang, calls));
         await page.goto("http://magpie.test/" + (panel ? "?mode=panel" : ""));
         const chip = (name) => page.locator("#profiles .chip", { hasText: new RegExp("^" + name) });
@@ -97,6 +99,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.equal(await detail.count(), 0, "nor opens the details");
         await update.click();
         await page.waitForFunction(() => !document.querySelector("#profiles .chip.pending"));
+        await repliesConsumed(page, ["/api/profile/save"]);
         assert.deepEqual(calls, ["save work"]);
         assert.equal((await chip("work").locator(".x").nth(0).textContent()).trim(), "↻");
 
@@ -116,6 +119,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.deepEqual(calls, [], "a first click on × deletes nothing");
         await del.click();
         await page.waitForFunction(() => ![...document.querySelectorAll("#profiles .chip")].some((c) => /^work/.test(c.textContent)));
+        await repliesConsumed(page, ["/api/profile/delete"]);
         assert.deepEqual(calls, ["delete work"]);
         calls.length = 0;
 
@@ -152,7 +156,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           assert.deepEqual(calls, [], "Escape on the list must not hide the panel");
           await page.keyboard.press("Escape");
           await page.waitForTimeout(200);
-          assert.deepEqual(calls, ["hide"]);
+          await repliesConsumed(page, ["/api/window/hide"]);
+        assert.deepEqual(calls, ["hide"]);
           calls.length = 0;
 
           // the list closed with the details open opens on the chips, as
@@ -175,6 +180,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await detail.waitFor();
         await detail.locator(".pd-apply").click();
         await page.waitForFunction(() => document.querySelector("#status").classList.contains("ok"));
+        await repliesConsumed(page, ["/api/profile/use"]);
         assert.deepEqual(calls, ["use home"]);
         await page.waitForTimeout(200);
         assert.equal(await detail.count(), 0, "Apply closes the details");

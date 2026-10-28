@@ -83,6 +83,16 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       page.on("pageerror", (e) => errors.push(e.message));
       await page.route("**/*", serve(lang));
       await page.addInitScript(() => { localStorage.setItem("magpie.usageTab", "sessions"); localStorage.setItem("magpie.sessRange", "all"); });
+      // sessCalFit runs in the frame after its ResizeObserver. A calendar
+      // sized for the previous width can already fit inside the new card,
+      // so "not overflowing" is not evidence that its resize was drawn.
+      const fitted = () => page.evaluate(async () => {
+        await document.fonts.ready;
+        await new Promise((r) => {
+          const observer = new ResizeObserver(() => { observer.disconnect(); requestAnimationFrame(r); });
+          observer.observe(document.querySelector("#sessChart"));
+        });
+      });
       const shot = async (name) => {
         if (!process.env.ARTIFACT_DIR) return;
         await fs.mkdir(process.env.ARTIFACT_DIR, { recursive: true });
@@ -93,6 +103,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.locator("#sessChart .sess-cal i").first().waitFor();
 
       await t.test("a wide window: the weeks before fill the card", async () => {
+        await fitted();
         await shot("wide");
         const m = await page.evaluate(measure);
         assert(m.row, "the facts sit beside the calendar");
@@ -111,6 +122,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
       await t.test("narrower: fewer weeks before, still across the card", async () => {
         await page.setViewportSize({ width: 1000, height: 820 });
+        await fitted();
         await page.waitForFunction(() => document.querySelector("#sessChart .sess-cal-wrap").clientWidth < 1200);
         await page.waitForFunction(() => { const w = document.querySelector("#sessChart .sess-cal-wrap"), c = w.querySelector(".sess-cal"); return c.getBoundingClientRect().right <= w.getBoundingClientRect().right; });
         await shot("medium");
@@ -125,6 +137,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
       await t.test("a narrow window: the facts go under, the weeks still across", async () => {
         await page.setViewportSize({ width: 560, height: 820 });
+        await fitted();
         await page.waitForFunction(() => document.querySelector("#sessChart .sess-cal-wrap").clientWidth < 560);
         await page.waitForFunction(() => { const w = document.querySelector("#sessChart .sess-cal-wrap"), c = w.querySelector(".sess-cal"); return c.getBoundingClientRect().right <= w.getBoundingClientRect().right; });
         await shot("narrow");
@@ -141,6 +154,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       // than the range's own weeks: the page around it runs over, the calendar doesn't
       await t.test("narrower than the range: no weeks before, the cells shrink", async () => {
         await page.setViewportSize({ width: 360, height: 820 });
+        await fitted();
         await page.waitForFunction(() => document.querySelectorAll("#sessChart .sess-cal > s").length === 0);
         await shot("narrowest");
         const m = await page.evaluate(measure);
@@ -152,6 +166,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
       await t.test("wide again: the weeks before come back", async () => {
         await page.setViewportSize({ width: 1400, height: 820 });
+        await fitted();
         await page.waitForFunction(() => document.querySelectorAll("#sessChart .sess-cal > s").length > 0);
         const m = await page.evaluate(measure);
         assert(m.used > 0.9, `${(100 * m.used).toFixed(0)}%`);

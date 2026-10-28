@@ -64,7 +64,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const zh = lang === "zh";
       const L = { names: zh ? "名称与推理档位" : "Names & levels", price: zh ? "价格（$ / 百万 tokens）" : "Price, $ / 1M tokens", input: zh ? "输入" : "Input", output: zh ? "输出" : "Output",
         unsaved: zh ? "未保存" : "unsaved", save: zh ? "保存" : "Save", reset: zh ? "恢复默认" : "Restore default", nolist: zh ? "model-3 没有官方价格：请填写输入和输出价格" : "model-3 has no list price: give its input and output prices" };
-      await page.locator(".row.provider").click();
+      await page.locator('.row.provider[data-id="relay"]').click();
       if (!(await page.locator(".mnames:not([hidden])").count())) await page.getByRole("button", { name: L.names, exact: true }).click();
       const row = (id) => page.locator(".mname", { has: page.locator("code", { hasText: id }) });
       const boxes = (id) => row(id).locator(".mprice > .mpart input");

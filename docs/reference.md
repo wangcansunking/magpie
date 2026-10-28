@@ -109,6 +109,7 @@ line; agents connected to magpie lose it when it quits.
 | VS Code (Chat) | `~/Library/Application Support/Code/User/settings.json` + `chatLanguageModels.json` (`~/.config/Code/User` on Linux, `%APPDATA%\Code\User` on Windows) | model (`chat.defaultModel`; a `magpie` Custom Endpoint group, its catalog in Chat's model picker; VS Code 1.122+, no Copilot sign-in or key needed). Each profile's own pair under `User/profiles/<id>/` (listed in `globalStorage/storage.json`) gets the same, unless the profile uses the default's |
 | VS Code Insiders (Chat) | the same files under `Code - Insiders/User` in place of `Code/User` | as VS Code, a row of its own; its models send the token `magpie-vscode-insiders`, since its chat's User-Agent is VS Code's |
 | VSCodium (Chat) | the same files under `VSCodium/User` in place of `Code/User` | as VS Code, a row of its own; its models send the token `magpie-vscodium`, so Usage counts them as VSCodium; its Chat features must be turned on (`chat.disableAIFeatures=false`, and `defaultChatAgent` plus `trustedExtensionAuthAccess` for GitHub.copilot-chat in its product.json). With the Marketplace's GitHub Copilot Chat 0.48.1, which has no Custom Endpoint provider, the group is written for its OpenAI Compatible provider (`customoai`, the token sent as `x-api-key`), which lists models only while Copilot Chat is signed in to GitHub with a personal Copilot plan |
+| Zoo Code (VS Code) | VS Code's `Code/User/settings.json` (and each profile's): `zoo-code.autoImportSettingsPath` names `globalStorage/zoocodeorganization.zoo-code/settings/magpie-import.json` beside it | model (one provider profile `magpie`, OpenAI Compatible, imported by Zoo Code at start-up) |
 | Copilot (JetBrains) | `byok.json` in `~/.config/github-copilot` (`$XDG_CONFIG_HOME/github-copilot` when set, `%USERPROFILE%\AppData\Local\github-copilot` on Windows), the Copilot language server's own file, which Xcode's and Eclipse's Copilot read too | provider (a `magpie` custom endpoint provider beside the user's: every magpie model at the gateway's `/v1/chat/completions`, sent with `magpie-copilot-jetbrains`; a model hidden in Manage Models stays hidden through a sync; off removes magpie's three keys alone). Found by the `github-copilot-intellij` plugin in a JetBrains IDE or Android Studio. Listed after the IDE restarts, and only while Copilot is signed in to GitHub on a plan with Bring Your Own Key (Free, Pro, Pro+; Business and Enterprise when the organisation allows it); the model is picked in Copilot Chat |
 | JetBrains Air | `acp.json` in `~/Library/Application Support/JetBrains/Air` (`~/.config/JetBrains/Air` on Linux, `%APPDATA%\JetBrains\Air` on Windows) + `magpie-opencode.json` beside it | model (a `Magpie` ACP agent: OpenCode's `opencode acp` on magpie's provider alone, its models and routing groups in Air's model menu; needs OpenCode installed) |
 | Copilot CLI  | `~/.copilot/settings.json`        | model           |
@@ -200,6 +201,23 @@ compatible GitHub Copilot Chat extension, since the Open VSX registry does
 not normally provide Microsoft's extension. Restart VSCodium, or run
 **Developer: Reload Window**, after changing these files. Magpie's models
 then appear under the `magpie` custom endpoint group.
+
+#### Zoo Code
+
+Zoo Code (the VS Code extension `ZooCodeOrganization.zoo-code`) keeps its
+provider profiles in VS Code's encrypted secret storage, which magpie can't
+write. Magpie uses Zoo Code's own `zoo-code.autoImportSettingsPath` setting
+instead: it writes a settings file, `magpie-import.json` in Zoo Code's
+`globalStorage/zoocodeorganization.zoo-code/settings` folder, with one OpenAI Compatible profile named `magpie` (the
+gateway's `/v1`, the key `magpie-zoo-code`, the model picked), and points the
+setting at it in VS Code's `settings.json` and each profile's. Zoo Code imports
+that file each time it starts, so run **Developer: Reload Window** after a
+change. While connected, every start switches Zoo Code back to the `magpie`
+profile. Disconnect puts the setting back as it was and deletes the file, but
+the imported `magpie` profile stays in Zoo Code: pick another profile there, or
+delete it in Zoo Code's settings. Only VS Code (Stable) is wired. Zoo Code for
+JetBrains starts its extension with an empty configuration, so the setting
+can't reach it there.
 
 #### Zed-compatible Agent paths
 
@@ -1652,6 +1670,50 @@ magpie has already is left as it is, two Team seats of one email stay two
 accounts, and an entry with only an access token (a ChatGPT web session)
 is refused, since it would stop working within days with nothing to renew
 it.
+
+### WAN Gateway with Dev Tunnels
+
+WAN Gateway publishes an API-only HTTPS Endpoint without opening the local
+management page. It uses the official Microsoft SDK, not the devtunnel CLI.
+In **WAN Gateway**, install the runtime if prompted, then choose the GitHub
+sign-in action and open the displayed verification page. Authorization is
+through Microsoft's Dev Tunnels GitHub App and is independent of provider
+account discovery. It does not publish a tunnel. Create a named WAN API key,
+then choose **Start** separately. Copy the Endpoint and key into the remote
+client's base URL and API-key fields. For an OpenAI-style client, append
+`/v1` to the Endpoint.
+
+Remembered WAN sign-in uses the current user's Windows Credential Manager;
+where secure persistence is unavailable, use an explicit memory-only session.
+No OAuth token is stored in settings or backups. Expired credentials require
+sign-in again; no automatic refresh is implemented. **Sign out** stops WAN
+before erasing the local login; **Stop** alone keeps the login. The SDK path
+and service-app device authorization still require separately authorized
+real-service verification; offline checks do not establish public operation.
+
+Create a separate key for each device or person so each can be disabled,
+rotated or deleted independently. **A key is not device-bound:** copying it
+lets another device use it too. The name is a management label, not a
+verified hardware identity. No extra client software or device header is
+required.
+
+WAN uses a separate loopback listener that always requires a WAN key.
+Ordinary local/LAN keys cannot open it, and WAN keys are not accepted by
+the ordinary gateway. Management APIs, MCP tools and internal diagnostics
+are not published. Standard model APIs and SSE streaming use the existing
+gateway routing and key restrictions.
+
+**Stop** closes WAN requests and stops hosting; the local gateway keeps
+running. Key revocation affects new requests, not an accepted stream.
+Restarting magpie does not restart the tunnel automatically. The dedicated
+tunnel can keep its Endpoint between starts but may expire or be deleted.
+If another magpie process owns the gateway, this window cannot manage WAN;
+use the window that owns it rather than opening another tunnel.
+
+Microsoft terminates HTTPS at its relay and can process the request and key.
+Dev tunnels is a public-preview service, not a production SLA. Details of
+ownership, supported routes and failure behavior are in
+[WAN gateway](subsystems/wan-gateway.md).
 
 ### Connecting anything else
 

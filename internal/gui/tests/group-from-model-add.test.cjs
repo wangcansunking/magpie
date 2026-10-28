@@ -24,7 +24,10 @@ const MODEL = "workbuddy/hy4-preview";
 function serve(lang, posts, refuse) {
   const state = { agents: [], profiles: [], settings: { lang, theme: "light" } };
   const groups = { groups: [], pools: [], deciders: [], models: [{ id: MODEL, name: "Hy4 preview", provider: "workbuddy", providerName: "WorkBuddy", icon: "generic" }] };
-  return async (r) => {
+  let release;
+  const stopped = new Promise((resolve) => { release = resolve; });
+  const pending = new Set();
+  const handler = async (r) => {
     const req = r.request(), url = new URL(req.url());
     const json = (data, status = 200) => r.fulfill({ status, json: data });
     if (url.pathname === "/boot.js") return r.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:"${lang}",theme:"light",web:true};` });
@@ -35,7 +38,11 @@ function serve(lang, posts, refuse) {
     if (url.pathname === "/api/usage/quotas") return json([]);
     if (url.pathname === "/api/agents/cli") return json({ agents: {}, pending: false });
     if (url.pathname === "/api/gateway/trace") {
-      if (url.searchParams.get("wait")) return new Promise(() => {});
+      if (url.searchParams.get("wait")) {
+        const reply = stopped.then(() => r.abort());
+        pending.add(reply);
+        try { return await reply; } finally { pending.delete(reply); }
+      }
       return json({ mine: true, now: new Date().toISOString(), seq: 1, totals: { requests: 0, rerouted: 0, errors: 0 }, routes: [] });
     }
     if (url.pathname === "/api/gateway/history") return json({ cut: false, days: [], routes: [] });
@@ -47,6 +54,9 @@ function serve(lang, posts, refuse) {
     const contentType = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png" }[path.extname(file)];
     await r.fulfill({ body: await fs.readFile(file), contentType });
   };
+  // Close the context first so releasing its held poll cannot start another.
+  handler.settle = async () => { release(); await Promise.all([...pending]); };
+  return handler;
 }
 
 const words = { en: { add: "Add", addModel: "Add another model" }, zh: { add: "添加", addModel: "再加一个模型" } };
@@ -54,17 +64,47 @@ const words = { en: { add: "Add", addModel: "Add another model" }, zh: { add: "�
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
   for (const lang of ["en", "zh"]) {
     for (const [width, height] of [[600, 420], [1000, 700]]) {
-      test(`${engine} ${lang} ${width}x${height}: a routing group made from a model is added`, async (t) => {
+      test(`${engine} ${lang} ${width}x${height}: a routing group made from a model is added`, { timeout: 120000 }, async (t) => {
+        let active = "launch";
+        const phase = (name) => {
+          active = name;
+          console.info(`[group-from-model-add ${engine} ${lang} ${width}x${height}] ${name}`);
+        };
+        phase("launch");
         const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
-        t.after(() => browser.close());
+        let closing;
+        const fixtures = [];
+        const closeBrowser = () => closing ||= browser.close();
+        const abort = () => {
+          phase(`aborted during ${active}`);
+          closeBrowser().catch((err) => console.error("group-from-model-add cancellation:", err));
+        };
+        t.signal.addEventListener("abort", abort, { once: true });
+        t.after(async () => {
+          phase("close browser");
+          try {
+            await closeBrowser();
+            phase("settle polls");
+            await Promise.all(fixtures.map((fixture) => fixture.settle()));
+          } finally { t.signal.removeEventListener("abort", abort); }
+        });
+        if (t.signal.aborted) abort();
         const open = async (posts, refuse) => {
-          const page = await (await browser.newContext({ viewport: { width, height }, reducedMotion: "reduce" })).newPage();
+          phase(`new context (${refuse ? "refused" : "accepted"})`);
+          const context = await browser.newContext({ viewport: { width, height }, reducedMotion: "reduce" });
+          phase("new page");
+          const page = await context.newPage();
           page.setDefaultTimeout(5000);
           page.setDefaultNavigationTimeout(20000); // the page's first load, slow on a busy machine
           const errors = [];
           page.on("pageerror", (e) => errors.push(e.message));
-          await page.route("**/*", serve(lang, posts, refuse));
+          phase("install fixture");
+          const fixture = serve(lang, posts, refuse);
+          fixtures.push(fixture);
+          await page.route("**/*", fixture);
+          phase("navigate");
           await page.goto(`http://magpie.test/?view=routing&newgroup=${encodeURIComponent(MODEL)}`);
+          phase("open editor");
           const ed = page.locator("#view-routing:not([hidden]) .rt-gedit");
           await ed.waitFor();
           await ed.locator("input").first().fill("Hy4 preview");
@@ -75,6 +115,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
             const r = btn.getBoundingClientRect(), x = r.left + r.width / 2, y = r.top + r.height / 2;
             return document.elementFromPoint(x, y)?.closest("button") === btn ? { x, y } : null;
           });
+          phase("wheel to Add");
           await page.mouse.move(width / 2, height / 2);
           let at = null;
           for (let i = 0; i < 60; i++) {
@@ -91,6 +132,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           // is scrolled to its end. The reader wheels down to the end of the
           // page here, so that the press lands whatever the error does.
           const clickAdd = async () => {
+            phase("click Add");
             for (let i = 0; i < 80; i++) {
               const done = await page.evaluate(() => {
                 const v = document.querySelector("#view-routing");
@@ -109,12 +151,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
             assert.ok(now, "Add is under the pointer's reach to be clicked");
             await page.mouse.click(now.x, now.y);
           };
-          return { page, ed, errors, clickAdd };
+          return { page, ed, errors, clickAdd, fixture };
         };
 
         // Add posts the group of its one model
         let posts = [];
-        let { page, ed, errors, clickAdd } = await open(posts, false);
+        let { page, ed, errors, clickAdd, fixture } = await open(posts, false);
+        phase("inspect accepted editor");
         // every label beside its own field, or over it where the editor is one
         // column: a hidden classifier left its cell behind, and Levels' label
         // sat at the right, its choices below. Under 760px the editor is one
@@ -137,12 +180,16 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.deepEqual(saved.fast, [], "no member sent fast");
         assert.equal(saved.name, "Hy4 preview");
         assert.deepEqual(errors, [], "nothing throws");
+        phase("close accepted context");
         await page.context().close();
+        phase("settle accepted poll");
+        await fixture.settle();
 
         // refused, the error is said in sight and the editor stays
         posts = [];
         ({ page, ed, errors, clickAdd } = await open(posts, true));
         await clickAdd();
+        phase("verify refusal");
         const st = page.locator("#status.err");
         await st.waitFor();
         assert.match(await st.textContent(), /no such model/);

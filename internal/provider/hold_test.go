@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +16,58 @@ import (
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/testenv"
 )
+
+// An overlapping request checks the files too. A build already in flight
+// may finish for its caller, but cannot repopulate the next request's cache
+// with the state from before that external write.
+func TestHoldDoesNotPublishBuildAcrossExternalWrite(t *testing.T) {
+	home := t.TempDir()
+	testenv.SetHome(t, home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
+	defer func(was time.Duration) { heldFor = was }(heldFor)
+	heldFor = time.Minute // cache expiry must not make this test pass
+	if err := os.MkdirAll(filepath.Dir(Path()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(Path(), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read := func() string {
+		b, err := os.ReadFile(Path())
+		if err != nil {
+			t.Error(err)
+		}
+		return string(b)
+	}
+	write(`{"providers":[]}`)
+	defer Hold()()
+	entered, release := make(chan struct{}), make(chan struct{})
+	result := make(chan string, 1)
+	unblock := sync.OnceFunc(func() { close(release) })
+	defer func() { unblock(); <-result }()
+	go func() {
+		result <- heldOf("overlapping-external-build", func() string {
+			old := read()
+			close(entered)
+			<-release
+			return old
+		})
+	}()
+	<-entered
+	const newer = `{"providers":[{"id":"new"}]}`
+	write(newer)
+	Hold()() // another request begins while the older one still holds
+	unblock()
+	old := <-result
+	result <- old // cleanup joins the completed build on every path
+	if got := heldOf("overlapping-external-build", read); got != newer {
+		t.Fatalf("the next request kept a pre-write build: %s", got)
+	}
+}
 
 // A request that only reads builds the catalog once for all its look-ups
 // (/api/state took 4s, resolving each agent's models anew); outside one,

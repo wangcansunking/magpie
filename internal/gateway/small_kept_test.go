@@ -51,26 +51,30 @@ func manyEyes(t *testing.T, n int, all bool) {
 // its allowance: 5.3 GB of a day's 36 GB of allocations. Asked again with
 // nothing changed, it costs the same whatever the lists' length.
 func TestAutoVisionDoesNotBuildListsAgain(t *testing.T) {
-	allocs := func(n int) float64 {
+	allocs := func(n int) (float64, float64) {
 		manyEyes(t, n, false)
 		if got := AutoVision(); got != "eyes/google/gemini-3-flash" {
 			t.Fatalf("AutoVision = %q of %d", got, n)
 		}
-		return testing.AllocsPerRun(20, func() { AutoVision() })
+		vision := testing.AllocsPerRun(20, func() { AutoVision() })
+		p, err := provider.Find("eyes")
+		if err != nil {
+			t.Fatal(err)
+		}
+		searcherModel(*p)
+		return vision, testing.AllocsPerRun(20, func() { searcherModel(*p) })
 	}
-	few, many := allocs(4), allocs(400)
+	few, fewSearch := allocs(4)
+	many, manySearch := allocs(400)
 	t.Logf("allocations an AutoVision: %.0f with 4 models, %.0f with 400", few, many)
 	if many > few+50 {
 		t.Fatalf("AutoVision made %.0f allocations with 400 models, %.0f with 4: the lists are built again", many, few)
 	}
-	// and the searcher's pick, built the same way
-	p, err := provider.Find("eyes")
-	if err != nil {
-		t.Fatal(err)
-	}
-	searcherModel(*p)
-	if a := testing.AllocsPerRun(20, func() { searcherModel(*p) }); a > 50 {
-		t.Fatalf("searcherModel made %.0f allocations with 400 models", a)
+	// File-stamp checks allocate differently on each OS. Like AutoVision,
+	// the searcher's cost must stay independent of catalog length.
+	t.Logf("allocations a searcherModel: %.0f with 4 models, %.0f with 400", fewSearch, manySearch)
+	if manySearch > fewSearch+50 {
+		t.Fatalf("searcherModel made %.0f allocations with 400 models, %.0f with 4: the lists are built again", manySearch, fewSearch)
 	}
 }
 

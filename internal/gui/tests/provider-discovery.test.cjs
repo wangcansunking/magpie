@@ -5,6 +5,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { watchReplies, repliesConsumed } = require("./lifecycle.cjs");
 const assets = process.env.ASSET_DIR || path.resolve(__dirname, "../assets");
 const engines = process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"];
 
@@ -61,10 +62,13 @@ async function fixture(t, engine, lang = "en", options = {}) {
     try { await route.fulfill({ body: await fs.readFile(file), contentType }); } catch { await route.fulfill({ status: 404, body: "" }); }
   });
   t.after(async () => { control.release?.(); await browser.close(); assert.deepEqual(errors, []); });
+  // The discovery hint can finish before loadProviders' second read and its
+  // upstream request. Join those consumed replies before a persistence reload,
+  // but never join discovery itself: several tests deliberately hold it.
+  await watchReplies(page, ["/api/providers", "/api/upstream", "/api/update", "/api/whatsnew"]);
   const go = async (view) => {
-    const loaded = view === "providers" ? page.waitForResponse((r) => new URL(r.url()).pathname === "/api/providers") : null;
     await page.evaluate((v) => show(v), view);
-    if (loaded) await loaded;
+    if (view === "providers") await repliesConsumed(page, ["/api/providers", "/api/upstream"]);
   };
   return { page, control, go };
 }
@@ -143,8 +147,10 @@ for (const engine of engines) {
     assert.equal(await page.locator("#providerDiscovery").isHidden(), true);
     assert.equal(control.scans, 1);
     const reload = async () => {
+      await repliesConsumed(page, ["/api/providers", "/api/upstream", "/api/update", "/api/whatsnew"]);
       await page.reload();
       await page.waitForFunction(() => discoveryAt > 0 && !discoveryPending);
+      await repliesConsumed(page, ["/api/providers", "/api/upstream", "/api/update", "/api/whatsnew"]);
     };
     await reload();
     assert.equal(await page.locator("#providerDiscovery").isHidden(), true, "dismissal survives a new page lifetime");
@@ -204,6 +210,7 @@ for (const engine of engines) {
     await page.locator("#providerDiscovery").waitFor();
     await page.locator("#dismissProviderDiscovery").click();
     control.revisions.beta = 2;
+    await repliesConsumed(page, ["/api/providers", "/api/upstream", "/api/update", "/api/whatsnew"]);
     await page.reload();
     await page.locator("#providerDiscovery").waitFor();
     await page.locator("#reviewProviderDiscovery").click();

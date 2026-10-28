@@ -161,7 +161,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
         // the row's details say it too
         // the first cell, not the time's link: at a narrow window the row is brought into sight first
-        await reader.click(p, p.locator(".led tbody tr.led-row").first().locator("td").nth(1));
+        const first = p.locator(".led tbody tr.led-row").first().locator("td").nth(1);
+        // The sticky horizontal bar can cover a row wholly inside the view.
+        // Wheel until the click point is clear, not merely within its bounds.
+        await reader.reach(p, first);
+        await first.click();
         const detail = p.locator(".led tbody tr.led-detail").first();
         await detail.waitFor();
         const pairs = await detail.locator("dt").evaluateAll((dts) => dts.map((dt) => [dt.textContent, dt.nextElementSibling?.textContent]));

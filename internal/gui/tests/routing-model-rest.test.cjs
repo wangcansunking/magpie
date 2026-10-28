@@ -16,6 +16,7 @@ const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
 // a reader wheels down to it, and it is the button under the pointer
 const { reach } = require("./reader.cjs");
+const reader = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 const now = new Date();
@@ -49,7 +50,7 @@ function routes() {
   return [{ id: 1, seq: 1, time, agent: "codex", model: "group/g", provider: "antigravity", order, tries, done: true, status: 200, ms: 2000 }];
 }
 
-function serve(lang, lifted) {
+function serve(lang, lifted, liftReady = Promise.resolve()) {
   return async (route) => {
     const url = new URL(route.request().url());
     const json = (data) => route.fulfill({ json: data });
@@ -63,6 +64,7 @@ function serve(lang, lifted) {
     }
     if (url.pathname === "/api/gateway/history") return json({ cut: false, days: [], routes: [] });
     if (url.pathname === "/api/gateway/unrest") {
+      await liftReady;
       lifted.push(JSON.parse(route.request().postData() || "{}"));
       return json({ lifted: true });
     }
@@ -76,11 +78,47 @@ function serve(lang, lifted) {
 }
 
 const go = { en: "Try now", zh: "立即重试", "zh-TW": "立即重試", ja: "今すぐ試す", de: "Jetzt versuchen" };
-const posted = async (lifted) => {
-  for (let i = 0; i < 60 && !lifted.length; i++) await new Promise((r) => setTimeout(r, 50));
-  return lifted;
-};
 const sideways = (page) => page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
+
+// Force a redraw between locator resolution and evaluation, not by hoping the
+// one-second account refresh lands there. Both the view lookup and the hit-test
+// must discard the old handle and reach the replacement before a normal click.
+for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
+  test(`${engine}: reader reaches a row replaced after its element was resolved`, async (t) => {
+    const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+    t.after(() => browser.close());
+    const page = await browser.newPage({ viewport: { width: 600, height: 500 }, reducedMotion: "reduce" });
+    await page.route("**/*", (route) => route.abort());
+    for (const detachedAt of [1, 2]) {
+      await page.setContent('<div class="view" id="fixture" style="height:300px;overflow:auto"><div style="height:400px"></div><button onclick="this.dataset.clicked=\'yes\'">Try now</button><div style="height:100px"></div></div>');
+      const button = page.getByRole("button", { name: "Try now", exact: true });
+      let evaluations = 0, replaced = false;
+      const changing = {
+        waitFor: (opts) => button.waitFor(opts),
+        boundingBox: () => button.boundingBox(),
+        evaluateAll: async (fn) => {
+          if (++evaluations !== detachedAt) return button.evaluateAll(fn);
+          const held = await button.elementHandle();
+          try {
+            await held.evaluate((e) => e.replaceWith(e.cloneNode(true)));
+            replaced = true;
+            return null;
+          } finally { await held.dispose(); }
+        },
+      };
+      await reader.reach(page, changing);
+      assert(replaced, `detachment ${detachedAt} was injected`);
+      assert(evaluations > detachedAt, "the detached handle was re-queried");
+      await button.click();
+      assert.equal(await button.getAttribute("data-clicked"), "yes", "the replacement received the click");
+    }
+    const fault = new Error("unrelated evaluation failure");
+    await assert.rejects(reader.reach(page, {
+      waitFor: () => Promise.resolve(),
+      evaluateAll: () => Promise.reject(fault),
+    }), (err) => err === fault, "unrelated errors must not be swallowed");
+  });
+}
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
   for (const lang of Object.keys(go)) {
@@ -91,9 +129,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const page = await context.newPage();
         page.setDefaultTimeout(5000);
         const errors = [], lifted = [];
+        let releaseLift;
+        const liftReady = new Promise((resolve) => { releaseLift = resolve; });
         page.on("pageerror", (e) => errors.push(e.message));
-        await page.route("**/*", serve(lang, lifted));
+        await page.route("**/*", serve(lang, lifted, liftReady));
         t.after(async () => {
+          releaseLift();
           if (process.env.ARTIFACT_DIR) {
             await fs.mkdir(process.env.ARTIFACT_DIR, { recursive: true });
             await page.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `${engine}-${lang}-${width}-model-rest.png`), fullPage: true });
@@ -142,9 +183,20 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // Try now lifts the model's own rest
         const row = page.locator(".rt-act", { hasText: "me@x.test" });
         const btn = row.locator(".fix button", { hasText: go[lang] });
-        await reach(page, btn);
-        await btn.click();
-        assert.deepEqual(await posted(lifted), [{ key: opusRest.key }]);
+        await reader.reach(page, btn);
+        const [response] = await Promise.all([
+          page.waitForResponse(r => new URL(r.url()).pathname === "/api/gateway/unrest" && r.request().method() === "POST"),
+          (async () => {
+            await Promise.all([
+              page.waitForRequest(r => new URL(r.url()).pathname === "/api/gateway/unrest" && r.method() === "POST"),
+              btn.click(),
+            ]);
+            assert.deepEqual(lifted, [], "the request is held before the fixture records its lift");
+            releaseLift();
+          })(),
+        ]);
+        assert.equal(response.ok(), true, "the lift completed");
+        assert.deepEqual(lifted, [{ key: opusRest.key }]);
         await row.locator(".st.part").waitFor({ state: "detached" });
         assert.deepEqual(errors, []);
       });

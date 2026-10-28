@@ -7,6 +7,12 @@ with no binding generator and no bundler. `magpie web` serves the same page
 to a browser for a machine with no desktop. Package `internal/gui` hosts all
 three.
 
+The Gateway plugin also supplies [WAN Gateway](wan-gateway.md): a separate
+page for an opt-in devtunnel endpoint and WAN-only keys. Its administrative
+API stays on this handler; only the strictly authenticated inference
+listener is public. A GUI observing another gateway process cannot control
+that process's WAN runtime.
+
 ## Responsibilities and sources of truth
 
 | Part | Responsibility | Source |
@@ -21,6 +27,12 @@ three.
 | Built-in plugins | Plugins › Built-in, the page's first tab (`drawBuiltin` in `plugins.js`, rows by `renderBuiltins` in `app.js`), lists magpie's built-in plugins, each with a name, a line on what it is and a switch: Routing groups, Library, Observability, Sessions, Warm-up and check-in, and the Gateway and Routing pages (Essential). A plugin on with settings has their rows under its row, drawn from its schema by the kernel's `ui.form`, and a change posts `{id, config}`. The Gateway page is drawn by its plugin's own scripts through the window's kernel (`kernel.js`, `assets/plugins/gateway/`); see the [plugin runtime](plugin-runtime.md), "The window's kernel". They are `plugins/*` registered with the [plugin runtime](plugin-runtime.md); `GET /api/plugins/builtin` says each one (`builtinJSON`: on is active, the user's own choice, what of it is in use) and `POST {id, on}` (or `{id, config}`) writes plugins.yml. A page marks what goes with a plugin `data-feature="<id>"`. Off, `featureStyle` hides everything so marked (rows drawn later too), `navHides` leaves its page's tab out of the sidebar and the header, `show` opens Agents for an address kept for it, and `setSetTab`, `partShows` and `findSettings` leave its Settings tab and rows out, of the search too. One in use stays on: its switch is disabled and the row says what uses it, and the POST refuses it off. A plugins.yml that doesn't parse is said above the list and no switch moves. `boot.js` says which are off (`featuresOff`) and their settings (`pluginConfig`) before the first paint, and `settings.builtins` carries the list on every state read. The TUI doesn't follow them. See `builtins.test.cjs`, `builtins_test.go`. | [`builtins.go`](../../internal/gui/builtins.go), [`assets/plugins.js`](../../internal/gui/assets/plugins.js), [`assets/app.js`](../../internal/gui/assets/app.js) |
 | No GUI build | `-tags nogui` builds magpie without the GUI: `hasGUI` is false and `runGUI` says to use `magpie tui`. The files of `internal/gui` that need Wails build under `!nogui`. | [`gui_off.go`](../../internal/cli/gui_off.go) |
 
+`fitTop` fits the header's tabs as its available width changes. Its
+`ResizeObserver` coalesces fitting into the next animation frame: changing
+the compact classes also resizes the observed brand/actions, so writing
+those classes inside resize delivery can create a WebKit observer loop.
+Direct initial/font fitting remains synchronous.
+
 ## Runtime path
 
 1. `magpie` with no arguments, `magpie app` or `magpie tray` calls `runGUI`, which calls `gui.Run`. A `nogui` build runs the TUI instead. A second launch hands over to the instance already running. On Windows, before any window is made, `webView2Check` asks Wails whether the WebView2 runtime is there (`Env.Info().PlatformInfo["WebView2"]`, "" when its lookup fails; a key Wails doesn't set counts as there). Without it Wails would exit on the first window with nothing on screen, so magpie logs it, shows a Windows message box in the reader's language naming the runtime, Microsoft's download page (`webView2Page`) and `magpie web` / `magpie tui`, opens the page on Yes, and `Run` ends (#1806, `webview2.go`, `TestWebView2MissingFromWails` on Windows). The box can't come from `ErrorHandler`, which runs on the thread Wails makes its windows on.
@@ -33,6 +45,34 @@ three.
 8. On the Mac, Settings › Show in Dock puts magpie in the Dock never (the default: out of the Dock, and so out of Command-Tab), while the window is open (`DockWindow`) or always (`Dock`); a full-screen window joins it whatever the setting (`inDock`, `dockOnFullscreen`). `openMain` joins before it shows the window (`setDock` runs on the main thread at once). An app activated out of the Dock (the quick panel's focus) that then joins it stays last in Command-Tab's order though it is in front, so joining to the front activates magpie by way of the Dock (`dockStep`, `activateAgain`; #1381, `TestDockStep`, `TestDockJoinLeadsCommandTab`). It does so without asking NSApp whether magpie is active: the Mac makes it the front app at once, and NSApp says so only once the main thread has taken that in, after the join on a busy Mac (#1651).
 
 ## Constraints and failure behavior
+
+General preference writes are serialized by `savePrefs`. While any such write
+is queued, `renderSettings` defers unrelated redraws so the optimistic selection
+and its thumb remain in place. The last reply redraws the committed settings,
+including rollback after failure. `segs-glide.test.cjs` holds a save while
+requesting redraws, then checks the choice, monotonic glide and failure rollback;
+`segs-press-redraw.test.cjs` still exercises real replacements under a press.
+
+`closeAddSheet` commits the dismissed provider selection before starting its
+closing animation. Completion redraws/focuses the idle Providers page only;
+it cannot clear or replace an editor, import or page opened in the meantime.
+`plugin-moved-signin.test.cjs` holds the animation's completion while opening
+Cursor's plugin-owned account editor, then checks that both its owner and its
+open modal survive. `signin-closes-sheet.test.cjs` covers sign-in completion
+putting the sheet away without leaving blank space.
+
+Modal placement holds the last pressed/focused control's vertical depth while
+content reflows. Only a change in a scroller's `scrollTop` rebases that depth;
+a horizontal scroll, including WebKit clamping overflow during reflow, leaves
+the pending vertical compensation intact. `modal-horizontal-anchor.test.cjs`
+orders a fractional reflow and horizontal scroll before the fit, including at
+a nonzero vertical offset, and checks vertical scrolling back to zero too.
+
+Routing rest actions mark their removable action line with `data-unrolls`, so
+the shell holds the account row when a successful Try now removes that line.
+Holding a child whose line shrinks instead moved the page by 20px.
+`rest-try-now.test.cjs` checks both the scroll offset and the account row
+position in both browser engines, all five languages and both widths.
 
 ### Allowance card refreshes
 
@@ -178,6 +218,22 @@ keys and `provider/model@` for accounts on the stage, `provider/*` and
 `provider/@` in the list, and `group/<id>` for a heading. Display only: the
 gateway's order and choice of seat don't change. Two stay two rows. See
 `routing-keys-fold.test.cjs` and `routing-group-fold.test.cjs`.
+
+### Routing rest actions
+
+Accounts and keys keeps each row by its typed account/key identity, including
+an account's full organization-qualified name rather than its changing
+current-login trace id. `renderActs`, `restActions` and `updateAct` in
+[`plugins/routing/client.js`](../../internal/gui/assets/plugins/routing/client.js)
+update countdowns without replacing the row, its action container or an
+unchanged button: a native press spanning the one-second tick still clicks.
+A button's target is its operation and exact verification URL or set of rest
+keys (including model scope), not its label. A changed target gets a new
+button, so an old press cannot activate the successor; each activation uses
+its own key snapshot. Failed lifts stay readable on the retained button
+through ticks and can be retried. A late error cannot write into a removed
+or repurposed action. Rows absent from the current list, including filtered
+or folded accounts, leave the cache. See `routing-wb-restricted.test.cjs`.
 
 ### Routing account windows
 
@@ -357,9 +413,10 @@ covers it in both engines, every language and a narrow window.
 - Every user-visible string has zh, zh-TW, ja and de translations with the same placeholders. `gui-zh-tw.test.cjs`, `gui-ja.test.cjs` and `gui-de.test.cjs` fail on a missing one; `gui-zh-tw.test.cjs` also fails on a zh-TW string with a Simplified character left in it.
 - A click never moves the page. Code scrolls a view only with the reader's event in hand (`scrollOnPurpose`); `click-scroll.test.cjs` guards this. A click is taken where the reader left the view: a scroll not theirs made just before it, whose scroll event the browser sends only at the next frame, after the click, is put back first (`backToReader` in the click guard, #1554). What was clicked is held where it was (`hold`); a view at its top when clicked stays at its top, and what comes in above the control moves it down instead (#2134, `update-auto.test.cjs`), as long as it moves less than half its own height and so stays under the pointer. Anything larger above it, as the stage a day picked on Routing brings in above the bar, is scrolled past, and the control stays where it was clicked (`routing-days-fit.test.cjs`, `routing-failed-open.test.cjs`).
 - Typing never moves the page either. A textarea that grows with its text (the Library's `autosize` in plugins/library/client.js: a set's text, an agent's own text, a skill's description, a subagent's fields) is measured at height auto with what holds it kept at its height, so the page never goes short for a moment: a page gone short has its view's scroll clamped by the browser at every input, an input method's every composing step included, and the guard's putting it back pulled a textarea taller than the view to one of its edges (#2636, `library-ime-scroll.test.cjs`).
+- A trusted keyboard action that changes focus reveals the new field only when it remains outside its visible view (`keyboardFocus`): Enter/Space opening or validating a form, and Tab/Shift+Tab when the browser's native reveal leaves the field partly clipped. It uses the existing nearest-scroll and reader-event guard; pointer clicks and unchanged focus do not gain permission to scroll. See `readable-focus.test.cjs`.
 - There are no native `<select>` elements and no colored left-border stripes. State is shown with a dot or a swatch.
 - The Usage page's cards and the tray panel's Allowances tab share one order, `settings.UsageOrder` (`byUsageOrder`). In the panel a balance-only card stands where that order puts it, and balances next to each other share one *Balances* grid (`panelBalances`, #1510); none is gathered after the plans. The panel's *Arrange* (`panelArrange`) moves rows in it and hides subscriptions from that tab alone (`settings.PanelUsageHidden`); both save through `POST /api/usage/arrange`, which changes only the field it is sent, and the Settings save keeps both. Hiding is display only: a menu bar cell's card shows though hidden (`panelPeek`). See `TestUsageArrangePanelHidden`, `panel-arrange.test.cjs` and `panel-balance-order.test.cjs`.
-- A client in the Usage page's Agents list can be hidden from that list (ikunbots on X): its row's "…" button or right-click opens the row menu with *Hide from this list*, saved by client id in `settings.UsageAgentsHidden` through the same `POST /api/usage/arrange` (`agentsHidden`), and kept by the Settings save. The ledger, the totals and the chart still count a hidden client. A quiet "{n} hidden" line under the list opens them, each with *Unhide* (`hideUsageAgent`). See `TestUsageArrangeAgentsHidden` and `usage-agents-hide.test.cjs`.
+- A client in the Usage page's Agents list can be hidden from that list (ikunbots on X): its row's "…" button or right-click opens the row menu with *Hide from this list*, saved by client id in `settings.UsageAgentsHidden` through the same `POST /api/usage/arrange` (`agentsHidden`), and kept by the Settings save. The ledger, the totals and the chart still count a hidden client. A quiet "{n} hidden" line under the list opens them, each with *Unhide* (`hideUsageAgent`). Unhide holds that surviving line while the lists redraw, rather than the tall container that could let it move by a whole row. A refused save restores the originating action's focus; a refused last Unhide also reopens the hidden list for retry. The global click-scroll rules stay unchanged. See `TestUsageArrangeAgentsHidden` and `usage-agents-hide.test.cjs`.
 - Usage › Overview's Agents, Models, Accounts and Gateway keys lists each fold under their heading (#2378): the heading is a `.fold` button with its chevron, as on the Gateway page, and the click doesn't move the page (`backToReader`). What is folded is kept per viewer in localStorage `magpie.usageFolded` (`mountUsageFolds`, `showUsageFolds`). The totals leave the cache out, as before, unless the tokens tile's label, a pop-up button (`usageTokensPick`, the app menu), is set to *With cache*: then the tile, the chart and every row's count and share add cache read and written (`usageTokens`), and the tile says the cache's count; kept in localStorage `magpie.usageWithCache`. The Requests tab's total already counts every token (`allTokens`). A token line in parts (the Requests strip's Tokens card, the Overview's tokens tile) wraps between its counts and keeps each whole (`usageParts`, `.parts`); only a count wider than its card on its own is cut. See `usage-overview-fold.test.cjs`.
 - A request's details in the Usage ledger say its tokens at every width (#1839, `ledDetail`): "{i} in · {o} out · {r} cache read · {w} cache creation", 0 said as 0, with how much was written for 5 minutes and for an hour when it says so. A failure that spent nothing has no Tokens row. See `ledger-cache-tokens.test.cjs` and `usage-ledger-detail.test.cjs`.
 - The requests magpie makes by itself (a routing classifier's, a web search's, an image description's) are told apart from the agents' on the Usage page (#1839): magpie's row among the agents and its rows in the ledger carry a "magpie's own" mark (`ownBadge`), an account's, key's or model's row adds "{n} by magpie itself" from the summary's `own`, and an account's card says how many of the period's requests were magpie's own (`ownLine`, drawn again once the summary comes after the allowances). See `own-requests.test.cjs` and `TestSummaryCountsMagpiesOwnCallsApart`.
@@ -383,6 +440,51 @@ covers it in both engines, every language and a narrow window.
 - `POST /api/settings/codex-auto-review` accepts an empty value (Codex's own choice) or an exact model/group ID in `provider.Served`, including unlisted providers. A known provider with an unknown or empty model name is rejected without changing the saved reviewer or catalog tag. Generic gateway request resolution remains permissive; it is not the validator for this setting. See `Handler` in [`api.go`](../../internal/gui/api.go) and `TestCodexAutoReviewSetting` in [`codex_auto_review_test.go`](../../internal/gui/codex_auto_review_test.go).
 - `Settings -> Sync and backup` and `/api/davsync/{action}` configure and run encrypted WebDAV, S3 or GitHub setup sync. They share the CLI's operations and expose credential presence, never the secrets. State, merge, failure and compatibility behavior are described in [Sync and backup](sync-backup.md).
 
+Modal editors reserve their body's scrollbar width (`.modal .editor.framed > .ebody`
+in [`app.css`](../../internal/gui/assets/app.css)), so expanding content doesn't
+change grid width and move the pressed field. `holdModal` coalesces resize and
+subtree-mutation observer fits into the next frame; direct opening and redraw
+still place the editor before paint. A queued fit reads the current editor and
+does nothing after close. `thumbFit` similarly coalesces resize-driven fits and
+uses the live selection; `thumbPut` writes only changed geometry, without class
+mutations or forced layout inside resize delivery. `system-one.test.cjs` checks
+that these observers write no geometry during delivery and stop scheduling or
+writing once the dialog settles; segment animation and editor geometry tests
+cover the neighboring behavior.
+
+`modalDepth` measures the same marked element before and during a pressed
+control's transform. It removes positive, axis-aligned two-dimensional scales
+and translations, including nested ancestors and their transform origins,
+without replacing a label with its parent's position. Computed hold deltas
+below 0.001px are discarded as transform serialization roundoff; representable
+layout changes still move the hold. A temporary unsupported
+transform (rotation, skew, nonpositive scale or 3D) has no measurement; the
+hold keeps its previous baseline until the element is measurable again.
+Focused-element fallback is only for a marked element that is gone, hidden
+or outside the dialog, not one merely being transformed. This keeps a
+WebKit right-click's active chip scale from shifting the whole editor.
+
+The modal and view holds share `contentDepth` for that same-element
+measurement of the shell's CSS `transform` property. Independent `scale`,
+`rotate` and `translate` properties are outside this helper's contract. `onScreen` uses it for click anchors and reader pins too: an
+active routing segment's scale no longer becomes a permanent one-pixel
+scroll when its click changes rows above it. A root or outer ancestor's
+pure translation cancels between the rects, preserving the view's entrance
+motion; other outer transforms are unmeasurable. Modal opening alone keeps
+its existing offset-based fallback. A temporarily unmeasurable held anchor
+keeps its baseline, without switching to another node. A reader pin does
+so only for the same live node with unchanged scroll; real reader movement
+clears an unknown pin rather than restoring its obsolete position later.
+Computed view-hold deltas and scroll targets within 0.001px of an integer are
+snapped before the existing one-pixel hold threshold, while fractional
+baselines and real subpixel layout remain unchanged. `group-member-weight.test.cjs`
+covers active-click ordering, transform recovery and reader movement.
+
+`openProtoMenu` and `openSessCombo` return focus with `preventScroll` when Escape
+closes the menu. An anchor moved below its scroller during a redraw is focused
+without being revealed. `menu-focus.test.cjs` holds that layout change explicitly
+and checks both menu types in Chromium and WebKit.
+
 `openModal` makes the background inert when an editor opens fresh, leaving
 confirmations and menus interactive through redraws. `closeModal` releases
 that background as soon as the close animation starts, so clicks reach the
@@ -394,9 +496,52 @@ dirty group draft; Cancel retains the draft and Discard opens the new editor.
 waits for `show` to accept navigation before creating its draft.
 
 The Plugins page updates the npm search-results section when a search answers,
-leaving suggested plugin cards in place so a click begun before the answer still
-opens the intended plugin. `plugin-market.test.cjs` holds the search response
-between pointerdown and pointerup to check this in Chromium and WebKit.
+leaving suggested plugin cards and their action buttons in place so a click begun
+before the answer still opens the intended plugin. Independent metadata updates
+also retain same-package cards and the GitHub section's unchanged filter choices;
+their labels, counts and selected state update without replacing the controls.
+`plugin-market.test.cjs` and `plugin-github-filter.test.cjs` hold responses between
+pointerdown and pointerup to check this in Chromium and WebKit.
+
+Menu hover focus compares pointer positions within the webview (`hoverFocus` in
+[`app.js`](../../internal/gui/assets/app.js)), not screen coordinates: Windows
+WebKit reports zero screen coordinates even when the pointer moves. A menu
+redrawn under a stationary pointer still leaves focus in its search field;
+`fonts.test.cjs` checks real pointer motion and zero-screen-coordinate events.
+
+While a Usage period loads, `renderUsageLoading` hides the old Accounts rows
+with their heading, just as it does Agents, Models and Gateway keys. Allowance
+cards remain independently available. `usage-accounts.test.cjs` holds the period
+response to check that no unheaded old account rows remain.
+
+When the Sessions activity calendar and its facts stack in a narrow container,
+`.sess-cal` stretches across that container rather than shrinking to its month
+labels' intrinsic width. The existing maximum width still caps each week's size;
+the day range, blank padding weeks and square cells stay unchanged.
+`sessions-calendar-fill.test.cjs` waits for resize delivery and checks coverage,
+cell shape and overflow in both engines and the existing language matrix.
+
+The Usage head reserves one `1ch` slot per decimal digit in its displayed
+cost (`costHead`, `.cost-digit`), keeping refresh controls still when only a
+digit changes even if a font or webview ignores tabular figures. Currency,
+punctuation, the approximate sign and unpriced marker stay literal text; no
+global font is changed. The digit slot does not clip a wider custom glyph.
+The amount can still change width when its digit count or formatting changes.
+
+The shared `api` entry point rejects new work with `AbortError` after its
+`pagehide` guard runs, before either fetch or the web-mode Open action. A late
+startup continuation or titlebar timer then cannot launch new requests.
+Already-started requests keep their existing behavior. `pageshow` restores
+access, including when the browser restores the page from its cache;
+`beforeunload` does not suspend it because navigation can still be canceled.
+WebKit can still report canceled-request access-control errors during committed
+navigation before `pagehide`; this guard does not suppress that earlier window.
+`connect-address-kept.test.cjs` waits for the specific startup operations before
+its persistence reloads. A separate interruption check releases a consumed
+provider response after the real pagehide guard, verifies the continuation
+sends no new requests, and checks restored access and ordinary HTTP/JSON
+failures. Cache-restoration events are exercised synthetically, not as proof of
+native back/forward-cache behavior.
 
 ### Routing shown by the magpie that serves the gateway
 
@@ -517,3 +662,12 @@ still follows the existing Not set up folding rules. The dialog explains that
 restoring visibility does not pin an unconfigured agent into the main list.
 See `agent-bulk-visibility.test.cjs` for persistence, partial selection, failed
 saves, narrow layouts and all five languages in Chromium and WebKit.
+
+## WAN recovery notifications
+
+The desktop notifier also observes cached WAN owner status. A five-minute
+[WAN recovery](wan-gateway.md#relay-transport-recovery) exhaustion sends one
+localized system notification per failure; a click opens WAN rather than Usage.
+Closing or hiding the WAN page does not stop this observer. It ends with the
+backend context. The page independently gives a persistent error and one notice
+per observed failure. No notification implies permission to restart a tunnel.

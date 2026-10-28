@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -164,7 +165,9 @@ func memLimit(goos, root string) (int64, string) {
 		switch {
 		case parts[0] == "0" && parts[1] == "":
 			// v2: this cgroup's limits and every one above it
-			for dir := filepath.Clean("/" + parts[2]); ; dir = filepath.Dir(dir) {
+			// /proc contains Linux paths, including in fixtures on other
+			// hosts. A Windows filepath root is "\\", never the "/" below.
+			for dir := path.Clean("/" + parts[2]); ; dir = path.Dir(dir) {
 				for _, name := range []string{"memory.max", "memory.high"} {
 					if n, ok := readLimit(filepath.Join(cgroups, dir, name)); ok {
 						least(n, "cgroup "+filepath.Join(dir, name))

@@ -197,10 +197,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.deepEqual(pq, [{ text: SEAT, title: `ZCode · ${SEAT} · ${TEAM}` }, { text: "Personal", title: `ZCode · Personal · ${ME}` }]);
 
         // Hide accounts: the name of the user's own is an account's name too
+        await page.bringToFront();
         await page.locator("#usageMask").click();
         await page.waitForFunction(() => [...document.querySelectorAll(".subscription-account .pii")].some((e) => e.dataset.raw === "Personal"));
         const shown = await page.evaluate(() => [...document.querySelectorAll(".subscription-account")].map((a) => a.textContent + " " + [...a.querySelectorAll("[title]")].map((e) => e.title).join(" ")).join(" | "));
         assert.ok(!/Personal|3141592636|me@example/.test(shown), shown);
+        await panel.bringToFront();
         await panel.waitForFunction(() => [...document.querySelectorAll("#panelQuota .pq-user .pii")].some((e) => e.dataset.raw === "Personal"));
         assert.deepEqual(errors, []);
         await context.close();

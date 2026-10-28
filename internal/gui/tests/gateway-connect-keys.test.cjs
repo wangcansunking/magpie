@@ -7,8 +7,8 @@ const { fixture, confirmKeyAction } = require("./fixtures/caller-keys.cjs");
 const { openPart } = require("./reader.cjs");
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
-  for (const locale of ["en", "zh"]) {
-    test(`${engine} ${locale}: Connect uses the selected network address and caller key`, async (t) => {
+  for (const locale of ["en", "zh"]) for (const shellOS of ["windows", "unix"]) {
+    test(`${engine} ${locale} ${shellOS}: Connect uses the selected network address and caller key`, async (t) => {
       const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
       t.after(() => browser.close());
       const page = await (await browser.newContext({ viewport: { width: 1000, height: 760 }, reducedMotion: "reduce" })).newPage();
@@ -25,16 +25,20 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       };
       const expectSecret = (secret) => page.waitForFunction((secret) => document.querySelector("#connect .snip")?.textContent.includes(secret), secret);
       const row = (id) => page.locator(`#gatewayKeys .acc[data-key="${id}"]`);
+      // Exercise both saved shell choices on every host, not its implicit default.
+      await page.addInitScript((os) => localStorage.setItem("magpie.snipOS", os), shellOS);
+      const shell = shellOS === "windows" ? "PowerShell" : "Shell";
       await page.goto("http://magpie.test/?view=gateway");
       await snippet.waitFor();
       assert.equal(await page.locator("#connectAddress").count(), 0, "no LAN addresses before sharing is on");
       assert.equal(await page.locator("#gatewayKeysBlock").isVisible(), false, "most users never share");
       assert.equal(await page.locator("#connectKey").count(), 0, "local-only users see no gateway key picker");
       assert.equal(await page.locator("#connect").getByText(locale === "zh" ? "API 密钥" : "API key", { exact: true }).count(), 1);
-      await expectSecret('OPENAI_API_KEY=magpie');
+      await expectSecret(shellOS === "windows" ? '$env:OPENAI_API_KEY="magpie"' : "export OPENAI_API_KEY=magpie");
+      assert.equal(await page.locator("#connect").getByRole("button", { name: shell, exact: true }).getAttribute("aria-pressed"), "true");
       if (process.env.ARTIFACT_DIR) {
         await fs.mkdir(process.env.ARTIFACT_DIR, { recursive: true });
-        await page.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `${engine}-${locale}-local-connect.png`) });
+        await page.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `${engine}-${locale}-${shellOS}-local-connect.png`) });
       }
 
       await page.locator("#prefs").click();
@@ -54,7 +58,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(await page.locator(".proto-menu .pm-name", { hasText: /^magpie$/ }).count(), 0,
         "the arbitrary local token must not look like a second named Magpie key");
       if (process.env.ARTIFACT_DIR) {
-        await page.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `${engine}-${locale}-shared-key-picker.png`) });
+        await page.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `${engine}-${locale}-${shellOS}-shared-key-picker.png`) });
       }
       await page.keyboard.press("Escape");
       const staleKeys = await page.locator("#gatewayKeys .acc[data-key]").evaluateAll((rows) => rows.map((r) => ({
@@ -110,12 +114,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.locator("#connect").getByRole("button", { name: api, exact: true }).click();
         const base = "http://10.0.0.10:3999" + (["OpenAI", "Responses"].includes(api) ? "/v1" : "");
         assert.equal(await page.locator("#connectAddress code").textContent(), base);
-        for (const dialect of ["Shell", "curl", "Python", "Node"]) {
+        for (const dialect of [shell, "curl", "Python", "Node"]) {
           await page.locator("#connect").getByRole("button", { name: dialect, exact: true }).click();
           const code = await snippet.textContent();
           assert(code.includes(base), `${api} ${dialect} must use the selected address`);
           assert(code.includes("fixture-server"), `${api} ${dialect} must use the selected key`);
           assert(!code.includes('"magpie"'), "named key examples never fall back to magpie");
+          if (dialect === shell) assert.match(code, shellOS === "windows" ? /^\$env:/ : /^export /);
+          if (dialect === "curl") assert.match(code, shellOS === "windows" ? /'@ \| curl\.exe / : /^curl /);
         }
       }
       await row("server").locator(".rename").click();
@@ -147,7 +153,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         })), true);
         if (process.env.ARTIFACT_DIR) {
           await fs.mkdir(process.env.ARTIFACT_DIR, { recursive: true });
-          await page.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `${engine}-${locale}-connect-${width}.png`) });
+          await page.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `${engine}-${locale}-${shellOS}-connect-${width}.png`) });
         }
       }
       await page.setViewportSize({ width: 1000, height: 760 });

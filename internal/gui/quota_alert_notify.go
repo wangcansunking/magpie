@@ -17,6 +17,7 @@ import (
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
+	"github.com/yetone/magpie/internal/wan"
 )
 
 // notifier is the system's notifications, started the first time an alert
@@ -49,8 +50,8 @@ func (n *notifier) start() error {
 			_ = ns.RegisterNotificationCategory(clickCategory)
 		}
 		ns.OnNotificationResponse(func(r notifications.NotificationResult) {
-			if opensUsage(runtime.GOOS, r.Response) {
-				n.h.whenReady(func() { application.InvokeAsync(func() { n.h.ShowMain("usage") }) })
+			if view := notificationView(runtime.GOOS, r.Response); view != "" {
+				n.h.whenReady(func() { application.InvokeAsync(func() { n.h.ShowMain(view) }) })
 			}
 		})
 		n.ns = ns
@@ -94,6 +95,7 @@ func (n *notifier) problem() string {
 // turnNotice is the id a turn's end is notified under, an alert's
 // "magpie-alert-"
 const turnNotice = "magpie-turn-"
+const wanNotice = "magpie-wan-"
 
 func (n *notifier) send(title, body string) { n.sendAs("magpie-alert-", title, body) }
 
@@ -145,6 +147,16 @@ func opensUsage(goos string, r notifications.NotificationResponse) bool {
 	return goos != "linux" || r.ActionIdentifier == linuxClick
 }
 
+func notificationView(goos string, r notifications.NotificationResponse) string {
+	if !opensUsage(goos, r) {
+		return ""
+	}
+	if strings.HasPrefix(r.ID, wanNotice) {
+		return "wan"
+	}
+	return "usage"
+}
+
 // watchAlerts tells the user, with a notification, of a window used past
 // the share or a balance fallen to the amount set in Settings (#368).
 func (h *host) watchAlerts() {
@@ -162,6 +174,19 @@ func (h *host) watchAlerts() {
 	notifyProblem = n.problem
 	go func() {
 		<-h.ready
+		go func() {
+			ticker := time.NewTicker(3 * time.Second)
+			defer ticker.Stop()
+			watchWANRecovery(backendCtx, ticker.C, func() wan.Status {
+				if owner := served.Load(); owner != nil {
+					return owner.WANStatus()
+				}
+				return wan.Status{}
+			}, func() {
+				title, body := wanRecoveryAlertText(trayLang(settings.Load().Lang, systemLang))
+				n.sendAs(wanNotice, title, body)
+			})
+		}()
 		// set before this run: asked now, so Settings can say if it was refused
 		if s := settings.Load(); s.UsageAlert > 0 || s.BalanceAlert > 0 || s.ResetReminder > 0 || s.TurnDoneAlert > 0 {
 			go n.allowed()

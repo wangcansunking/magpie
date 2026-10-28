@@ -13,6 +13,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
+const { reach, watchSettingsReads, settingsDrawn } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
 
@@ -89,14 +90,31 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       page.setDefaultTimeout(5000);
       page.errors = [];
       page.on("pageerror", (e) => page.errors.push(e.message));
-      await page.route("**/*", server(lang, cur, posted));
+      const serve = server(lang, cur, posted);
+      let reads = 0, release;
+      const held = new Promise((resolve) => { release = resolve; });
+      t.after(release);
+      await page.route("**/*", async (route) => {
+        const request = route.request();
+        if (new URL(request.url()).pathname === "/api/settings" && request.method() === "GET" && ++reads === 2) await held;
+        return serve(route);
+      });
+      await watchSettingsReads(page);
       await page.goto("http://magpie.test/?view=settings&tab=models");
+      await page.locator("#imagesList .row").nth(1).waitFor();
+      await page.waitForFunction(() => __settingsReads.asked === 2 && __settingsReads.drawn === 1);
+      await page.evaluate(() => {
+        window.firstImageButton = document.querySelectorAll("#imagesList .row")[1].querySelector("button.rt-cond");
+      });
+      release();
+      await settingsDrawn(page);
+      assert.equal(await page.evaluate(() => firstImageButton.isConnected), false, "the first Settings draw's button was replaced");
       await page.locator("#imagesList .row").nth(1).waitFor();
       return page;
     };
     const click = async (page, loc) => {
-      const b = await loc.boundingBox();
-      await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2);
+      await reach(page, loc);
+      await loc.click();
     };
     for (const lang of Object.keys(want)) {
       for (const width of lang === "en" || lang === "zh" ? [1000, 360] : [1000]) {

@@ -54,8 +54,8 @@ const rowOf = (page, id) => page.locator("#gwModels .row.model").filter({ has: p
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
   for (const lang of ["en", "zh"]) {
-    for (const theme of ["light", "dark"]) {
-      test(`${engine} ${lang} ${theme}: Connect speaks System One with a decision model`, async (t) => {
+    for (const theme of ["light", "dark"]) for (const shellOS of ["windows", "unix"]) {
+      test(`${engine} ${lang} ${theme} ${shellOS}: Connect speaks System One with a decision model`, async (t) => {
         assert(["chromium", "webkit"].includes(engine), "BROWSER must be chromium or webkit");
         const w = words[lang];
         const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
@@ -68,14 +68,16 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         t.after(async () => {
           if (process.env.ARTIFACT_DIR) {
             await fs.mkdir(process.env.ARTIFACT_DIR, { recursive: true });
-            await page.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `${engine}-${lang}-${theme}-gateway-systemone.png`), fullPage: true });
+            await page.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `${engine}-${lang}-${theme}-${shellOS}-gateway-systemone.png`), fullPage: true });
           }
           await browser.close();
         });
 
+        // Both saved shell choices are tested on Windows and Unix hosts alike.
+        await page.addInitScript((os) => localStorage.setItem("magpie.snipOS", os), shellOS);
         await page.goto("http://magpie.test/?view=gateway&lang=curl");
         await page.locator("#gwModels .row.model").first().waitFor();
-        assert(await page.getByText(w.five).first().isVisible(), "the head counts five APIs");
+        await page.getByText(w.five).first().waitFor({ state: "visible" });
         const connect = page.locator("#connect");
         const modelCode = () => connect.locator(".val").nth(2).locator("code").textContent();
         const snippet = () => connect.locator("pre.snip").textContent();
@@ -91,7 +93,15 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const langs = await connect.locator(".segs").nth(1).locator(".opt").allTextContents();
         assert.deepEqual(langs, ["curl", "Python", "Node"], "no shell variables");
         let s = await snippet();
-        assert.match(s, /curl http:\/\/127\.0\.0\.1:3999\/v1\/systemone/);
+        if (shellOS === "windows") {
+          assert.match(s, /^@'\n/);
+          assert.match(s, /'@ \| curl\.exe http:\/\/127\.0\.0\.1:3999\/v1\/systemone `/);
+          assert.match(s, /--data-binary "@-"$/);
+        } else {
+          assert.match(s, /^curl http:\/\/127\.0\.0\.1:3999\/v1\/systemone \\\n/);
+          assert.match(s, /-d '\{/);
+          assert.doesNotMatch(s, /curl\.exe|--data-binary/);
+        }
         assert.match(s, /"model": "cf\/@cf\/typesafe\/jev"/);
         assert.match(s, /"questions"/);
         assert.match(s, /Authorization: Bearer magpie/);

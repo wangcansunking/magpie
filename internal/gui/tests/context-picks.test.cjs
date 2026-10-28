@@ -53,7 +53,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", serve(lang, posts));
         await page.goto("http://magpie.test/?view=providers");
-        await page.locator(".row.provider").click();
+        await page.locator(".row.provider", { hasText: "Relay" }).click();
         // the Context window is under Advanced
         { const adv = page.locator(".editor details.advanced"); await adv.waitFor({ state: "attached" }); if (!(await adv.evaluate((d) => d.open))) await adv.locator(":scope > summary").click(); }
 

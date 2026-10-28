@@ -13,6 +13,8 @@ const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
 const { watchSettingsReads, settingsDrawn, wheelTo } = require("./reader.cjs");
 
+const { watchReplies, repliesConsumed } = require("./lifecycle.cjs");
+
 const assets = path.resolve(__dirname, "../assets");
 
 function settingsPayload(over) {
@@ -73,28 +75,63 @@ const view = (page) => page.locator("#view-settings").evaluate((v) => v.scrollTo
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
   for (const width of [420, 900]) {
     for (const lang of Object.keys(want)) {
-      test(`${engine} ${width} ${lang}: the gateway lists bare model ids, or not`, async (t) => {
+      test(`${engine} ${width} ${lang}: the gateway lists bare model ids, or not`, { timeout: 120000 }, async (t) => {
         const w = want[lang];
+        let active = "launch";
+        // TAP prints a test's result only after it ends. Immediate phase lines
+        // preserve where a wedged browser stopped before the file supervisor.
+        const phase = (name) => {
+          active = name;
+          console.info(`[bare-ids ${engine} ${width} ${lang}] ${name}`);
+        };
+        phase("launch");
         const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
-        const context = await browser.newContext({ viewport: { width, height: 420 }, reducedMotion: "reduce" });
-        const page = await context.newPage();
+        let context, page, closing;
+        const closeBrowser = () => closing ||= browser.close();
+        const abort = () => {
+          phase(`aborted during ${active}`);
+          // The cleanup hook awaits this same promise and reports its error.
+          closeBrowser().catch((err) => console.error("bare-ids browser cancellation:", err));
+        };
+        t.signal.addEventListener("abort", abort, { once: true });
+        // Register cleanup as soon as the browser exists, including failures
+        // during context/page setup or while preserving a failure screenshot.
+        t.after(async () => {
+          try {
+            if (!t.signal.aborted && page && process.env.ARTIFACT_DIR) {
+              phase("screenshot");
+              await fs.mkdir(process.env.ARTIFACT_DIR, { recursive: true });
+              await page.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `${engine}-${width}-${lang}-bare-ids.png`) });
+            }
+          } finally {
+            try {
+              if (context && !closing) { phase("close context"); await context.close(); }
+            } finally {
+              phase("close browser");
+              try { await closeBrowser(); } finally { t.signal.removeEventListener("abort", abort); }
+            }
+          }
+        });
+        if (t.signal.aborted) abort();
+        phase("new context");
+        context = await browser.newContext({ viewport: { width, height: 420 }, reducedMotion: "reduce" });
+        phase("new page");
+        page = await context.newPage();
         page.setDefaultTimeout(5000);
         const errors = [], posted = [];
         page.on("pageerror", (e) => errors.push(e.message));
         // gateway mode on the narrow one: the row is the gateway's, not an
         // agent file's, so it stays where agent-file rows are hidden
         const gateway = width === 420;
+        phase("install fixture");
         await page.route("**/*", server(lang, gateway, posted));
-        t.after(async () => {
-          if (process.env.ARTIFACT_DIR) {
-            await fs.mkdir(process.env.ARTIFACT_DIR, { recursive: true });
-            await page.screenshot({ path: path.join(process.env.ARTIFACT_DIR, `${engine}-${width}-${lang}-bare-ids.png`) });
-          }
-          await browser.close();
-        });
         await watchSettingsReads(page);
+        await watchReplies(page, ["/api/settings/bare-ids"]);
+        phase("navigate");
         await page.goto("http://magpie.test/?view=settings&tab=network");
+        phase("settings drawn");
         await settingsDrawn(page);
+        phase("inspect row");
         const segs = page.locator("#bareIdsSegs .opt");
         await segs.first().waitFor();
         const row = page.locator("#bareIdsRow");
@@ -118,18 +155,25 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // the row's place from before it under load, wheeled past the row,
         // under the header, and the click was on a control out of sight,
         // which the page brought back into view as it took focus, #2370)
+        phase("wheel to switch");
         await wheelTo(page, segs.nth(1), 200);
+        phase("read scroll baseline");
         const before = await view(page);
         assert(before > 0, "the settings list must scroll to the row");
+        phase("click on");
         await segs.nth(1).click();
+        phase("verify on");
         await page.locator("#bareIdsSegs .opt.on", { hasText: w.on }).waitFor();
-        await page.waitForTimeout(400);
+        await repliesConsumed(page, ["/api/settings/bare-ids"]);
         assert.equal(await view(page), before, "the click scrolled the page");
         assert.deepEqual(posted, [["bare-ids", { on: true }]]);
 
         // back off
+        phase("click off");
         await segs.nth(0).click();
+        phase("verify off");
         await page.locator("#bareIdsSegs .opt.on", { hasText: w.off }).waitFor();
+        await repliesConsumed(page, ["/api/settings/bare-ids"]);
         assert.deepEqual(posted.at(-1), ["bare-ids", { on: false }]);
         assert.equal(posted.length, 2);
         assert.equal(await view(page), before, "the click scrolled the page");

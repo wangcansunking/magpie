@@ -60,7 +60,7 @@ func TestSavedButSignedOut(t *testing.T) {
 	defer func(k keychain, here bool) { codexKeychain, codexKeychainHere = k, here }(codexKeychain, codexKeychainHere)
 	for _, store := range []string{"keyring", "auto"} {
 		config := "model = \"gpt-5.6\"\ncli_auth_credentials_store = \"" + store + "\"\n\n[profiles.x]\nmodel = \"o3\"\n"
-		os.WriteFile(filepath.Join(home, ".codex", "config.toml"), []byte(config), 0o600)
+		os.WriteFile(filepath.Join(home, ".codex", "config.toml"), []byte(config+"\n[features]\nsecret_auth_storage = false\n"), 0o600)
 
 		codexKeychain, codexKeychainHere = &fakeKeychain{}, true
 		if codex = excluded(); codex == nil || len(codex.Users) != 2 || !strings.Contains(codex.Why, "isn't signed in here") ||

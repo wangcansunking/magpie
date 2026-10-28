@@ -220,7 +220,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await p.locator('[data-view="usage"]').first().click();
       await p.locator(":is(#usageTab .opt, .nav-s):visible").nth(1).click();
       await p.locator("#ledWrap .led tbody tr").first().waitFor();
-      await reader.click(p, p.locator(".led tbody tr.led-row").nth(0));
+      const first = p.locator(".led tbody tr.led-row").nth(0);
+      // A row within the view can still sit under its sticky horizontal bar.
+      await reader.reach(p, first);
+      await first.click();
       await p.locator(".led-cx .cx-sec").first().waitFor();
       const box = await p.locator(".led-box").boundingBox(), wrap = await p.locator("#ledWrap").boundingBox();
       assert(box.x >= wrap.x - 1 && box.x + box.width <= wrap.x + wrap.width + 1, `the details fit the box at 560: ${box.width} in ${wrap.width}`);

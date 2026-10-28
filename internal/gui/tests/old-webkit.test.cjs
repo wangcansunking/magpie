@@ -201,6 +201,7 @@ async function serve(route) {
   if (url.pathname === "/api/usage/quotas") return json([]);
   if (url.pathname === "/api/groups") return json({ groups: [] });
   if (url.pathname === "/api/providers") return json({ providers: [], presets: [], gateway: { running: true } });
+  if (url.pathname === "/api/wan" && route.request().method() === "GET") return json({ state: "stopped", endpoint: "", error: "", runtimeAvailable: true, controllable: true, keys: [], auth: { state: "signed_out", error: "", userCode: "", verificationURI: "", expiresAt: "0001-01-01T00:00:00Z", attemptID: 0, storage: "memory", storageAvailable: false } });
   if (url.pathname === "/api/gateway/trace") {
     if (url.searchParams.get("wait")) await new Promise((r) => setTimeout(r, 20e3));
     return json({ mine: true, now: new Date().toISOString(), seq: 0, totals: { requests: 0, rerouted: 0, errors: 0 }, routes: [] });
@@ -244,7 +245,7 @@ test("with Safari 15.0's built-ins, the panel and the window draw every page", a
         await page.locator("#save").click();
         assert(await page.locator(".profiles.naming > .chip-input").isVisible(), "Save current opens the name field");
       } else {
-        for (const v of ["providers", "gateway", "routing", "usage", "sessions", "library", "agents"]) {
+        for (const v of ["providers", "gateway", "wan", "routing", "usage", "sessions", "library", "agents"]) {
           await page.locator(`#nav [data-view="${v}"]`).click();
           await page.locator(`#view-${v}`).waitFor();
           await page.waitForTimeout(200);

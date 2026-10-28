@@ -36,10 +36,12 @@ function HOURS() {
       by: { model: on ? { "gpt-6.1-sol": part(M("gpt-6.1-sol", k * 2, k * 300)), "codex-auto-review": part(M("codex-auto-review", k, k * 200)) } : {} } };
   });
 }
-let reads = 0;
-const LEDGER = (period) => ({
+const LEDGER = (period, reads) => ({
   period, rows: ROWS, offset: 0, total: ROWS.length, calls: ROWS.length, errors: 0, input: 2, output: 612, cache_read: 0, cache_write: 0,
-  cost: 0.007 + ++reads * 0.001, unpriced: 0, timed: 4, ttft_ms: 18000, decode_ms: 12000, decode_out: 612,
+  // The same digit count, different glyph widths in Windows WebKit even
+  // with tabular-nums. Every case crosses this boundary, not just the last
+  // language after a module-global read counter reached it.
+  cost: reads % 2 ? 0.176 : 0.177, unpriced: 0, timed: 4, ttft_ms: 18000, decode_ms: 12000, decode_out: 612,
   by: { model: [M("gpt-6.1-sol", 3, 478), M("codex-auto-review", 1, 134)] }, bucket: "hour", series: HOURS(),
   agents: [{ id: "codex", name: "Codex", icon: "codex-color" }],
 });
@@ -51,13 +53,14 @@ function HEAT() {
 }
 
 function serve(lang) {
+  let reads = 0;
   return async (route) => {
     const url = new URL(route.request().url());
     const json = (data) => route.fulfill({ json: data });
     if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:"${lang}",theme:"light",web:false};` });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
     if (url.pathname === "/api/state") return json({ agents: [], profiles: [], settings: { lang, theme: "light" } });
-    if (url.pathname === "/api/usage/requests") return json(LEDGER(url.searchParams.get("period")));
+    if (url.pathname === "/api/usage/requests") return json(LEDGER(url.searchParams.get("period"), ++reads));
     if (url.pathname === "/api/usage/heatmap") return json(HEAT());
     if (url.pathname === "/api/usage/quotas") return json([]);
     if (url.pathname === "/api/usage") return json({ calls: 0, errors: 0, input: 0, output: 0, reasoning: 0, unpriced: 0, cost: 0, bucket: "day", series: [], agents: [], models: [], path: "" });
@@ -127,6 +130,54 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         }
       }
       assert.deepEqual(shook, [], "the head moved sideways during a refresh");
+
+      // A reader's font needn't have tabular figures. Keep the amount as
+      // one readable/copyable string, the unpriced note separate, and the
+      // refresh steady at a narrow width too (where ordinary spans hide).
+      for (const width of [828, 420]) {
+        await page.setViewportSize({ width, height: 900 });
+        const amounts = await page.evaluate(async () => {
+          usageEvery = 0;
+          document.documentElement.style.setProperty("--ui-font", '"Times New Roman", serif');
+          const frame = () => new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok)));
+          const read = () => {
+            const sum = document.querySelector("#usageCost b"), head = document.querySelector(".usage-head"), every = document.querySelector("#usageEvery");
+            const range = document.createRange();
+            range.selectNodeContents(sum);
+            const glyphs = range.getBoundingClientRect(), box = sum.getBoundingClientRect();
+            return { text: sum.textContent, width: box.width, interval: every.getBoundingClientRect().left, head: head.getBoundingClientRect().right, glyphs: glyphs.width, visible: glyphs.width > 0, fits: box.right <= head.getBoundingClientRect().right + 0.5 };
+          };
+          costHead("$0.176", "", "");
+          await frame();
+          const before = read();
+          costHead("$0.177", "", "");
+          await frame();
+          const after = read();
+          costHead("¥12.34+", "unpriced fixture", "why");
+          await frame();
+          const marked = read();
+          const note = document.querySelector("#usageCost > span");
+          const unpriced = { text: note.textContent, visible: note.getBoundingClientRect().width > 0 };
+          costHead("", "unpriced fixture", "why");
+          await frame();
+          const noPrice = { sum: !!document.querySelector("#usageCost b"), text: document.querySelector("#usageCost").textContent };
+          costHead("", "", "");
+          await frame();
+          const empty = { text: document.querySelector("#usageCost").textContent, noSum: document.querySelector(".usage-head").classList.contains("no-sum") };
+          document.documentElement.style.removeProperty("--ui-font");
+          return { before, after, marked, unpriced, noPrice, empty };
+        });
+        assert.equal(amounts.before.text, "≈$0.176");
+        assert.equal(amounts.after.text, "≈$0.177");
+        assert.equal(amounts.after.width, amounts.before.width, `${width}: changing a digit keeps the amount's width`);
+        assert.equal(amounts.after.interval, amounts.before.interval, `${width}: the refresh stays beside a custom-font amount`);
+        assert(amounts.before.visible && amounts.after.visible && amounts.before.fits && amounts.after.fits, `${width}: the whole amount stays visible`);
+        assert.equal(amounts.marked.text, "≈¥12.34+");
+        assert(amounts.marked.visible && amounts.marked.fits, `${width}: currency, fraction and unpriced mark fit`);
+        assert.deepEqual(amounts.unpriced, { text: "unpriced fixture", visible: true });
+        assert.deepEqual(amounts.noPrice, { sum: false, text: "unpriced fixture" });
+        assert.deepEqual(amounts.empty, { text: "", noSum: true });
+      }
       assert.deepEqual(errors, []);
     });
   }

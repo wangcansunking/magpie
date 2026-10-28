@@ -13,7 +13,7 @@ const path = require("node:path");
 const { execFileSync } = require("node:child_process");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
-const { reach } = require("./reader.cjs");
+const { reach, pointerClick } = require("./reader.cjs");
 const { PNG } = require("playwright-core/lib/utilsBundle");
 
 const assets = path.resolve(__dirname, "../assets");
@@ -49,7 +49,7 @@ const agentRows = [
 ];
 // the labels app.js groups into omp's roles square (OMP_ROLES)
 const OMP_ROLES = ["subagents", "smol", "slow", "plan", "vision", "advisor"];
-const views = ["agents", "providers", "gateway", "routing", "usage", "library", "plugins", "settings"];
+const views = ["agents", "providers", "gateway", "wan", "routing", "usage", "library", "plugins", "settings"];
 
 // BASE_REF's assets, all read in one git call the first time one is asked
 // for. A git show per file blocked the fake server for each of the ~100
@@ -85,6 +85,7 @@ function server(lang, original = false, opened = []) {
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
     if (url.pathname === "/api/state") return json({ agents: agentRows, profiles: [], settings: { lang, theme: "light" } });
     if (url.pathname === "/api/providers") return json({ providers: [], presets: [], excluded: [], gateway: { running: true, window: true, calls: [], groups: [] } });
+    if (url.pathname === "/api/wan" && route.request().method() === "GET") return json({ state: "stopped", endpoint: "", error: "", runtimeAvailable: true, controllable: true, keys: [], auth: { state: "signed_out", error: "", userCode: "", verificationURI: "", expiresAt: "0001-01-01T00:00:00Z", attemptID: 0, storage: "memory", storageAvailable: false } });
     if (url.pathname === "/api/groups") return json({ groups: [], pools: [], models: [] });
     if (url.pathname === "/api/usage/quotas") {
       // main's usage render can reveal the empty quota heading again if it
@@ -132,9 +133,22 @@ async function open(browser, lang, width, { original = false, touch = true, open
 }
 
 async function go(page, view) {
-  // Playwright scrolls each real navigation button into sight before clicking;
-  // this exercises the phone's horizontal navigation strip too.
-  await page.locator(view === "settings" ? "#prefs" : `#nav [data-view="${view}"]`).click();
+  const tab = page.locator(view === "settings" ? "#prefs" : `#nav [data-view="${view}"]`);
+  await tab.waitFor();
+  // Reveal a clipped tab with real horizontal wheel input. A native pointer
+  // press then tests the phone's strip without an implicit scroll or a
+  // stability wait for frames WebKit can withhold on a loaded runner.
+  if (view !== "settings") for (let i = 0; i < 40; i++) {
+    const at = await tab.evaluate((b) => {
+      const n = b.closest("#nav"), r = b.getBoundingClientRect(), v = n.getBoundingClientRect();
+      return { clear: r.left >= v.left - 1 && r.right <= v.right + 1, down: r.right > v.right, left: n.scrollLeft, x: v.left + v.width / 2, y: v.top + v.height / 2 };
+    });
+    if (at.clear) break;
+    await page.mouse.move(at.x, at.y);
+    await page.mouse.wheel(at.down ? 40 : -40, 0);
+    await page.waitForFunction((was) => document.getElementById("nav").scrollLeft !== was, at.left, { polling: 50 });
+  }
+  await pointerClick(page, tab);
   await page.locator(`#view-${view}`).waitFor();
   if (view === "library") await page.locator("#view-library .lib-more:not(:disabled)").waitFor();
   if (view === "plugins") await page.locator("#view-plugins .pm-find").waitFor();
@@ -188,7 +202,7 @@ async function agentsFit(page) {
     // out of sight, so it is wheeled to once that one has slid open
     await page.waitForFunction(() => !document.getAnimations().length);
     await reach(page, row.locator(".ag-link"));
-    await row.locator(".ag-link").click();
+    await pointerClick(page, row.locator(".ag-link"));
     await row.locator(".ag-exp").waitFor();
     const bad = await row.evaluate(row => {
       const box = row.getBoundingClientRect(), bad = [];
@@ -209,7 +223,7 @@ async function agentsFit(page) {
         const field = row.locator(`.field[data-key="${key}"]`);
         await page.waitForFunction(() => !document.getAnimations().length);
         await reach(page, field);
-        await field.click();
+        await pointerClick(page, field);
         await page.locator("#pop").waitFor();
       } catch (e) { throw new Error(`${agent.id} ${key} open: ${e.message.split("\n")[0]}`); }
       assert.equal(await page.locator("#pop").isVisible(), true, agent.name + ": " + key + " opens");
@@ -276,7 +290,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
               if (view === "library") {
                 await Promise.all([
                   page.waitForResponse(r => new URL(r.url()).pathname === "/api/library/reveal"),
-                  page.getByRole("button", { name: lang === "en" ? "Library folder" : "资源库文件夹", exact: true }).click(),
+                  pointerClick(page, page.getByRole("button", { name: lang === "en" ? "Library folder" : "资源库文件夹", exact: true })),
                 ]);
                 assert.deepEqual(opened, [{ path: "/test/library" }], "Library folder must be reachable");
               }
@@ -323,7 +337,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           const current = await open(browser, lang, width, { touch: false });
           const original = await open(browser, lang, width, { touch: false, original: true });
           try {
+            const hadWAN = baselineFile("index.html").includes('data-view="wan"');
+            // Until BASE_REF has WAN, compare every existing page with only
+            // that new nav row removed. The phone loop above still opens WAN
+            // and checks its width; do not relax the desktop pixel tolerance.
+            if (!hadWAN) await current.locator('#nav [data-view="wan"]').evaluate((b) => { b.remove(); fitTop(); });
             for (const view of views) {
+              if (view === "wan" && !hadWAN) continue;
               if (view === "agents" && !baselineFile("app.js").includes("function connectPanel")) continue;
               await go(current, view); await go(original, view);
               await current.mouse.move(0, 0); await original.mouse.move(0, 0);
