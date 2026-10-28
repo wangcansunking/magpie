@@ -54,3 +54,14 @@ The pinned SDK bundle SHA-256 is
 95334b588dd77d8a2d96f7353e27ebfa6b88ea968abb463590559e77ca1d5e9e.
 Ignored evidence lives in node_modules/.wan-validation/runs/*diagnostics*
 and bun-fixtures-diagnostics-*-20261028. Production artifact evidence follows.
+
+
+## Windows artifact
+
+Source commit: 6abaf0aa (persistent diagnostics and English/Chinese README).
+Output: dist/wan-diagnostics/magpie.exe (59,488,768 bytes).
+Version: magpie wan-gateway-6abaf0aa.
+Windows x64 PE, GUI subsystem, resources and isolated --version checks passed.
+SHA-256: 5189ab0ea24c6962d6f7782c5492cd717e3f5cbc61c8e0247d265e590b3aa32d.
+Build evidence: wan-diagnostics-exe-20261028/build-status.json.
+The user's existing desktop executable and running processes were untouched.
