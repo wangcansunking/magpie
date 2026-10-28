@@ -432,6 +432,8 @@ func (m *Manager) Stop() {
 }
 
 func (m *Manager) run(r *hosting) {
+	journal := newDiagnosticLog(diagnosticPath(m.path))
+	journal.record(diagnosticRecord{Event: "starting"})
 	var failure error
 	var authOwner *auth
 	var lease *credentialLease
@@ -480,6 +482,22 @@ func (m *Manager) run(r *hosting) {
 		if unlock != nil {
 			unlock()
 		}
+		record := diagnosticRecord{Event: "stopped"}
+		if failure != nil {
+			record.Event = "failed"
+			record.Code, record.Reason = diagnosticFailure(failure)
+			if child != nil {
+				child.output.mu.Lock()
+				if child.output.failed != nil && child.output.failed.Error() == failure.Error() && diagnosticCode(child.output.failureCategory) {
+					record.Code = child.output.failureCategory
+				}
+				child.output.mu.Unlock()
+			}
+		}
+		if progress := r.recovery.Load(); progress != nil {
+			record.Attempts = progress.Attempts
+		}
+		_ = journal.close(record)
 		m.runtime.mu.Lock()
 		delete(m.runtime.active, r)
 		m.mu.Lock()
@@ -611,7 +629,7 @@ func (m *Manager) run(r *hosting) {
 		failure = errors.New("WAN proxy configuration is unavailable")
 		return
 	}
-	child, err = startSDK(startup, tool, m.command, m.startTree, hex.EncodeToString(generation[:]), wireConfig, r.revoke, r.recovery.Store)
+	child, err = startSDK(startup, tool, m.command, m.startTree, hex.EncodeToString(generation[:]), wireConfig, r.revoke, r.recovery.Store, journal)
 	if err != nil {
 		failure = err
 		return
@@ -735,6 +753,7 @@ func (m *Manager) run(r *hosting) {
 	close(r.ready)
 	m.mu.Unlock()
 	child.output.mu.Unlock()
+	journal.record(diagnosticRecord{Event: "running"})
 	cancel()
 	select {
 	case <-r.ctx.Done():

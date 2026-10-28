@@ -483,7 +483,7 @@ test('actual management adapter sends the provider-specific service authorizatio
 
 
 function relayRecoveryFixture() {
-    const statuses=new Set(), retries=new Set(), timers=new Map(), failures=[], attempts=[], progress=[];
+    const statuses=new Set(), retries=new Set(), timers=new Map(), failures=[], attempts=[], progress=[], diagnostics=[];
     let next=0, running=false, now=0, succeeds=false, held;
     const abort=new AbortController();
     const relay={disconnectReason:sdk.SshDisconnectReason.connectionLost,
@@ -495,8 +495,8 @@ function relayRecoveryFixture() {
       if(held)return held.promise;
       if(succeeds){status(sdk.ConnectionStatus.Connected);return}
       throw Object.assign(new Error('fixture transport failure'),{code:'ECONNRESET'});
-    },(fn,ms)=>{const id=next++;timers.set(id,{fn,at:now+ms});return id},id=>timers.delete(id),()=>now,value=>progress.push(value));
-    return {relay,policy,abort,timers,failures,attempts,progress,status,start:()=>{running=true},succeed:()=>{succeeds=true},
+    },(fn,ms)=>{const id=next++;timers.set(id,{fn,at:now+ms});return id},id=>timers.delete(id),()=>now,value=>progress.push(value),value=>diagnostics.push(value));
+    return {relay,policy,abort,timers,failures,attempts,progress,diagnostics,status,start:()=>{running=true},succeed:()=>{succeeds=true},
       hold:()=>{held=deferred();return held},lose:()=>status(sdk.ConnectionStatus.Disconnected),
       retry:error=>{const e={error,retry:true,delayMs:20000};for(const fn of [...retries])fn(e);return e},
       advance:async target=>{for(;;){const entry=[...timers].filter(([,t])=>t.at<=target).sort((a,b)=>a[1].at-b[1].at||a[0]-b[0])[0];if(!entry)break;now=entry[1].at;timers.delete(entry[0]);entry[1].fn();for(let i=0;i<12;i++)await Promise.resolve()}now=target}};
@@ -597,4 +597,20 @@ test('relay recovery serializes whole milliseconds after a fractional-clock fail
   await f.advance(20000);assert.equal(f.attempts.length,1);
   await f.advance(20000.25);assert.equal(f.attempts.length,2);
   f.abort.abort();await f.policy.wait();
+});
+
+
+test('relay diagnostics retain disconnect and each retry failure category without upstream secrets',async()=>{
+  const f=relayRecoveryFixture();f.start();const held=f.hold();f.lose();await f.advance(0);
+  assert.deepEqual(f.diagnostics,[{kind:'relay_disconnected',code:'network',cause:'ssh_'+sdk.SshDisconnectReason.connectionLost,attempts:0,elapsedMs:0}]);
+  await f.advance(0.25);
+  held.reject(Object.assign(new Error('access_token=secret https://private.invalid/'),{code:'ECONNRESET'}));
+  await f.policy.wait();
+  assert.deepEqual(f.diagnostics.at(-1),{kind:'retry_failed',code:'network',cause:'ECONNRESET',attempts:1,elapsedMs:1});
+  await f.advance(20000.25);
+  assert.equal(f.diagnostics.at(-1).attempts,2);
+  assert.equal(f.diagnostics.at(-1).kind,'retry_failed');
+  assert.equal(JSON.stringify(f.diagnostics).includes('secret'),false);
+  f.abort.abort();await f.policy.wait();
+  const before=f.diagnostics.length;f.lose();assert.equal(f.diagnostics.length,before);
 });

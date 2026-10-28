@@ -51,6 +51,9 @@ type sdkEvent struct {
 	Attempts   int           `json:"attempts,omitempty"`
 	RetryInMS  int           `json:"retryInMs,omitempty"`
 	Retrying   bool          `json:"retrying,omitempty"`
+	Kind       string        `json:"kind,omitempty"`
+	Cause      string        `json:"cause,omitempty"`
+	ElapsedMS  int           `json:"elapsedMs,omitempty"`
 }
 
 // availableRuntime never installs a runtime. InstallRuntime is the only WAN
@@ -91,7 +94,7 @@ type sdkProcess struct {
 	folder   string
 }
 
-func startSDK(ctx context.Context, tool string, command func(string, ...string) *exec.Cmd, startTree func(*exec.Cmd) (sdkTree, error), generation string, config tunnelConfig, revoke func(), recoveryChanged func(*RecoveryStatus)) (*sdkProcess, error) {
+func startSDK(ctx context.Context, tool string, command func(string, ...string) *exec.Cmd, startTree func(*exec.Cmd) (sdkTree, error), generation string, config tunnelConfig, revoke func(), recoveryChanged func(*RecoveryStatus), journal *diagnosticLog) (*sdkProcess, error) {
 	if ctx.Err() != nil {
 		return nil, errors.New("WAN gateway startup was canceled")
 	}
@@ -116,6 +119,7 @@ func startSDK(ctx context.Context, tool string, command func(string, ...string) 
 	p := &sdkProcess{done: make(chan struct{}), folder: folder}
 	p.output = &sdkOutput{generation: generation, expected: config, prepared: make(chan sdkEvent, 1), ready: make(chan string, 1), bad: make(chan struct{}), revoke: revoke}
 	p.output.recoveryChanged = recoveryChanged
+	p.output.journal = journal
 	cmd := command(tool, "--no-env-file", script)
 	cmd.Dir = folder
 	cmd.Env = sdkEnvironment()
@@ -211,6 +215,9 @@ func (p *sdkProcess) send(ctx context.Context, msg any) error {
 
 func (p *sdkProcess) stop() {
 	p.stopOnce.Do(func() {
+		p.output.mu.Lock()
+		p.output.stopping = true
+		p.output.mu.Unlock()
 		p.output.closeAdmission()
 		_ = p.stdin.Close() // EOF requests dispose, including remote endpoint cleanup.
 		grace := time.NewTimer(900 * time.Millisecond)
@@ -236,6 +243,7 @@ type sdkOutput struct {
 	endpoint        string
 	phase           int // 0 prepare, 1 prepared, 2 host requested, 3 ready
 	line            []byte
+	failureCategory string
 	failed          error
 	authRejected    bool
 	pendingRevision uint64
@@ -245,6 +253,8 @@ type sdkOutput struct {
 	ready           chan string
 	bad             chan struct{}
 	revoke          func()
+	journal         *diagnosticLog
+	stopping        bool
 	recovery        *RecoveryStatus
 	recoveryChanged func(*RecoveryStatus)
 }
@@ -258,6 +268,17 @@ func (o *sdkOutput) closeAdmission() {
 func (o *sdkOutput) fail(err error) {
 	if o.failed == nil {
 		o.failed = err
+		if o.journal != nil && !o.stopping {
+			code, reason := diagnosticFailure(err)
+			if diagnosticCode(o.failureCategory) {
+				code = o.failureCategory
+			}
+			attempts := 0
+			if o.recovery != nil {
+				attempts = o.recovery.Attempts
+			}
+			o.journal.record(diagnosticRecord{Event: "helper_failed", Code: code, Reason: reason, Attempts: attempts})
+		}
 		o.closeAdmission()
 		close(o.bad)
 	}
@@ -318,11 +339,35 @@ func (o *sdkOutput) Write(p []byte) (int, error) {
 			break
 		}
 		if b == '\n' {
+			attempts := 0
+			if o.recovery != nil {
+				attempts = o.recovery.Attempts
+			}
 			event, err := o.consume(o.line)
 			o.line = o.line[:0]
 			if err != nil {
 				o.fail(err)
 				break
+			}
+			if o.journal != nil {
+				record := diagnosticRecord{Attempts: event.Attempts, ElapsedMS: event.ElapsedMS}
+				switch event.Event {
+				case "diagnostic":
+					record.Event, record.Code, record.Reason = event.Kind, event.Code, sdkError(event.Code).Error()
+					record.Cause = event.Cause
+				case "recovery":
+					record.Event = "retry_scheduled"
+					record.RetryInMS = event.RetryInMS
+					if event.Retrying {
+						record.Event = "retry_started"
+					}
+				case "recovered":
+					record.Event = "recovered"
+					record.Attempts = attempts
+				}
+				if record.Event != "" {
+					o.journal.record(record)
+				}
 			}
 			if event.Event == "prepared" {
 				prepared = &event
@@ -410,11 +455,18 @@ func (o *sdkOutput) consume(line []byte) (sdkEvent, error) {
 			return event, bad
 		}
 		o.recovery = nil
+	case "diagnostic":
+		if (o.phase != 2 && o.phase != 3) || !diagnosticCode(event.Code) || !diagnosticCause(event.Cause) || event.Attempts < 0 || event.Attempts > 15 || event.ElapsedMS < 0 || event.ElapsedMS > 300000 || (event.Kind != "relay_disconnected" && event.Kind != "retry_failed") {
+			return event, bad
+		}
 	case "disconnected", "error":
 		if event.Config != nil || event.Endpoint != "" {
 			return event, bad
 		}
 		o.authRejected = event.Event == "error" && event.Code == "auth"
+		if diagnosticCode(event.Code) {
+			o.failureCategory = event.Code
+		}
 		return event, sdkError(event.Code)
 	default:
 		return event, bad
@@ -449,6 +501,20 @@ func validEventFields(data []byte, event string) bool {
 			return false
 		}
 		allowed["attempts"], allowed["retryInMs"], allowed["retrying"] = true, true, true
+	case "diagnostic":
+		if len(fields) != 7 && len(fields) != 8 {
+			return false
+		}
+		allowed["cause"] = true
+		if raw, exists := fields["cause"]; exists && bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+			return false
+		}
+		for _, key := range []string{"kind", "code", "attempts", "elapsedMs"} {
+			if bytes.Equal(bytes.TrimSpace(fields[key]), []byte("null")) {
+				return false
+			}
+			allowed[key] = true
+		}
 	case "recovered":
 	case "error", "disconnected":
 		allowed["code"] = true

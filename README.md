@@ -241,10 +241,44 @@ Find them under Plugins › Discover › Gateway middleware. See [Gateway middle
 
 | | |
 | :-- | :-- |
+| **[WAN Gateway](#wan-gateway)** | Give remote clients a key-protected public API through Microsoft Dev Tunnels, with separate WAN sign-in and keys |
 | **Local network** | Turn on *Share on local network* and give each client a named gateway key with its own daily, weekly or monthly token and cost limit |
 | **[Remote magpie](https://usemagpie.ai/docs/remote)** | A laptop uses the providers, accounts and groups of the magpie on your desktop, and still wires its own agents |
 | **[Docker](https://usemagpie.ai/docs/docker)** | Run `ghcr.io/yetone/magpie` on a server or a NAS and manage it from the web UI |
 | **Sync** | Back up to a file, or sync machines over WebDAV (Nutstore, Nextcloud…), S3, or an encrypted GitHub repository backup |
+
+### WAN Gateway
+
+Use this repository's WAN-enabled build for the steps below.
+
+Use **WAN Gateway** when Claude Code, Codex or another compatible client on a
+remote machine needs the providers and models configured on this computer.
+Microsoft Dev Tunnels supplies the public HTTPS endpoint; magpie exposes the
+model API, while its management UI stays local.
+
+1. Add your providers on **Providers**, then open **WAN Gateway**. Install the
+   WAN runtime if the page asks for it.
+2. Sign in separately to Dev Tunnels with **GitHub** or **Microsoft**. Microsoft
+   uses your system browser and supports personal and work/school accounts,
+   subject to your organization's sign-in policies. **Remember** stores renewal
+   credentials in the operating system's credential vault.
+3. Create a **WAN key** for each remote client and click **Start**. Copy the
+   endpoint and the client configuration shown on the page. Local gateway keys
+   and provider API keys do not grant WAN access.
+4. Keep magpie running on the host. **Stop** closes public access; restarting
+   magpie restores a remembered sign-in but requires an explicit Start.
+
+Each account keeps its own tunnel; switching accounts selects that account's
+saved tunnel. **Use a new tunnel** replaces it manually and changes the address.
+The page displays the service-reported usage and limits; Microsoft Dev Tunnels
+quotas still apply. Recoverable disconnects retry immediately, then at least
+20 seconds apart for up to five minutes, with progress and a final failure
+notification. Persistent diagnostics in the active configuration folder's
+`wan-diagnostics.jsonl` record disconnects, retries and outcomes without keys
+or tokens, and rotate at 1 MiB with one backup.
+
+See the [WAN Gateway reference](docs/subsystems/wan-gateway.md) for API access,
+credential storage, recovery and diagnostic log details.
 
 ### Also
 

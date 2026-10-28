@@ -522,3 +522,42 @@ The desktop independently watches cached owner status and sends one native
 notification per recovery failure, even when the WAN page is closed. Clicking
 the native notification opens WAN. Repeated polls do not repeat it; a later
 independent failure is notified again. OS notification permissions still apply.
+
+
+## Persistent WAN diagnostics
+
+`diagnostics.go` writes `wan-diagnostics.jsonl` next to the active `wan.json`
+(including portable/custom settings folders). In a default Windows installation
+this is `%USERPROFILE%\.config\magpie\wan-diagnostics.jsonl`. No log is created
+by Status reads: an explicit Start opens a new local run ID. The append-only
+JSON-lines journal survives app restarts. Each record carries UTC time, run ID,
+event and attempt count; reason/code, transport cause, elapsed milliseconds and
+next-retry delay are included when applicable.
+
+Events cover starting/running, relay_disconnected, retry_started,
+retry_failed, retry_scheduled, recovered, helper_failed, and the final failed
+or stopped outcome. `stopped` denotes cancellation/Stop, not a transport error.
+Disconnect and retry errors cross the helper protocol only as bounded enum
+categories plus whitelisted errno, HTTP 400–599 or SSH reason 1–15 identifiers.
+Unknown/malformed helper bytes are never persisted; a protocol_output record
+is written instead. Only fixed local failure descriptions are accepted;
+unrecognized error text is omitted. No access/refresh tokens, WAN/provider
+keys, raw stdout/stderr, account identities, tunnel URLs, request bodies or
+headers are recorded.
+
+A per-run worker writes outside protocol/credential/manager locks. Its queue
+holds 256 events; overflow is explicitly counted in events_dropped. The final
+outcome has a reserved slot and is flushed after the helper joins, before the
+run completes. The worker is joined outside manager/runtime locks. A write
+failure emits one fixed local warning, disables further writes for that run,
+and never fails or restarts WAN. A later Start tries logging again. Filesystem
+failure or abrupt process termination can still prevent recent events from
+being saved; normal Stop/failure flushes all queued records.
+
+Each file is limited to 1 MiB, with one previous file named
+`wan-diagnostics.jsonl.1`. Rotation happens only between complete records under
+a cross-process file lock; new files use 0600 permissions. No log is uploaded
+automatically. Inspect the active and backup files together when diagnosing a
+long-running instance. Tests exercise actual disk persistence, restart
+append, rotation, protocol rejection/redaction, final outcomes, logging failure,
+queue overflow and a held writer that cannot delay admission revocation.

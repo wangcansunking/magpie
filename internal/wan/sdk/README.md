@@ -144,3 +144,14 @@ joins the in-flight attempt before disposal. Tests use a virtual clock for the
 entire five-minute/15-attempt window. An actual fixed SDK V1 fixture replaces
 its in-memory relay, fails one SSH network attempt, and verifies a fresh
 forwarded request after recovery using an accelerated injected timer.
+
+
+## Recovery diagnostics
+
+RelayRecovery emits bounded `diagnostic` events for each relay disconnection
+and failed connect attempt: kind, fixed code, whitelisted transport cause,
+attempt count and integer elapsedMs (0–300000). These are protocol messages,
+not raw SDK logging. The parent validates the generation, phase, schema and
+all bounds before appending a sanitized local journal entry. Existing recovery
+progress supplies retry-start/schedule events and recovered clears the outage.
+Neither stdout nor stderr contains vendor Error objects or credentials.

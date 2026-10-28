@@ -21,7 +21,7 @@ const { createConnection } = require('net');
 const { randomBytes } = require('crypto');
 const { TextDecoder } = require('util');
 
-// Neither diagnostics nor upstream Error objects belong on either output pipe.
+// Only explicitly bounded diagnostic categories belong on stdout; never raw upstream Error objects.
 if (require.main === module) {
     for (const name of ['log', 'info', 'warn', 'error', 'debug', 'trace'] as const) {
         console[name] = () => {};
@@ -447,6 +447,8 @@ export function serviceAuthorization(provider: string, credential: string): stri
 }
 export const protocolFixture = { parseLine, endpoint, codeFor, serviceAuthorization };
 
+type RecoveryDiagnostic = { kind: 'relay_disconnected' | 'retry_failed'; code: Code; cause: string; attempts: number; elapsedMs: number };
+
 // Only the SDK's existing connection may recover. This never starts a helper,
 // creates a tunnel, changes identity, or survives parent cancellation. A brief
 // transport outage does not revoke the parent's still-bounded credential lease.
@@ -464,7 +466,8 @@ export class RelayRecovery {
         private readonly signal: AbortSignal, private readonly failure: (code: Code) => void,
         private readonly reconnect: () => Promise<void>, private readonly schedule = setTimeout,
         private readonly cancelTimer = clearTimeout, private readonly now = () => performance.now(),
-        private readonly progress: (value: { attempts: number; retryInMs: number; retrying: boolean } | null) => void = () => {}) {
+        private readonly progress: (value: { attempts: number; retryInMs: number; retrying: boolean } | null) => void = () => {},
+        private readonly diagnostic: (value: RecoveryDiagnostic) => void = () => {}) {
         this.subscriptions.push(relay.connectionStatusChanged((event: any) => {
             if (this.stopped || signal.aborted) return;
             if (event.status === ConnectionStatus.Connected) {
@@ -475,6 +478,7 @@ export class RelayRecovery {
             }
             if (event.status !== ConnectionStatus.Disconnected) return;
             const code = this.category(relay.disconnectError);
+            this.report('relay_disconnected', code, relay.disconnectError);
             if (!running() || !this.recoverable(code)) { this.terminate(code); return; }
             this.begin(); this.queue();
         }));
@@ -515,12 +519,23 @@ export class RelayRecovery {
             }).catch(error => {
                 if (this.stopped || this.signal.aborted) return;
                 const code = this.category(error);
+                this.report('retry_failed', code, error);
                 if (!this.recoverable(code)) this.terminate(code);
             }).finally(() => {
                 this.inFlight = false;
                 if (!this.stopped && !this.signal.aborted && this.timer !== undefined) this.queue();
             });
         }, delay);
+    }
+    private report(kind: RecoveryDiagnostic['kind'], code: Code, error: any): void {
+        const elapsedMs = this.until ? Math.min(300000, Math.ceil(Math.max(0, this.now() - (this.until - 300000)))) : 0;
+        const status = error?.response?.status ?? error?.errorContext?.statusCode;
+        const errno = error?.code;
+        const reason = error?.reason ?? this.relay.disconnectReason;
+        const cause = Number.isInteger(status) && status >= 400 && status <= 599 ? `http_${status}`
+            : ['ETIMEDOUT','ECONNABORTED','ERR_CANCELED','ENOTFOUND','EAI_AGAIN','ECONNREFUSED','ECONNRESET','ENETUNREACH','EHOSTUNREACH','CERT_HAS_EXPIRED','DEPTH_ZERO_SELF_SIGNED_CERT','SELF_SIGNED_CERT_IN_CHAIN','UNABLE_TO_VERIFY_LEAF_SIGNATURE','UNABLE_TO_GET_ISSUER_CERT_LOCALLY','ERR_TLS_CERT_ALTNAME_INVALID'].includes(errno) ? errno
+            : Number.isInteger(reason) && reason >= 1 && reason <= 15 ? `ssh_${reason}` : 'unspecified';
+        this.diagnostic({ kind, code, cause, attempts: this.attempts, elapsedMs });
     }
     private readonly onAbort = () => this.dispose();
     private reset(): void {
@@ -582,7 +597,8 @@ async function startHost(): Promise<void> {
     relayRecovery = new RelayRecovery(host, () => phase === 'running', aborter.signal, fail,
         () => host.connect(host.tunnel, { enableRetry: false, enableReconnect: false, httpAgent: agent }, cancellation.token),
         setTimeout, clearTimeout, () => performance.now(),
-        progress => progress ? emit('recovery', progress) : emit('recovered'));
+        progress => progress ? emit('recovery', progress) : emit('recovered'),
+        diagnostic => emit('diagnostic', diagnostic));
     await host.connect(tunnel, { enableRetry: false, enableReconnect: false, httpAgent: agent }, cancellation.token);
     live();
     if (host.connectionProtocol !== TunnelRelayTunnelHost.webSocketSubProtocol || host.connectionStatus !== ConnectionStatus.Connected) throw new Failure('host');

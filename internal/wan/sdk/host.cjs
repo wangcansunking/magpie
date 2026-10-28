@@ -39595,6 +39595,7 @@ function serviceAuthorization(provider, credential) {
 var protocolFixture = { parseLine, endpoint, codeFor, serviceAuthorization };
 var RelayRecovery = class {
   constructor(relay, running, signal, failure, reconnect, schedule = setTimeout, cancelTimer = clearTimeout, now = () => performance.now(), progress = () => {
+  }, diagnostic = () => {
   }) {
     this.relay = relay;
     this.running = running;
@@ -39605,6 +39606,7 @@ var RelayRecovery = class {
     this.cancelTimer = cancelTimer;
     this.now = now;
     this.progress = progress;
+    this.diagnostic = diagnostic;
     this.subscriptions.push(relay.connectionStatusChanged((event) => {
       if (this.stopped || signal.aborted) return;
       if (event.status === ConnectionStatus.Connected) {
@@ -39615,6 +39617,7 @@ var RelayRecovery = class {
       }
       if (event.status !== ConnectionStatus.Disconnected) return;
       const code = this.category(relay.disconnectError);
+      this.report("relay_disconnected", code, relay.disconnectError);
       if (!running() || !this.recoverable(code)) {
         this.terminate(code);
         return;
@@ -39672,12 +39675,21 @@ var RelayRecovery = class {
       }).catch((error) => {
         if (this.stopped || this.signal.aborted) return;
         const code = this.category(error);
+        this.report("retry_failed", code, error);
         if (!this.recoverable(code)) this.terminate(code);
       }).finally(() => {
         this.inFlight = false;
         if (!this.stopped && !this.signal.aborted && this.timer !== void 0) this.queue();
       });
     }, delay);
+  }
+  report(kind, code, error) {
+    const elapsedMs = this.until ? Math.min(3e5, Math.ceil(Math.max(0, this.now() - (this.until - 3e5)))) : 0;
+    const status = error?.response?.status ?? error?.errorContext?.statusCode;
+    const errno = error?.code;
+    const reason = error?.reason ?? this.relay.disconnectReason;
+    const cause = Number.isInteger(status) && status >= 400 && status <= 599 ? `http_${status}` : ["ETIMEDOUT", "ECONNABORTED", "ERR_CANCELED", "ENOTFOUND", "EAI_AGAIN", "ECONNREFUSED", "ECONNRESET", "ENETUNREACH", "EHOSTUNREACH", "CERT_HAS_EXPIRED", "DEPTH_ZERO_SELF_SIGNED_CERT", "SELF_SIGNED_CERT_IN_CHAIN", "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "UNABLE_TO_GET_ISSUER_CERT_LOCALLY", "ERR_TLS_CERT_ALTNAME_INVALID"].includes(errno) ? errno : Number.isInteger(reason) && reason >= 1 && reason <= 15 ? `ssh_${reason}` : "unspecified";
+    this.diagnostic({ kind, code, cause, attempts: this.attempts, elapsedMs });
   }
   onAbort = () => this.dispose();
   reset() {
@@ -39751,7 +39763,8 @@ async function startHost() {
     setTimeout,
     clearTimeout,
     () => performance.now(),
-    (progress) => progress ? emit("recovery", progress) : emit("recovered")
+    (progress) => progress ? emit("recovery", progress) : emit("recovered"),
+    (diagnostic) => emit("diagnostic", diagnostic)
   );
   await host.connect(tunnel, { enableRetry: false, enableReconnect: false, httpAgent: agent }, cancellation.token);
   live();
