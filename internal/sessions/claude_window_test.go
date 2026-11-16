@@ -59,13 +59,13 @@ func TestLargeClaudeFileKeepsAppendContinuation(t *testing.T) {
 	}
 	// A cold reparse cannot preserve this in-memory marker. This proves List
 	// clones its old summary and resumes at Off instead of replaying the prefix.
-	cache[path].Named = "append continuation marker"
+	cache[path].own().Named = "append continuation marker"
 	old := cache[path].Claude.clone()
 	for i := 0; i < 3; i++ {
 		line := string(claudeUsageLine(at.Add(time.Duration(count+i)*time.Second), fmt.Sprint(count+i), "", "m", Tokens{Input: 1, Output: 2}, "", true))
 		appendText(t, path, line+"\n")
 		check(count + i + 1)
-		if cache[path].Named != "append continuation marker" {
+		if cache[path].more().Named != "append continuation marker" {
 			t.Fatal("summary reparsed the prefix")
 		}
 		after, err := os.Stat(callCachePath(path))
@@ -99,7 +99,7 @@ func TestClaudeWindowBoundsOneLongMessage(t *testing.T) {
 		}
 	}
 	want := Tokens{Output: claudeRevisionEntries * 2}
-	if s.Models["m"] != want || claudeUsageReplies(s) != 1 {
+	if s.Models.of("m") != want || claudeUsageReplies(s) != 1 {
 		t.Fatal("window reset lost the current contribution")
 	}
 	copy := s.clone()
@@ -148,7 +148,7 @@ func BenchmarkClaudeLargeActive(b *testing.B) {
 				if e != nil {
 					b.Fatal(e)
 				}
-				return file{path: path, key: "fixture", agent: "claude", main: true, size: info.Size(), mod: info.ModTime()}
+				return file{path: path, key: "fixture", agent: "claude", main: true, size: info.Size(), mod: modOf(info.ModTime())}
 			}
 			b.Run("cold", func(b *testing.B) {
 				for i := 0; i < b.N; i++ {
@@ -197,5 +197,105 @@ func BenchmarkClaudeLargeActive(b *testing.B) {
 				}
 			})
 		})
+	}
+}
+
+// After a restart a grown Claude file is read on from where it was left, with
+// the window it had: a live 2 GB session was read from its first line on the
+// first Requests page after every update (#3493). What it reads is what a
+// read from the start makes.
+func TestClaudeFileReadOnAfterRestart(t *testing.T) {
+	d := setupCalls(t)
+	path := filepath.Join(d.claude, "projects", "fixture", "session.jsonl")
+	const count = 3000
+	at := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
+	line := func(i int, id string, out int) string {
+		return string(claudeUsageLine(at.Add(time.Duration(i)*time.Second), id, "req-"+id, "m", Tokens{Input: 1, Output: out}, "", true))
+	}
+	lines := make([]string, count)
+	for i := range lines {
+		lines[i] = line(i, fmt.Sprint(i), 2)
+	}
+	writeLines(t, path, lines...)
+	read := func() []Call {
+		t.Helper()
+		for _, source := range CallSources() {
+			if source.Path == path {
+				return ReadCallSource(source)
+			}
+		}
+		t.Fatal("source missing")
+		return nil
+	}
+	read()
+	before, err := os.Stat(callCachePath(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	Reset()
+	// a recent message written again with more output, the last one replayed
+	// as it was, and a new one
+	appendText(t, path, line(count, "2990", 9)+"\n"+lines[count-1]+"\n"+line(count+1, "new", 2)+"\n")
+	got := read()
+	after, err := os.Stat(callCachePath(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("the grown file was read again from its start")
+	}
+	Reset()
+	os.Remove(callCachePath(path))
+	os.Remove(callRevisionsPath(path))
+	want := read()
+	if len(got) != count+1 || !reflect.DeepEqual(got, want) {
+		t.Fatalf("read on: %d calls, from the start: %d", len(got), len(want))
+	}
+	for _, c := range got {
+		if c.Msg == "2990" && c.Output != 9 {
+			t.Fatalf("the rewritten message kept its old output: %+v", c)
+		}
+	}
+}
+
+// The Sessions list's own window is kept in sessions.json: after a restart a
+// grown Claude file is read on, and what it counts is what a read from the
+// start counts (#3493).
+func TestClaudeSummaryReadOnAfterRestart(t *testing.T) {
+	d := setupCalls(t)
+	path := filepath.Join(d.claude, "projects", "fixture", "session.jsonl")
+	const count = 3000
+	at := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
+	line := func(i int, id string, out int) string {
+		return string(claudeUsageLine(at.Add(time.Duration(i)*time.Second), id, "req-"+id, "m", Tokens{Input: 1, Output: out}, "", true))
+	}
+	lines := make([]string, count)
+	for i := range lines {
+		lines[i] = line(i, fmt.Sprint(i), 2)
+	}
+	writeLines(t, path, lines...)
+	List(0)
+	// a reparse from the start cannot know this marker: it proves the read
+	// after the restart went on from the kept parse
+	mu.Lock()
+	marked := *cache[path]
+	marked.own().Named = "read on marker"
+	cache[path] = &marked
+	saveCache()
+	mu.Unlock()
+	Reset()
+	appendText(t, path, line(count, "2990", 9)+"\n"+lines[count-1]+"\n"+line(count+1, "new", 2)+"\n")
+	got := List(0)
+	mu.Lock()
+	named := cache[path].more().Named
+	mu.Unlock()
+	if named != "read on marker" {
+		t.Fatal("the grown file was parsed again from its start")
+	}
+	Reset()
+	os.Remove(CachePath())
+	want := List(0)
+	if len(got) != 1 || len(want) != 1 || got[0].Input != want[0].Input || got[0].Output != want[0].Output || got[0].Input != count+1 || got[0].Output != 2*(count+1)+7 {
+		t.Fatalf("read on: %+v, from the start: %+v", got, want)
 	}
 }

@@ -2,7 +2,7 @@
 // A subscription account can be used up to a share of each usage window
 // only — a new Claude account kept to 70% of its five hours and its week,
 // asked on Discord to lower the risk of a ban. Its row has a pill: a capped
-// one says its cap, always shown; one without says No cap, on hover. A
+// one says its cap, always shown; one without says No cap, under its ⋯. A
 // click opens the app's own menu of shares (no native select): a share, No
 // cap, or Other… for one typed in place, each posted to provider/accountcap
 // with the account and the cap (0: none). Each meter the cap counts has a
@@ -55,12 +55,13 @@ const opusUsage = () => ({
   "Spare@Example.com": usage()["Spare@Example.com"],
 });
 
-function serve(lang, posts, use = usage, alone = false) {
+function serve(lang, posts, use = usage, alone = false, opts = {}) {
   const ps = fresh();
   // the spare off: Codex signed in to me has nowhere to be moved to
   if (alone) ps.codex.account.logins[1].on = false;
+  if (opts.fallback) ps.codex.fallback = opts.fallback;
   const providers = { providers: [ps.codex], presets: [], excluded: [], gateway: { running: true, window: true } };
-  const state = { agents: [], profiles: [], settings: { lang, theme: "light" } };
+  const state = { agents: opts.agents || [], profiles: [], settings: { lang, theme: "light" } };
   return async (route) => {
     const url = new URL(route.request().url());
     const json = (data) => route.fulfill({ json: data });
@@ -107,6 +108,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       });
       const page = await (await browser.newContext({ viewport: { width: 900, height: 760 }, reducedMotion: "reduce" })).newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", (e) => errors.push(e.message));
       const posts = [];
@@ -143,15 +145,17 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(await pill(page, "me@example.com").evaluate((e) => getComputedStyle(e).opacity), "1");
       assert.equal(await row(page, "me@example.com").locator(".acap-held").textContent(), w.held);
       assert.deepEqual(await row(page, "me@example.com").locator(".aq-cap").evaluateAll((ms) => ms.map((m) => m.style.left)), ["70%", "70%"]);
-      // the spare has none: No cap on hover only, no note, no mark
+      // the spare has none: No cap under its ⋯ only, no note, no mark
       assert.equal(await pill(page, "Spare@Example.com").textContent(), w.none);
       await page.mouse.move(0, 0);
       await page.waitForTimeout(250);
-      assert.equal(await pill(page, "Spare@Example.com").evaluate((e) => getComputedStyle(e).opacity), "0");
+      assert.equal(await pill(page, "Spare@Example.com").isVisible(), false);
       assert.equal(await row(page, "Spare@Example.com").locator(".acap-held, .aq-cap").count(), 0);
 
       // the spare's pill opens the app's menu; 80% is posted
       await row(page, "Spare@Example.com").hover();
+      await still(page, "Spare@Example.com", row(page, "Spare@Example.com").locator(".acc-more"));
+      assert.equal(await pill(page, "Spare@Example.com").isVisible(), true);
       await still(page, "Spare@Example.com", pill(page, "Spare@Example.com"));
       await menu(page).waitFor();
       assert.equal(await menu(page).locator(".pm-head").textContent(), w.menu);
@@ -238,6 +242,51 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         "With no other account on, those requests are refused with a usage-cap error until then",
       ].filter((k) => !I18N.zh[k]));
       assert.deepEqual(missing, [], "every string has its Chinese");
+      assert.deepEqual(errors, []);
+    });
+  }
+}
+
+// not_4O4 on X: the Codex subscription's one ChatGPT account capped, with
+// a fallback set, and Codex connected to magpie. Codex's own turns come to
+// the gateway, which holds the account at its cap and sends them to the
+// fallback (TestCappedLoneCodexAccountGoesToItsFallback), so the row
+// doesn't say Codex goes on using it, and the held note says where the
+// requests go. Not connected, it still warns. Every language.
+const fellBack = {
+  en: "With no other account on, requests go to this provider's fallbacks until then",
+  zh: "没有其他启用的账号时，在此之前请求会改由本提供商的备用模型接手",
+  "zh-TW": "沒有其他啟用的帳號時，在此之前請求會改由此提供者的備用模型接手",
+  ja: "他に有効なアカウントがない場合、それまでリクエストはこのプロバイダーのフォールバックに回ります",
+  de: "Ohne weiteres aktives Konto gehen Anfragen bis dahin an die Fallbacks dieses Anbieters",
+};
+for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
+  for (const lang of Object.keys(fellBack)) {
+    const open = async (t, agents) => {
+      const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
+      t.after(() => browser.close());
+      const page = await (await browser.newContext({ viewport: { width: 900, height: 760 }, reducedMotion: "reduce" })).newPage();
+      page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
+      const errors = [];
+      page.on("pageerror", (e) => errors.push(e.message));
+      await page.route("**/*", serve(lang, [], usage, true, { fallback: ["deepseek/deepseek-chat"], agents }));
+      await page.goto("http://magpie.test/?view=providers");
+      await page.locator(".row.provider", { hasText: "Codex" }).first().click();
+      await page.locator(".editor .accts .acc .aq-w").first().waitFor();
+      return { page, errors, note: page.locator('.editor .accts .acc[data-account-id="me@example.com"] .acap-held') };
+    };
+    test(`${engine} ${lang}: Codex connected, its lone capped account's requests go to the fallbacks, and the row says so`, async (t) => {
+      const { page, errors, note } = await open(t, [{ id: "codex", name: "Codex", wired: true, joined: true }]);
+      assert.equal(await note.count(), 1);
+      assert.equal(await page.locator(".editor .acap-direct").count(), 0);
+      const title = await note.getAttribute("title");
+      assert.ok(title.endsWith("\n" + fellBack[lang]), title);
+      assert.deepEqual(errors, []);
+    });
+    test(`${engine} ${lang}: Codex not connected, the lone capped account still says Codex uses it`, async (t) => {
+      const { page, errors } = await open(t, [{ id: "codex", name: "Codex" }]);
+      assert.equal(await page.locator(".editor .acap-direct").count(), 1);
       assert.deepEqual(errors, []);
     });
   }

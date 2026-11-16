@@ -1,8 +1,8 @@
 package gateway
 
 // What a request's prompt is made of: the agent's system prompt, its tool
-// definitions, the instruction files it read in (CLAUDE.md, AGENTS.md,
-// skills), the files its tools read, its tools' other output, and the
+// definitions, the skills it lists, the instruction files it read in
+// (CLAUDE.md, AGENTS.md), the files its tools read, its tools' other output, and the
 // conversation, each as the tokens it takes of the model's context window.
 // Read from the body the agent sent, as it sent it: the parsed Request has
 // the system blocks run together, and Codex's additional_tools lifted out.
@@ -18,12 +18,12 @@ package gateway
 import (
 	"encoding/json"
 	"net/http"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -31,13 +31,14 @@ import (
 const (
 	PartSystem  = "system"  // the agent's own prompt: system, developer and harness messages
 	PartTools   = "tools"   // tool definitions
-	PartMemory  = "memory"  // instruction files, skills, reminders
+	PartSkills  = "skills"  // the skills the agent lists for the model to load
+	PartMemory  = "memory"  // instruction files, reminders
 	PartFiles   = "files"   // files and images the tools read in
 	PartResults = "results" // the tools' other output
 	PartChat    = "chat"    // what the user and the model said, the model's calls
 )
 
-var partOrder = []string{PartSystem, PartTools, PartMemory, PartFiles, PartResults, PartChat}
+var partOrder = []string{PartSystem, PartTools, PartSkills, PartMemory, PartFiles, PartResults, PartChat}
 
 // Prompt is a request's prompt, part by part.
 type Prompt struct {
@@ -51,7 +52,22 @@ type Prompt struct {
 	Held  bool         `json:"held,omitempty"`
 	Turns int          `json:"turns,omitempty"` // the user's turns in it
 	Parts []PromptPart `json:"parts"`
+	// sent is what the body's bytes were made of (sentSizes), for the
+	// ledger row's Record.UpParts; never written to the routing history
+	sent sentSizes
 }
+
+// sentSizes is a body's bytes by what they were, as the builder read the
+// pieces it already had in hand: the agent's own prompt and its
+// instructions (system, skills, memory), the tools' definitions, the
+// images and documents sent inline, and all it read (the rest is the
+// conversation, and the JSON around it). Counting them is a length added
+// per piece, no second read of the body (#upload).
+type sentSizes struct{ system, tools, images, all int }
+
+// size is how many bytes a piece took in the body: its raw JSON, its
+// text, an image's source, a sealed piece's size.
+func (pc *PromptPiece) size() int { return len(pc.raw) + len(pc.img) + len(pc.Text) + pc.Size }
 
 // PromptPart is one kind of what a prompt holds.
 type PromptPart struct {
@@ -95,6 +111,12 @@ func rawTokens(b json.RawMessage) int { return (len(b) + 3) / 4 }
 // counts for a 1092×1092 one.
 const imageTokens = 1600
 
+// promptBuilder reads a body through decodeJSONView: what it keeps of
+// the body, a piece's raw JSON, lives only as long as the builder, which
+// the body outlives (promptOf's request; promptPieces' kept body, its
+// pieces read out before PromptText returns). Each item's content and
+// output copied out was 0.8 of the 14.9 MB a 680 KB Codex request
+// allocated (#3383).
 type promptBuilder struct {
 	parts map[string]map[string]*PromptItem
 	turn  int
@@ -104,11 +126,17 @@ type promptBuilder struct {
 	// (itemKey), for PromptText; off when only the sizes are read
 	keep   bool
 	pieces map[string][]PromptPiece
+	// sent: the pieces' bytes by what they were (sentSizes); again off
+	// while one tool result is shared among the files it read (result),
+	// so its bytes count once
+	sent  sentSizes
+	again bool
 }
 
 // PromptPiece is a stretch of an item's text as the request sent it: a
 // message, a tool's definition, a call and its input, what a tool
-// answered. An image or sealed reasoning is only named, with its size.
+// answered. Sealed reasoning is only named, with its size; an image is
+// its picture when the request carried it inline (Src).
 type PromptPiece struct {
 	// Role: system, user, assistant, thinking, call, result, tool, image,
 	// sealed; "" for text that is the item itself (an instruction file)
@@ -116,7 +144,11 @@ type PromptPiece struct {
 	Name string `json:"name,omitempty"` // the tool called or defined
 	Text string `json:"text,omitempty"`
 	Size int    `json:"size,omitempty"` // a sealed piece's bytes
-	raw  []byte // JSON (or a custom tool's text), Text once read out
+	// Src: an image's picture as a data: URL, when the request sent it
+	// inline as a PNG, JPEG, GIF or WebP; a linked image stays a name
+	Src string `json:"src,omitempty"`
+	raw []byte // JSON (or a custom tool's text), Text once read out
+	img []byte // an image's source as the request sent it, Src once read out
 }
 
 func txt(role, s string) PromptPiece { return PromptPiece{Role: role, Text: s} }
@@ -125,7 +157,9 @@ func rawPiece(role, name string, raw []byte) PromptPiece {
 	return PromptPiece{Role: role, Name: name, raw: raw}
 }
 
-var imagePiece = PromptPiece{Role: "image"}
+// imgPiece is an image, its source (an Anthropic source, an image_url,
+// Gemini's inlineData) kept to be read out as its picture.
+func imgPiece(src []byte) PromptPiece { return PromptPiece{Role: "image", img: src} }
 
 func sealedPiece(n int) PromptPiece { return PromptPiece{Role: "sealed", Size: n} }
 
@@ -158,6 +192,18 @@ func (b *promptBuilder) add(kind, name, tag string, tokens int, pc PromptPiece) 
 	}
 	it.N++
 	it.Tokens += tokens
+	if !b.again {
+		n := pc.size()
+		b.sent.all += n
+		switch {
+		case tag == "image":
+			b.sent.images += n
+		case kind == PartSystem || kind == PartSkills || kind == PartMemory:
+			b.sent.system += n
+		case kind == PartTools:
+			b.sent.tools += n
+		}
+	}
 	if b.keep {
 		b.pieces[kind+"\x00"+key] = append(b.pieces[kind+"\x00"+key], pc)
 	}
@@ -174,7 +220,7 @@ func (b *promptBuilder) chat(tokens int, pc PromptPiece) {
 func (b *promptBuilder) newTurn() { b.turn++ }
 
 func (b *promptBuilder) prompt() *Prompt {
-	p := &Prompt{Held: b.held, Turns: b.turn, Parts: []PromptPart{}}
+	p := &Prompt{Held: b.held, Turns: b.turn, Parts: []PromptPart{}, sent: b.sent}
 	for _, kind := range partOrder {
 		m := b.parts[kind]
 		if len(m) == 0 {
@@ -227,6 +273,40 @@ func (b *promptBuilder) prompt() *Prompt {
 		p.Parts = append(p.Parts, part)
 	}
 	return p
+}
+
+// skillsApart reads a prompt kept when the skills were memory: they are
+// their own part, before it.
+func (p *Prompt) skillsApart() {
+	if p == nil {
+		return
+	}
+	for i, x := range p.Parts {
+		if x.Kind != PartMemory {
+			continue
+		}
+		skills := PromptPart{Kind: PartSkills}
+		kept := x.Items[:0:0]
+		for _, it := range x.Items {
+			if it.Tag == "skills" {
+				skills.Tokens += it.Tokens
+				skills.Items = append(skills.Items, it)
+			} else {
+				kept = append(kept, it)
+			}
+		}
+		if skills.Tokens == 0 {
+			return
+		}
+		x.Tokens -= skills.Tokens
+		x.Items = kept
+		parts := append(append(p.Parts[:i:i], skills), x)
+		if x.Tokens <= 0 {
+			parts = parts[:i+1]
+		}
+		p.Parts = append(parts, p.Parts[i+1:]...)
+		return
+	}
 }
 
 // promptOf reads what a request's prompt holds; nil when the body isn't
@@ -298,12 +378,12 @@ func (p *Prompt) calibrate(counted, window int) {
 
 var (
 	// Claude Code: "Contents of /path/CLAUDE.md (project instructions, …):"
-	contentsOf = regexp.MustCompile(`(?m)^Contents of (\S.*?) \(([^()\n]*(?:\([^()\n]*\)[^()\n]*)*)\):[ \t]*$`)
+	contentsOf = lazyre.New(`(?m)^Contents of (\S.*?) \(([^()\n]*(?:\([^()\n]*\)[^()\n]*)*)\):[ \t]*$`)
 	// OpenCode: "Instructions from: /path/AGENTS.md"
-	instructionsFrom = regexp.MustCompile(`(?m)^Instructions from: (\S.*?)[ \t]*$`)
+	instructionsFrom = lazyre.New(`(?m)^Instructions from: (\S.*?)[ \t]*$`)
 	// Codex: "# AGENTS.md instructions for /path"
-	agentsFor = regexp.MustCompile(`^# (\S+\.md) instructions for (\S.*?)[ \t]*\n`)
-	leadTag   = regexp.MustCompile(`^\s*<([a-zA-Z_][\w -]{0,40})>`)
+	agentsFor = lazyre.New(`^# (\S+\.md) instructions for (\S.*?)[ \t]*\n`)
+	leadTag   = lazyre.New(`^\s*<([a-zA-Z_][\w -]{0,40})>`)
 )
 
 // memoryTag says whose an instruction file is from how the agent
@@ -363,6 +443,28 @@ func (b *promptBuilder) splitMemory(text string) string {
 	return rest.String()
 }
 
+// skillsList heads the skills Claude Code lists, in its own prompt or a
+// reminder; the list runs to the next blank line.
+const skillsList = "The following skills are available for use with the Skill tool:"
+
+// splitSkills takes the list of skills out of a text, as skills, and
+// returns what is left.
+func (b *promptBuilder) splitSkills(text, role string) string {
+	at := strings.Index(text, skillsList)
+	if at < 0 {
+		return text
+	}
+	body := text[at+len(skillsList):]
+	items := strings.TrimLeft(body, "\n")
+	end := len(text)
+	if j := strings.Index(items, "\n\n"); j >= 0 {
+		end -= len(items) - j
+	}
+	list := text[at:end]
+	b.add(PartSkills, "skills", "skills", tokensOf(list), txt(role, list))
+	return text[:at] + strings.TrimLeft(text[end:], "\n")
+}
+
 // harnessName names a system or developer text by its leading tag, or
 // what it is.
 func harnessName(text, fallback string) string {
@@ -378,9 +480,12 @@ func harnessName(text, fallback string) string {
 // systemText adds the agent's own prompt, with the instruction files in
 // it taken out as memory.
 func (b *promptBuilder) systemText(text, name string) {
-	rest := b.splitMemory(text)
+	rest := b.splitSkills(b.splitMemory(text), "system")
 	if strings.HasPrefix(strings.TrimSpace(rest), "<skills_instructions>") {
-		b.add(PartMemory, "skills", "skills", tokensOf(rest), txt("system", rest))
+		b.add(PartSkills, "skills", "skills", tokensOf(rest), txt("system", rest))
+		return
+	}
+	if strings.TrimSpace(rest) == "" {
 		return
 	}
 	b.add(PartSystem, harnessName(rest, name), "", tokensOf(rest), txt("system", rest))
@@ -392,7 +497,7 @@ func (b *promptBuilder) userText(text string) (said bool) {
 	t := strings.TrimSpace(text)
 	switch {
 	case strings.HasPrefix(t, "<system-reminder>"):
-		rest := b.splitMemory(t)
+		rest := b.splitSkills(b.splitMemory(t), "user")
 		rest = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(rest), "<system-reminder>"), "</system-reminder>"))
 		if rest != "" {
 			b.add(PartMemory, "reminders", "reminder", tokensOf(rest), txt("user", rest))
@@ -419,8 +524,8 @@ var (
 	readTools = map[string]bool{"Read": true, "read": true, "read_file": true, "ReadFile": true, "view": true,
 		"View": true, "NotebookRead": true, "readFile": true, "open_file": true, "cat": true}
 	pathKeys  = []string{"file_path", "path", "filePath", "target_file", "notebook_path", "file", "filename", "uri"}
-	cmdOfExec = regexp.MustCompile(`\bcmd\s*:\s*"((?:[^"\\]|\\.)*)"`)
-	toolOfJS  = regexp.MustCompile(`\btools\.(\w+)\s*\(`)
+	cmdOfExec = lazyre.New(`\bcmd\s*:\s*"((?:[^"\\]|\\.)*)"`)
+	toolOfJS  = lazyre.New(`\btools\.(\w+)\s*\(`)
 	readCmds  = map[string]bool{"cat": true, "head": true, "tail": true, "nl": true, "bat": true, "less": true, "more": true}
 )
 
@@ -476,10 +581,10 @@ func filesOfCommand(cmd string) []string {
 func callOf(name string, input []byte) toolCall {
 	c := toolCall{name: name}
 	var args map[string]json.RawMessage
-	_ = decodeJSON(input, &args)
+	_ = decodeJSONView(input, &args)
 	str := func(k string) string {
 		var s string
-		if decodeJSON(args[k], &s) == nil {
+		if decodeJSONView(args[k], &s) == nil {
 			return s
 		}
 		return ""
@@ -498,7 +603,7 @@ func callOf(name string, input []byte) toolCall {
 	}
 	if cmd == "" {
 		var argv []string
-		if decodeJSON(args["command"], &argv) == nil {
+		if decodeJSONView(args["command"], &argv) == nil {
 			cmd = strings.Join(argv, " ")
 		}
 	}
@@ -538,8 +643,10 @@ func (b *promptBuilder) result(callID string, tokens int, pc PromptPiece) {
 			if !readTools[c.name] {
 				tag = "shell"
 			}
+			b.again = i > 0
 			b.add(PartFiles, f, tag, n, pc)
 		}
+		b.again = false
 		return
 	}
 	b.add(PartResults, c.name, "result", tokens, pc)
@@ -578,11 +685,11 @@ type rawBlock struct {
 // blocksOf reads content that is a string or a list of blocks.
 func blocksOf(c json.RawMessage) []rawBlock {
 	var s string
-	if decodeJSON(c, &s) == nil {
+	if decodeJSONView(c, &s) == nil {
 		return []rawBlock{{Type: "text", Text: s}}
 	}
 	var bs []rawBlock
-	_ = decodeJSON(c, &bs)
+	_ = decodeJSONView(c, &bs)
 	return bs
 }
 
@@ -595,7 +702,7 @@ func (b *promptBuilder) anthropic(body []byte) bool {
 		} `json:"messages"`
 		Tools []json.RawMessage `json:"tools"`
 	}
-	if decodeJSON(body, &req) != nil {
+	if decodeJSONView(body, &req) != nil {
 		return false
 	}
 	for _, s := range blocksOf(req.System) {
@@ -609,7 +716,7 @@ func (b *promptBuilder) anthropic(body []byte) bool {
 		var d struct {
 			Name string `json:"name"`
 		}
-		_ = decodeJSON(t, &d)
+		_ = decodeJSONView(t, &d)
 		b.tool(d.Name, rawTokens(t), t)
 	}
 	for _, m := range req.Messages {
@@ -641,22 +748,26 @@ func userSays(text string) bool { return userWords(text) != "" }
 var (
 	// reminders are what agents add to a user's message for the model
 	// alone: Claude Code's <system-reminder>, ZCode's with a source=.
-	reminders = regexp.MustCompile(`(?s)<system-reminder(?:\s[^>]*)?>.*?</system-reminder>`)
+	reminders = lazyre.New(`(?s)<system-reminder(?:\s[^>]*)?>.*?</system-reminder>`)
 	// myRequest heads what the user typed in the Codex app, after the
 	// context it puts first (# Context from my IDE setup:, <in-app-browser-context>…).
-	myRequest = regexp.MustCompile(`(?m)^## My request(?: for Codex)?:[ \t]*\n?`)
+	myRequest = lazyre.New(`(?m)^## My request(?: for Codex)?:[ \t]*\n?`)
 	// injected are how a text the agent put in as the user begins, beside
 	// agentsFor and the reminders: Codex's and the Codex app's context,
-	// Claude Code's and ZCode's notices, plugin metadata, agent lists and
-	// todo nudges.
+	// Reasonix's snapshot of the workspace, Claude Code's and ZCode's
+	// notices, plugin metadata, agent lists and todo nudges.
 	injected = []string{
 		"<system-reminder", "<environment_context>", "<user_instructions>", "<turn_aborted>",
 		"<user_shell_command>", "<subagent_notification>", "<in-app-browser-context",
+		"<external_codex_apps_open_page>", "<session-context",
 		"<task-notification>", "<subagent-notification>", "<plugin_reference>",
 		"Available agent types for the Agent tool:", "Available agent types and the tools they have access to:",
 		"New agent types are now available for the Agent tool:",
 		"The TodoWrite tool hasn't been used recently.", "The task tools haven't been used recently.",
 		"Conversation rewind applied.", "Workspace rewind applied.",
+		// the tool list changed: Claude Code's deferred tools and MCP
+		// servers' instructions, told after a result
+		"The following deferred tools are", "# MCP Server Instructions", "The following MCP servers",
 	}
 )
 
@@ -665,9 +776,18 @@ var (
 // without the reminders in it, and after the Codex app's context. Routing
 // (turnIn, userText, firstWords) and the prompt's turns go by it alike.
 func userWords(text string) string {
-	t := strings.TrimSpace(reminders.ReplaceAllString(text, ""))
-	if at := myRequest.FindAllStringIndex(t, -1); len(at) > 0 {
-		t = strings.TrimSpace(t[at[len(at)-1][1]:])
+	// each pattern is looked for only where its words are: run over every
+	// user text of a long conversation on each request, the line-anchored
+	// myRequest alone took a seventh of a Codex request's CPU (#3394)
+	t := text
+	if strings.Contains(t, "<system-reminder") {
+		t = reminders.ReplaceAllString(t, "")
+	}
+	t = strings.TrimSpace(t)
+	if strings.Contains(t, "## My request") {
+		if at := myRequest.FindAllStringIndex(t, -1); len(at) > 0 {
+			t = strings.TrimSpace(t[at[len(at)-1][1]:])
+		}
 	}
 	if t == "" || agentsFor.MatchString(t) {
 		return ""
@@ -678,6 +798,12 @@ func userWords(text string) string {
 		}
 	}
 	return t
+}
+
+// saysAnything is whether userSaid has anything, without joining the
+// words of a long turn only to see they are there
+func saysAnything(m Message) bool {
+	return slices.ContainsFunc(m.Parts, func(p Part) bool { return p.Kind == Text && userSays(p.Text) })
 }
 
 // userSaid is what the user said in a message: the words of its texts.
@@ -714,7 +840,7 @@ func (b *promptBuilder) anthropicBlock(role string, x rawBlock) {
 		for _, c := range blocksOf(x.Content) {
 			switch c.Type {
 			case "image", "document":
-				b.add(PartFiles, c.Type, "image", imageTokens, imagePiece)
+				b.add(PartFiles, c.Type, "image", imageTokens, imgPiece(c.Source))
 			default:
 				n += tokensOf(c.Text)
 				texts = append(texts, c.Text)
@@ -731,7 +857,7 @@ func (b *promptBuilder) anthropicBlock(role string, x rawBlock) {
 			b.add(PartFiles, "document", "image", rawTokens(x.Source), rawPiece("", "", x.Source))
 			return
 		}
-		b.add(PartFiles, x.Type, "image", imageTokens, imagePiece)
+		b.add(PartFiles, x.Type, "image", imageTokens, imgPiece(x.Source))
 	default:
 		b.chat(tokensOf(x.Text), txt(role, x.Text))
 	}
@@ -746,25 +872,24 @@ func (b *promptBuilder) responses(body []byte) bool {
 		Tools        []json.RawMessage `json:"tools"`
 		Previous     string            `json:"previous_response_id"`
 	}
-	if decodeJSON(body, &req) != nil {
+	if decodeJSONView(body, &req) != nil {
 		return false
 	}
 	b.held = req.Previous != ""
 	var ins string
-	if decodeJSON(req.Instructions, &ins) == nil && ins != "" {
+	if decodeJSONView(req.Instructions, &ins) == nil && ins != "" {
 		b.systemText(ins, "prompt")
 	}
 	for _, t := range req.Tools {
 		b.responsesTool(t)
 	}
 	var s string
-	if decodeJSON(req.Input, &s) == nil {
+	if decodeJSONView(req.Input, &s) == nil {
 		b.newTurn()
 		b.userText(s)
 		return true
 	}
-	var items []json.RawMessage
-	_ = decodeJSON(req.Input, &items)
+	items, _ := inputList(req.Input)
 	for _, it := range items {
 		b.responsesItem(it)
 	}
@@ -780,7 +905,7 @@ func (b *promptBuilder) responsesTool(t json.RawMessage) {
 			Name string `json:"name"`
 		} `json:"function"`
 	}
-	_ = decodeJSON(t, &d)
+	_ = decodeJSONView(t, &d)
 	name := d.Name
 	if name == "" && d.Function != nil {
 		name = d.Function.Name
@@ -829,7 +954,7 @@ func (b *promptBuilder) responsesItem(raw json.RawMessage) {
 		Encrypted string          `json:"encrypted_content"`
 		Action    json.RawMessage `json:"action"`
 	}
-	if decodeJSON(raw, &it) != nil {
+	if decodeJSONView(raw, &it) != nil {
 		return
 	}
 	if it.Type == "" && it.Role != "" {
@@ -853,7 +978,7 @@ func (b *promptBuilder) responsesItem(raw json.RawMessage) {
 			}
 			for _, p := range parts {
 				if p.image {
-					b.add(PartFiles, "image", "image", imageTokens, imagePiece)
+					b.add(PartFiles, "image", "image", imageTokens, imgPiece(p.src))
 					continue
 				}
 				b.userText(p.text)
@@ -891,13 +1016,13 @@ func (b *promptBuilder) responsesItem(raw json.RawMessage) {
 	case "function_call_output", "custom_tool_call_output", "local_shell_call_output", "tool_search_output":
 		n := 0
 		var s string
-		if decodeJSON(it.Output, &s) == nil {
+		if decodeJSONView(it.Output, &s) == nil {
 			n = tokensOf(s)
 		} else {
 			var texts []string
 			for _, p := range responsesContent(it.Output) {
 				if p.image {
-					b.add(PartFiles, "image", "image", imageTokens, imagePiece)
+					b.add(PartFiles, "image", "image", imageTokens, imgPiece(p.src))
 					continue
 				}
 				n += tokensOf(p.text)
@@ -921,21 +1046,23 @@ func (b *promptBuilder) responsesItem(raw json.RawMessage) {
 type rPart struct {
 	text  string
 	image bool
+	src   json.RawMessage // an image's image_url
 }
 
 func responsesContent(c json.RawMessage) []rPart {
 	var s string
-	if decodeJSON(c, &s) == nil {
+	if decodeJSONView(c, &s) == nil {
 		return []rPart{{text: s}}
 	}
 	var ps []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
+		Type     string          `json:"type"`
+		Text     string          `json:"text"`
+		ImageURL json.RawMessage `json:"image_url"`
 	}
-	_ = decodeJSON(c, &ps)
+	_ = decodeJSONView(c, &ps)
 	out := make([]rPart, 0, len(ps))
 	for _, p := range ps {
-		out = append(out, rPart{text: p.Text, image: p.Type == "input_image" || p.Type == "input_file" || p.Type == "image_url"})
+		out = append(out, rPart{text: p.Text, image: p.Type == "input_image" || p.Type == "input_file" || p.Type == "image_url", src: p.ImageURL})
 	}
 	return out
 }
@@ -959,7 +1086,7 @@ func (b *promptBuilder) chatCompletions(body []byte) bool {
 		} `json:"messages"`
 		Tools []json.RawMessage `json:"tools"`
 	}
-	if decodeJSON(body, &req) != nil {
+	if decodeJSONView(body, &req) != nil {
 		return false
 	}
 	for _, t := range req.Tools {
@@ -978,7 +1105,7 @@ func (b *promptBuilder) chatCompletions(body []byte) bool {
 			}
 			for _, p := range parts {
 				if p.image {
-					b.add(PartFiles, "image", "image", imageTokens, imagePiece)
+					b.add(PartFiles, "image", "image", imageTokens, imgPiece(p.src))
 					continue
 				}
 				b.userText(p.text)
@@ -988,7 +1115,7 @@ func (b *promptBuilder) chatCompletions(body []byte) bool {
 			var texts []string
 			for _, p := range parts {
 				if p.image {
-					b.add(PartFiles, "image", "image", imageTokens, imagePiece)
+					b.add(PartFiles, "image", "image", imageTokens, imgPiece(p.src))
 					continue
 				}
 				n += tokensOf(p.text)
@@ -1045,7 +1172,7 @@ func (b *promptBuilder) gemini(body []byte) bool {
 			Decls []json.RawMessage `json:"functionDeclarations"`
 		} `json:"tools"`
 	}
-	if decodeJSON(body, &req) != nil {
+	if decodeJSONView(body, &req) != nil {
 		return false
 	}
 	if req.System != nil {
@@ -1058,7 +1185,7 @@ func (b *promptBuilder) gemini(body []byte) bool {
 			var n struct {
 				Name string `json:"name"`
 			}
-			_ = decodeJSON(d, &n)
+			_ = decodeJSONView(d, &n)
 			b.tool(n.Name, rawTokens(d), d)
 		}
 	}
@@ -1086,7 +1213,7 @@ func (b *promptBuilder) gemini(body []byte) bool {
 				}
 				b.result(id, rawTokens(p.FunctionResponse.Response), rawPiece("result", "", p.FunctionResponse.Response))
 			case len(p.InlineData) > 0 || len(p.FileData) > 0:
-				b.add(PartFiles, "image", "image", imageTokens, imagePiece)
+				b.add(PartFiles, "image", "image", imageTokens, imgPiece(p.InlineData))
 			case c.Role == "model":
 				role := "assistant"
 				if p.Thought {
@@ -1139,19 +1266,35 @@ func windowFor(id, model string) int {
 	return windowOf(*p, model)
 }
 
+// livePrompt is p as a route still answering shows it: in the window of
+// the model its try went to, read as the try went out (packinggoods on
+// Discord: a request in flight on a remote magpie's claude-opus-5-5 said
+// the model's window isn't known, its window set only once it was done).
+// p itself is left as it is, for the route's end to scale and give the
+// window of the model that answered.
+func livePrompt(p *Prompt, window int) *Prompt {
+	if p == nil || window <= 0 || p.Window == window {
+		return p
+	}
+	c := *p
+	c.Window = window
+	return &c
+}
+
 // inspectPrompt reads the request's prompt beside it, putting the estimate
 // in the trace as soon as it is read; wait returns it, for the route's
 // end to scale to what was counted. masked is the body as the vendor would
-// get it with masking on, kept a while for the card's text (PromptText).
-func (s *Server) inspectPrompt(tr *Route, from provider.Protocol, body, masked []byte) (wait func() *Prompt) {
+// get it with masking on, kept a while for the card's text (PromptText);
+// plain when it went unmasked, so is masked only when the card asks.
+func (s *Server) inspectPrompt(tr *Route, from provider.Protocol, body, masked []byte, plain bool) (wait func() *Prompt) {
 	ch := make(chan *Prompt, 1)
 	go func() {
 		p := promptOf(from, body)
 		if p != nil {
-			s.trace.keepBody(tr.ID, from, masked)
+			s.trace.keepBody(tr.ID, from, masked, plain)
 			s.trace.update(tr, func(t *Route) {
 				if t.Prompt == nil {
-					t.Prompt = p
+					t.Prompt = livePrompt(p, t.window)
 				}
 			})
 		}

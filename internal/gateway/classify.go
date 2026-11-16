@@ -19,30 +19,45 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/yetone/magpie/internal/access"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/settings"
 )
 
 // RouterAgent is the User-Agent magpie's own classifier calls carry.
 const RouterAgent = "magpie-router/1"
 
 var (
-	classifyTimeout = 8 * time.Second
-	classifyKeep    = 10 * time.Minute // an answer, for the same message and intents
-	classifyRest    = 30 * time.Second // after a failure, before the classifier is asked again
+	classifyKeep = 10 * time.Minute // an answer, for the same message and intents
+	classifyRest = 30 * time.Second // after a failure, before the classifier is asked again
 )
+
+// classifyTimeout is how long the classifier is given to answer, its
+// provider's failover included. It is Settings' Classifier timeout (#2934:
+// a Kiro subscription's haiku needed more than the 8 seconds it was fixed
+// at), read as each turn asks, in classifyUnit seconds.
+func classifyTimeout() time.Duration {
+	return settings.Shared().ClassifyWait() / time.Second * classifyUnit
+}
+
+// classifyUnit is a second of classifyTimeout: a test makes it shorter,
+// rather than wait the seconds out.
+var classifyUnit = time.Second
 
 // classifier asks a model which of intents text is — the intent, or ""
 // for none of them — and, when effort, how much reasoning the turn wants. prev is what
 // the conversation's turn before was said to be: a message that only
-// carries on from it is the same.
-type classifier func(model string, intents []string, prev before, effort bool, text string) (verdict, error)
+// carries on from it is the same. held is the accounts the group asking
+// holds the call to (classifierHeld): its question is the group's spend,
+// so it goes on the group's accounts as the turn does (AWilsonPeng on X).
+type classifier func(held access.Identity, model string, intents []string, prev before, effort bool, text string) (verdict, error)
 
 // before is what the classifier said of a conversation's turn before, and
 // what was said in it (turnBefore): a short follow-up (继续, fix that) says
@@ -56,7 +71,18 @@ type before struct {
 
 // verdict is what a classifier said.
 type verdict struct {
-	Intent string  // "" for none
+	Intent string // "" for none
+	// Said: the answer as it said it — a chat model's number, or the
+	// choice a decision model named — kept even when no intent came of
+	// it, so the trace tells "said none" from an answer the rules
+	// couldn't take (#4598)
+	Said string
+	// Topic: the answer is of topics a message may be none of (a decision
+	// model's intent answer), not levels every message is at. Jev's
+	// likeliest intent is kept in Intent as it said it, and the group's
+	// own sure of it applied where it is known (intentOf): a chat model's
+	// answer is already the one of it that counts.
+	Topic  bool
 	Effort string  // the reasoning the turn wants; "" when not asked
 	Score  float64 // how hard the classifier took the turn to be, from 0 (low) to 3 (xhigh)
 	Sure   float64 // how confident Jev was of the intent, from 0 to 1
@@ -69,13 +95,23 @@ var classified = struct {
 	// last: classifier model → why it couldn't say when last asked, an
 	// answer that wasn't one among them; gone once it answers
 	// (ClassifierFailure, #1929)
-	last     map[string]classifyFailure
+	last map[string]classifyFailure
+	// group: routing group id → why its classifier couldn't say when that
+	// group last asked it; gone once it answers that group
+	// (GroupClassifierFailure)
+	group    map[string]groupFailure
 	inflight map[string]*classifyCall
 }{
 	m:        map[string]classifiedAs{},
 	failed:   map[string]classifyFailure{},
 	last:     map[string]classifyFailure{},
+	group:    map[string]groupFailure{},
 	inflight: map[string]*classifyCall{},
+}
+
+type groupFailure struct {
+	classifyFailure
+	model string
 }
 
 type classifyCall struct {
@@ -98,12 +134,34 @@ type classifyFailure struct {
 // numbers: it is up, so it isn't left to rest for it.
 type answerError struct{ error }
 
+// waitSpent is a classifier not asked, or cut off before its own wait
+// was out, because the groups above it in the request spent the
+// request's one classifier wait (askWaited): nothing says it is down, so
+// it isn't left to rest for it.
+type waitSpent struct{ error }
+
+// cutShort is the waitSpent of a classifier given wait, what was left of
+// the request's classifier wait full, that didn't answer in it.
+func cutShort(model string, wait, full time.Duration) error {
+	return waitSpent{fmt.Errorf("%s gave no answer in the %s left of the request's classifier wait of %s, spent by the routing group above",
+		model, wait.Round(time.Millisecond), full)}
+}
+
 // classify is ask's answer for the message, from what was asked before
 // when it can be: the same message and intents within classifyKeep. A
 // classifier that failed is left to rest for classifyRest rather than
 // making every turn wait out its timeout. Concurrent calls asking the
 // same question share the answer in flight.
-func classify(ask classifier, model string, intents []string, prev before, effort bool, text string) (v verdict, cached bool, err error) {
+//
+// An answer is the same on whichever account it was asked, so held
+// doesn't part the answers kept; a failure is the accounts' it was asked
+// on, so one account's limit rests the classifier for the groups held to
+// it alone.
+func classify(ask classifier, held access.Identity, model string, intents []string, prev before, effort bool, text string) (v verdict, cached bool, err error) {
+	rest := model
+	if len(held.Accounts) > 0 {
+		rest += "\x00" + strings.Join(held.Accounts, "\x00")
+	}
 	h := sha256.New()
 	h.Write([]byte(model + "\x00" + strings.ToLower(strings.Join(intents, "\x00")) + "\x00" + prev.Intent + "\x00" + prev.Effort + "\x00" + prev.User + "\x00" + prev.Reply + "\x00" + strconv.FormatBool(effort) + "\x00" + text))
 	key := hex.EncodeToString(h.Sum(nil))
@@ -118,7 +176,7 @@ func classify(ask classifier, model string, intents []string, prev before, effor
 		<-c.done
 		return c.v, c.err == nil, c.err
 	}
-	if f, ok := classified.failed[model]; ok && now.Sub(f.at) < classifyRest {
+	if f, ok := classified.failed[rest]; ok && now.Sub(f.at) < classifyRest {
 		classified.Unlock()
 		return verdict{}, false, fmt.Errorf("%s failed %s ago (%s); not asked again for now", model, now.Sub(f.at).Round(time.Second), f.err)
 	}
@@ -132,14 +190,14 @@ func classify(ask classifier, model string, intents []string, prev before, effor
 		close(c.done)
 		classified.Unlock()
 	}()
-	v, err = ask(model, intents, prev, effort, text)
+	v, err = ask(held, model, intents, prev, effort, text)
 	classified.Lock()
 	defer classified.Unlock()
 	c.err = err
 	if err != nil {
 		f := classifyFailure{err: err.Error(), at: time.Now()}
-		if !errors.As(err, new(answerError)) {
-			classified.failed[model] = f
+		if !errors.As(err, new(answerError)) && !errors.As(err, new(waitSpent)) {
+			classified.failed[rest] = f
 		}
 		if was, ok := classified.last[model]; !ok || was.err != f.err {
 			// said once in the log, not at every turn it fails the same way
@@ -149,7 +207,7 @@ func classify(ask classifier, model string, intents []string, prev before, effor
 		return verdict{}, false, err
 	}
 	c.v = v
-	delete(classified.failed, model)
+	delete(classified.failed, rest)
 	delete(classified.last, model)
 	classified.m[key] = classifiedAs{v: v, at: time.Now()}
 	if len(classified.m) > 4096 {
@@ -160,6 +218,42 @@ func classify(ask classifier, model string, intents []string, prev before, effor
 		}
 	}
 	return v, false, nil
+}
+
+// classifiedFor notes what group's classifier, model, gave the group's
+// turn: err, or an answer. A failure is the one the classifier last had
+// (classified.last), resting from it or not, so the group's card says the
+// vendor's words and when they were said, not the rest's.
+func classifiedFor(group, model string, err error) {
+	classified.Lock()
+	defer classified.Unlock()
+	if err == nil {
+		delete(classified.group, group)
+		return
+	}
+	f, ok := classified.last[model]
+	if !ok {
+		f = classifyFailure{err: err.Error(), at: time.Now()}
+	}
+	classified.group[group] = groupFailure{classifyFailure: f, model: model}
+}
+
+// GroupClassifierFailure is why group's classifier, model, couldn't say
+// which intent or effort a turn of that group's was, the last time the
+// group asked it, and when; ok is false once it answers the group, before
+// the group asks it, and after the group's classifier changed. The Routing
+// page says it on that group's card alone: keyed by the classifier, a
+// group no request reached showed the failures of another group that
+// shares its classifier, as though its own turns were being judged (jjt on
+// Discord: "claude难易", not in use, said Claude Haiku's weekly limit).
+func GroupClassifierFailure(group, model string) (why string, at time.Time, ok bool) {
+	classified.Lock()
+	defer classified.Unlock()
+	f, ok := classified.group[group]
+	if !ok || f.model != model {
+		return "", time.Time{}, false
+	}
+	return f.err, f.at, true
 }
 
 // ClassifierFailure is why model, a routing group's classifier, couldn't
@@ -313,38 +407,115 @@ func writePrior(b *strings.Builder, prev before) {
 	}
 }
 
-var firstNumber = regexp.MustCompile(`\d+`)
+var firstNumber = lazyre.New(`\d+`)
 
 // readIntent is the intent a classifier's answer names: its first number,
-// 0 for none.
-func readIntent(answer string, intents []string) (string, error) {
+// 0 for none. The number is given back as it was said (said), so the
+// trace tells what a classifier that said none answered (#4598).
+func readIntent(answer string, intents []string) (string, string, error) {
 	n, err := strconv.Atoi(firstNumber.FindString(answer))
 	if err != nil || n < 0 || n > len(intents) {
 		a := []rune(strings.TrimSpace(answer))
 		if len(a) > 80 {
 			a = append(a[:80], '…')
 		}
-		return "", answerError{fmt.Errorf("it answered %q, not a number from 0 to %d", string(a), len(intents))}
+		return "", "", answerError{fmt.Errorf("it answered %q, not a number from 0 to %d", string(a), len(intents))}
 	}
+	said := strconv.Itoa(n)
 	if n == 0 {
-		return "", nil
+		return "", said, nil
 	}
-	return intents[n-1], nil
+	return intents[n-1], said, nil
 }
 
-// classifyEffort is the least reasoning model takes: none when it can go
-// without, else its lowest level; "" when its levels aren't known, which
-// leaves it to the vendor.
+// classifyEffort is the reasoning model is asked to classify at: none,
+// reasoning off, which each request fits to what its model and wire take
+// (tangtang969 on X: a classifier that doesn't think answers sooner).
+// Anthropic's API is sent thinking disabled and Gemini's its off budget,
+// or least level, where the lowest level on the model's list asked them to
+// think before; a Chat or Responses model without none is asked its
+// lowest (fitFor, effortOf), and one that turns off away is asked again at
+// its lowest and remembered (forwardTranslated, passthrough). A model
+// whose levels aren't known is asked for none too, as auto mode's
+// classifier is (fitAutoModeClassifier): left to its vendor, one that
+// reasons did so at its default. "" for a model the user said takes no
+// reasoning ask (Reasonless), and for one that isn't a provider's model (a
+// routing group), left to it.
 func classifyEffort(model string) string {
 	p, m, ok := provider.Resolve(model)
-	if !ok {
+	if !ok || provider.Reasonless(p.ID, m) {
 		return ""
 	}
-	levels := p.Efforts(m)
-	if len(levels) == 0 {
-		return ""
+	return "none"
+}
+
+// classifierEffortField is the classifier's effort (classifyEffort)
+// remembered in unfit for a model whose upstream turned the field away.
+func classifierEffortField(model string) string { return "classifier effort\x00" + model }
+
+// askLeast asks model the classifier's question, body at the effort
+// classifyEffort gives it. An upstream that turns the effort away — a
+// relay that knows no reasoning_effort, one that takes none of the
+// levels — is asked again without it, as before, and from then on: the
+// classifier answers wherever it did.
+func (s *Server) askLeast(wait time.Duration, held access.Identity, model string, body func(effort string) []byte) (string, error) {
+	effort := classifyEffort(model)
+	p, m, ok := provider.Resolve(model)
+	if effort != "" && ok && !s.fits(p.ID, classifierEffortField(m), provider.Chat) {
+		effort = ""
 	}
-	return fitEffort("none", levels)
+	a, err := s.askChat(wait, held, model, body(effort))
+	var f chatFailed
+	if effort == "" || !errors.As(err, &f) {
+		return a, err
+	}
+	if refused, _ := ownEffortRefused(f.code, f.body, effort); !refused {
+		return a, err
+	}
+	s.markUnfit(p.ID, classifierEffortField(m), provider.Chat)
+	return s.askChat(wait, held, model, body(""))
+}
+
+// chatFailed is a classifier's answer that was an error, with its status
+// and body, for askLeast to read.
+type chatFailed struct {
+	error
+	code int
+	body []byte
+}
+
+// askWaited is the classifier a request's routing groups ask, each
+// question a wait ctx's watch knows of (noteWait): a routing group's
+// decision model is asked before the request's route is begun. Every
+// group the request goes through, nested ones included, shares the one
+// classifier wait Settings gives, from the first one asked: each level
+// given the whole wait held a request through three ruled groups three
+// waits before routing it, past the unrouted watch's 2 minutes (heatonz
+// on Discord, v0.1.2215). A group asked once the wait is spent goes by
+// its own order at once, as for a classifier that didn't answer.
+func (s *Server) askWaited(ctx context.Context) classifier {
+	var mu sync.Mutex
+	var until time.Time
+	// the caller's accounts (a gateway key's, the group the request names)
+	// hold its classifier's calls too, as they hold magpie's other calls
+	// for it (accountHolds): only the accounts, not the key's models, as
+	// the classifier is the group's pick, not the caller's
+	caller := access.Caller(ctx)
+	return func(held access.Identity, model string, intents []string, prev before, effort bool, text string) (verdict, error) {
+		mu.Lock()
+		now := time.Now()
+		if until.IsZero() {
+			until = now.Add(classifyTimeout())
+		}
+		left := until.Sub(now)
+		mu.Unlock()
+		if left <= 0 {
+			return verdict{}, waitSpent{fmt.Errorf("%s not asked: the request's classifier wait of %s was spent by the routing group above", model, classifyTimeout())}
+		}
+		defer noteWait(ctx, "decision model")()
+		who := access.Identity{Accounts: caller.Accounts, Group: caller.Group}.HeldToGroup(held.Group, held.Accounts)
+		return s.askClassifierIn(left, who, model, intents, prev, effort, text)
+	}
 }
 
 // askClassifier asks a decision provider's model through its own API, and
@@ -352,11 +523,18 @@ func classifyEffort(model string) string {
 // intents the message is and, when effort, how hard the turn is, each in a
 // call of its own, at once.
 func (s *Server) askClassifier(model string, intents []string, prev before, effort bool, text string) (verdict, error) {
+	return s.askClassifierIn(classifyTimeout(), access.Identity{}, model, intents, prev, effort, text)
+}
+
+// askClassifierIn is askClassifier given wait to answer in, all of the
+// classifier's wait or what a request has left of it (askWaited), held
+// to who's accounts, when it names any.
+func (s *Server) askClassifierIn(wait time.Duration, who access.Identity, model string, intents []string, prev before, effort bool, text string) (verdict, error) {
 	if p, m, ok := provider.Resolve(model); ok && p.DecidesModel(m) {
-		return s.askDecider(p, m, intents, prev, effort, text)
+		return s.askDecider(wait, who, p, m, intents, prev, effort, text)
 	}
 	// a group of decision models: each in turn (decide_group.go)
-	if v, ok, err := s.askDecisionGroup(model, intents, prev, effort, text); ok {
+	if v, ok, err := s.askDecisionGroup(wait, who, model, intents, prev, effort, text); ok {
 		return v, err
 	}
 	var v verdict
@@ -367,8 +545,8 @@ func (s *Server) askClassifier(model string, intents []string, prev before, effo
 		go func() {
 			defer wg.Done()
 			var a string
-			if a, ierr = s.askChat(model, classifyBody(model, classifyEffort(model), intents, prev, text)); ierr == nil {
-				v.Intent, ierr = readIntent(a, intents)
+			if a, ierr = s.askLeast(wait, who, model, func(effort string) []byte { return classifyBody(model, effort, intents, prev, text) }); ierr == nil {
+				v.Intent, v.Said, ierr = readIntent(a, intents)
 			}
 		}()
 	}
@@ -377,7 +555,7 @@ func (s *Server) askClassifier(model string, intents []string, prev before, effo
 		go func() {
 			defer wg.Done()
 			var a string
-			if a, eerr = s.askChat(model, effortBody(model, classifyEffort(model), prev, text)); eerr == nil {
+			if a, eerr = s.askLeast(wait, who, model, func(effort string) []byte { return effortBody(model, effort, prev, text) }); eerr == nil {
 				v.Effort, v.Score, eerr = readEffort(a)
 			}
 		}()
@@ -445,9 +623,11 @@ func readEffort(answer string) (string, float64, error) {
 }
 
 // askChat sends a chat model body through the gateway and returns its
-// answer's text.
-func (s *Server) askChat(model string, body []byte) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), classifyTimeout)
+// answer's text, if it comes in wait.
+// held, when it names accounts, holds it to them, as heldByGroup does a
+// request through a group.
+func (s *Server) askChat(wait time.Duration, held access.Identity, model string, body []byte) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
 	defer cancel()
 	r, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://magpie/v1/chat/completions", nil)
 	if err != nil {
@@ -455,10 +635,16 @@ func (s *Server) askChat(model string, body []byte) (string, error) {
 	}
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("User-Agent", RouterAgent)
+	if len(held.Accounts) > 0 {
+		r = r.WithContext(access.WithIdentity(r.Context(), held))
+	}
 	w := httptest.NewRecorder()
 	s.serve(w, r, provider.Chat, body)
 	if ctx.Err() != nil {
-		return "", fmt.Errorf("%s gave no answer in %s", model, classifyTimeout)
+		if full := classifyTimeout(); wait < full {
+			return "", cutShort(model, wait, full)
+		}
+		return "", fmt.Errorf("%s gave no answer in %s", model, wait)
 	}
 	var out struct {
 		Choices []struct {
@@ -478,7 +664,7 @@ func (s *Server) askChat(model string, body []byte) (string, error) {
 		if out.Error != nil && out.Error.Message != "" {
 			msg = out.Error.Message
 		}
-		return "", fmt.Errorf("%s: %s", model, msg)
+		return "", chatFailed{fmt.Errorf("%s: %s", model, msg), w.Code, w.Body.Bytes()}
 	}
 	if len(out.Choices) == 0 {
 		return "", answerError{fmt.Errorf("%s gave no answer", model)}

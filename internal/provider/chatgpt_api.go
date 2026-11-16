@@ -32,11 +32,11 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/filelock"
 )
 
 // ChatGPTAPIID is the subscription's id, as a provider and in logins.json.
@@ -70,7 +70,12 @@ const (
 	SIWCUsageURL = "https://chatgpt.com/settings/usage"
 )
 
-var siwcClient = &http.Client{Timeout: 30 * time.Second}
+var siwcClient = &http.Client{Timeout: 30 * time.Second, CheckRedirect: KeepsCredentials}
+
+// siwcNoUsage is what a ChatGPT API account's usage line says: OpenAI's
+// API tells no plan usage, and the account added as ChatGPT (Codex's
+// backend) does.
+const siwcNoUsage = "a ChatGPT API account's usage isn't told through OpenAI's API, only at " + SIWCUsageURL + "; the same account added as ChatGPT shows it here"
 
 // ErrSIWCSignIn is an account OpenAI no longer refreshes: it must be
 // signed in again.
@@ -105,7 +110,21 @@ func siwcSide() []sideLogin {
 	})
 }
 
-func siwcLoginList() []Login { return loginsOf(siwcSide()) }
+// siwcLoginList lists the accounts, one OpenAI no longer refreshes said
+// on its row (siwcRefresh's Lapsed), which then offers Sign in again: the
+// lapse was kept, and shown nowhere but on a failed request.
+func siwcLoginList() []Login {
+	ls := siwcSide()
+	for i := range ls {
+		if ls[i].Lapsed == "" {
+			ls[i].Lapsed = ls[i].saved.Lapsed
+		}
+		if c, ok := siwcSaved(ls[i].saved); ok {
+			ls[i].Until = chatgptUntil(time.Now(), c.IDToken, c.Access)
+		}
+	}
+	return loginsOf(ls)
+}
 
 func switchSIWCLogin(user string) error { return switchSideLogin(ChatGPTAPIID, user, siwcSide()) }
 
@@ -373,9 +392,11 @@ func siwcFromToken(tok siwcTokenReply, c siwcCreds) (siwcCreds, error) {
 var siwcDead = []string{"invalid_grant", "invalid_refresh_token", "token_expired", "refresh_token_expired",
 	"refresh_token_invalidated", "refresh_token_reused"}
 
-// siwcRefreshing keeps two requests from refreshing at once: the refresh
-// token rotates, and the second would send the one the first used up.
-var siwcRefreshing sync.Mutex
+// siwcRefreshing keeps two requests from refreshing at once, in this
+// magpie and across magpies (two run at once while a restart hands the
+// gateway over): the refresh token rotates, and the second would send the
+// one the first used up. The account is looked up again once it is held.
+var siwcRefreshing = filelock.Mutex{Path: func() string { return loginsPath() + ".siwc.lock" }}
 
 // siwcFresh is an account's credentials with an access token that isn't
 // about to expire, refreshed when it is, or when force is set (OpenAI

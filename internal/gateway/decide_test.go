@@ -17,6 +17,7 @@ import (
 
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/usage"
 )
 
@@ -359,6 +360,45 @@ func TestJevPicksTheIntent(t *testing.T) {
 	}
 }
 
+// Jev is given Settings' Classifier timeout as the chat classifier is
+// (#2934): slower than the 8 seconds unset, its pick routes the turn once
+// it is given 60.
+func TestJevGivenTheClassifierTimeout(t *testing.T) {
+	was := classifyUnit
+	classifyUnit = 100 * time.Millisecond // 8 seconds are 800ms, 60 are 6s
+	t.Cleanup(func() { classifyUnit = was })
+	s, _, _, j := jevved(t, "", provider.Rule{Use: "b/big", Intent: "debugging"})
+	j.choice = "debugging"
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(2 * time.Second):
+		case <-r.Context().Done():
+			return
+		}
+		j.ServeHTTP(w, r)
+	}))
+	t.Cleanup(slow.Close)
+	if err := provider.Save(provider.Provider{ID: "ts", Name: "TypeSafe", Key: "kts", Decide: slow.URL + "/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	_, r := postOK(t, s, "s1", chat("why does this crash?", nil, 0, ""))
+	if r.Rule.N != 0 || !strings.Contains(r.Rule.Classified.Error, "no answer in 800ms") {
+		t.Fatalf("unset: %+v", r.Rule.Classified)
+	}
+	st := settings.Load()
+	st.ClassifyTimeout = 60
+	if err := settings.Save(st); err != nil {
+		t.Fatal(err)
+	}
+	classified.Lock()
+	delete(classified.failed, "ts/jev-latest")
+	classified.Unlock()
+	out, r := postOK(t, s, "s2", chat("why does this hang?", nil, 0, ""))
+	if !strings.Contains(out, "from kb") || r.Rule.N != 1 || r.Rule.Classified.Intent != "debugging" || r.Rule.Classified.Error != "" {
+		t.Fatalf("given 60s: %s %+v", out, r.Rule.Classified)
+	}
+}
+
 // Intents that are levels (how hard a request is) leave no message out:
 // Jev's answer without "none of these" counts for them, and whether they
 // are is asked once for the set.
@@ -566,13 +606,27 @@ func TestJevTornLevel(t *testing.T) {
 	if v, _ := readJev(sure, in, true, before{Intent: "复杂任务"}); v.Intent != "简单任务" {
 		t.Fatalf("sure: %+v", v)
 	}
-	// topics still need Jev sure, and may be none
-	if v, _ := readJev(b, in, false, before{Intent: "复杂任务"}); v.Intent != "复杂任务" {
-		t.Fatalf("topic sure enough: %+v", v)
+	// topics: the sure needed is the group's own now (#5101), readJev
+	// keeping Jev's pick and saying how sure it was — intentOf applies the
+	// group's own at the group
+	if v, _ := readJev(b, in, false, before{Intent: "复杂任务"}); v.Intent != "复杂任务" || v.Sure != 0.43 || !v.Topic {
+		t.Fatalf("topic: %+v", v)
 	}
 	unsure := []byte(`{"answers":{"intent":{"type":"choice","choice":"复杂任务","confidence":0.2}}}`)
-	if v, _ := readJev(unsure, in, false, before{Intent: "复杂任务"}); v.Intent != "" {
+	if v, _ := readJev(unsure, in, false, before{Intent: "复杂任务"}); v.Intent != "复杂任务" || v.Sure != 0.2 {
 		t.Fatalf("topic unsure: %+v", v)
+	}
+	// a group's own sure: the default 0.4 keeps an unsure pick from
+	// matching, 0.25 lets a surer one, "none of these" never counts
+	g0 := provider.Group{}
+	if got := intentOf(verdict{Topic: true, Intent: "复杂任务", Said: "复杂任务", Sure: 0.2}, g0); got != "" {
+		t.Fatalf("default 0.4: %+v", got)
+	}
+	if got := intentOf(verdict{Topic: true, Intent: "复杂任务", Said: "复杂任务", Sure: 0.3}, provider.Group{IntentSure: ptrSure(0.25)}); got != "复杂任务" {
+		t.Fatalf("0.25: %+v", got)
+	}
+	if got := intentOf(verdict{Topic: true, Intent: "", Said: noIntent, Sure: 0.9}, provider.Group{IntentSure: ptrSure(0)}); got != "" {
+		t.Fatalf("none of these at 0: %+v", got)
 	}
 }
 

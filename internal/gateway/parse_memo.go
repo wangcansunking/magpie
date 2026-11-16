@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/yetone/magpie/internal/provider"
@@ -9,11 +10,13 @@ import (
 // bodyFacts is what the readers of a request's conversation that only
 // read it take from it: the turn count (turnOf), the folder its agent
 // works in and whether that is a git repository, as the text says
-// (dirOf, tellWorkPlace). A body that doesn't parse says none of them.
+// (dirOf, tellWorkPlace), and whether it is the agent compacting its
+// conversation (compacting). A body that doesn't parse says none of them.
 type bodyFacts struct {
 	turn     int
 	within   bool
 	dir, git string
+	compact  bool
 }
 
 // factsOf is bodyFacts of body, read in protocol proto. Each of its
@@ -59,13 +62,17 @@ func factsOf(proto provider.Protocol, body []byte) bodyFacts {
 
 // readFacts parses body for its bodyFacts.
 func readFacts(proto provider.Protocol, body []byte) bodyFacts {
-	req, err := parse(proto, body)
+	if f := factsParsed.Load(); f != nil {
+		(*f)(body)
+	}
+	req, err := parseIn(proto, body, true)
 	if err != nil {
 		return bodyFacts{}
 	}
 	var f bodyFacts
 	f.turn, f.within = turnIn(req)
 	f.dir, f.git = workPlace(req)
+	f.compact = compacting(req)
 	return f
 }
 
@@ -75,3 +82,6 @@ type heldFacts struct {
 	proto provider.Protocol
 	facts bodyFacts
 }
+
+// factsParsed, when set (tests), is told of each body readFacts parses.
+var factsParsed atomic.Pointer[func(body []byte)]

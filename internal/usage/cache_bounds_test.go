@@ -5,9 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/yetone/magpie/internal/sessions"
 )
 
 func TestUsageSameSizeAndMtimeRewrite(t *testing.T) {
@@ -91,6 +96,14 @@ func TestUsageSameTickRewriteIsNotCached(t *testing.T) {
 					}
 					if appendAfter {
 						Append(Record{Time: clock, Agent: "codex", Provider: "relay", Model: "m", Input: 19})
+					}
+					if !afterSettle && !appendAfter {
+						// Inside the tick the read before the rewrite may
+						// stand, as a read a moment earlier would have had
+						// it; the first read once the tick settles checks
+						// it (#4368).
+						Summarize(All)
+						afterSettle = true
 					}
 					if afterSettle {
 						logIndexNow = func() time.Time { return tick.Add(time.Hour) }
@@ -285,7 +298,7 @@ func TestUsageLargeSummaryIsCompleteAndKeptTrimmed(t *testing.T) {
 		t.Fatalf("large summary lost sessions: %d / %d", len(got.Sessions), got.Calls)
 	}
 	summaries.Lock()
-	kept := summaries.entries[All]
+	kept := summaries.entries[summaryKey{All, time.Local}]
 	summaries.Unlock()
 	if len(kept.value.Sessions) != summaryCacheSessions || kept.value.SessionCount != summaryCacheSessions+1 {
 		t.Fatalf("the cache kept %d sessions of %d", len(kept.value.Sessions), kept.value.SessionCount)
@@ -329,7 +342,7 @@ func TestUsageOverBudgetPageIsCached(t *testing.T) {
 	equalPage(t, got, pageFromLedger(All, Filter{}, 0, 100, LedgerOf(All, Filter{})))
 	requestCache.Lock()
 	defer requestCache.Unlock()
-	if _, ok := requestCache.pages[pageKey{All, Filter{}, 0, 100}]; !ok {
+	if _, ok := requestCache.pages[pageKey{All, Filter{}, 0, 100, "2026-09-30"}]; !ok {
 		t.Fatal("page of an over-budget history not cached")
 	}
 }
@@ -411,5 +424,215 @@ func TestUsageLedgerReadsTheIndexNotTheFile(t *testing.T) {
 	defer mu.Unlock()
 	if n := loads - before; n != 0 {
 		t.Fatalf("the ledger parsed the whole log %d times", n)
+	}
+}
+
+// While the page is asked for, the session files' chunks are kept to
+// requestCacheBytes, so a refresh after a new call reads none of them again;
+// once it goes unasked for requestIdle they are held to requestIdleBytes
+// (#3493).
+func TestRequestChunksTrimmedWhenIdle(t *testing.T) {
+	pageHome(t)
+	now := holdClock(t, time.Date(2026, 9, 30, 12, 0, 0, 0, time.Local))
+	oldIdle, oldIdleBytes := requestIdle, requestIdleBytes
+	t.Cleanup(func() {
+		requestCache.Lock()
+		requestIdle, requestIdleBytes = oldIdle, oldIdleBytes
+		requestCache.Unlock()
+	})
+	cacheBudget(t, 1<<30)
+	requestCache.Lock()
+	requestIdle, requestIdleBytes = time.Hour, 1
+	requestCache.Unlock()
+	dir := filepath.Join(sessions.CodexDir(), "sessions")
+	os.MkdirAll(dir, 0700)
+	for i := range 3 {
+		meta := fmt.Sprintf(`{"type":"session_meta","payload":{"id":"s%d","model_provider":"custom"}}`, i) + "\n" + `{"type":"turn_context","payload":{"model":"m"}}` + "\n"
+		line := fmt.Sprintf(`{"timestamp":%q,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"output_tokens":1},"last_token_usage":{"input_tokens":10,"output_tokens":1}}}}`+"\n", now.Add(-time.Duration(i)*time.Minute).Format(time.RFC3339Nano))
+		os.WriteFile(filepath.Join(dir, fmt.Sprintf("rollout-2026-09-30T00-00-0%d-s%d.jsonl", i, i)), []byte(meta+line), 0600)
+	}
+	chunks := func() int {
+		requestCache.Lock()
+		defer requestCache.Unlock()
+		return len(requestCache.chunks)
+	}
+	if p := QueryPage(All, Filter{}, 0, 100); p.Total != 3 {
+		t.Fatalf("total %d, want 3", p.Total)
+	}
+	if n := chunks(); n != 3 {
+		t.Fatalf("%d chunks kept while the page is asked for, want 3", n)
+	}
+	requestCache.Lock()
+	requestIdle = time.Millisecond
+	requestCache.Unlock()
+	QueryPage(All, Filter{}, 0, 100) // asked again: the idle wait starts over
+	for deadline := time.Now().Add(10 * time.Second); chunks() != 0; {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d chunks kept after the page went unasked, want 0", chunks())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// Within requestIdleBytes the chunks stay through the trim, and go
+// requestForget after it when nothing asked for them since; an ask
+// after the trim keeps them.
+func TestRequestChunksForgottenLongIdle(t *testing.T) {
+	pageHome(t)
+	now := holdClock(t, time.Date(2026, 9, 30, 12, 0, 0, 0, time.Local))
+	oldIdle, oldIdleBytes, oldForget := requestIdle, requestIdleBytes, requestForget
+	t.Cleanup(func() {
+		requestCache.Lock()
+		requestIdle, requestIdleBytes, requestForget = oldIdle, oldIdleBytes, oldForget
+		requestCache.Unlock()
+	})
+	cacheBudget(t, 1<<30)
+	requestCache.Lock()
+	requestIdle, requestIdleBytes, requestForget = time.Hour, 1<<30, time.Hour
+	if requestCache.forget != nil { // armed by a test before
+		requestCache.forget.Stop()
+		requestCache.forget = nil
+	}
+	requestCache.Unlock()
+	dir := filepath.Join(sessions.CodexDir(), "sessions")
+	os.MkdirAll(dir, 0700)
+	for i := range 3 {
+		meta := fmt.Sprintf(`{"type":"session_meta","payload":{"id":"s%d","model_provider":"custom"}}`, i) + "\n" + `{"type":"turn_context","payload":{"model":"m"}}` + "\n"
+		line := fmt.Sprintf(`{"timestamp":%q,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"output_tokens":1},"last_token_usage":{"input_tokens":10,"output_tokens":1}}}}`+"\n", now.Add(-time.Duration(i)*time.Minute).Format(time.RFC3339Nano))
+		os.WriteFile(filepath.Join(dir, fmt.Sprintf("rollout-2026-09-30T00-00-0%d-s%d.jsonl", i, i)), []byte(meta+line), 0600)
+	}
+	chunks := func() int {
+		requestCache.Lock()
+		defer requestCache.Unlock()
+		return len(requestCache.chunks)
+	}
+	trimmed := func() bool {
+		requestCache.Lock()
+		defer requestCache.Unlock()
+		return requestCache.forget != nil
+	}
+	ask := func() {
+		if p := QueryPage(All, Filter{}, 0, 100); p.Total != 3 {
+			t.Fatalf("total %d, want 3", p.Total)
+		}
+	}
+	wait := func(what string, done func() bool) {
+		for deadline := time.Now().Add(10 * time.Second); !done(); {
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: %d chunks kept", what, chunks())
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	ask()
+	requestCache.Lock()
+	requestIdle = time.Millisecond
+	requestCache.Unlock()
+	ask() // the trim comes a millisecond on; the forget an hour after it
+	wait("trimmed", trimmed)
+	if n := chunks(); n != 3 {
+		t.Fatalf("%d chunks kept after the trim within its bound, want 3", n)
+	}
+
+	// an ask after the trim: the forget armed before it lets nothing go
+	requestCache.Lock()
+	requestIdle = time.Hour
+	requestCache.forget.Reset(time.Millisecond)
+	requestCache.asks++ // as an ask that comes as the forget fires
+	requestCache.Unlock()
+	time.Sleep(50 * time.Millisecond)
+	if n := chunks(); n != 3 {
+		t.Fatalf("%d chunks kept after an ask since the trim, want 3", n)
+	}
+
+	requestCache.Lock()
+	requestIdle, requestForget = time.Millisecond, time.Millisecond
+	requestCache.Unlock()
+	ask()
+	wait("forgotten", func() bool { return chunks() == 0 })
+	ask() // read back from the file of them
+}
+
+// A trim that lets most chunks go gives back the map's table too: a map
+// never shrinks, and the forget's trim(0) of a real history's index kept
+// an empty 853 KB table for the life of the process.
+func TestRequestTrimGivesBackTheMap(t *testing.T) {
+	const n = 100000
+	idx := &requestIndex{chunks: make(map[string]*rowChunk)}
+	c := &rowChunk{Bytes: 1, used: new(atomic.Uint64)}
+	keys := make([]string, n) // held, so only the table is measured
+	for i := range n {
+		keys[i] = fmt.Sprint("/s/rollout-", i, ".jsonl")
+		idx.chunks[keys[i]] = c
+	}
+	heap := func() uint64 {
+		runtime.GC()
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+		return m.HeapAlloc
+	}
+	before := heap()
+	idx.trim(0)
+	after := heap()
+	if len(idx.chunks) != 0 {
+		t.Fatalf("%d chunks after trim(0)", len(idx.chunks))
+	}
+	// the table of 100k entries is ~3 MB
+	if after+1<<20 > before {
+		t.Fatalf("heap %d → %d after trim(0): the map's table was kept", before, after)
+	}
+	idx.chunks["/s/kept"] = c // the map is usable after
+	runtime.KeepAlive(keys)
+}
+
+// ForgetPages lets the chunks go at once, the idle timers an hour off,
+// and stops them; the next ask reads them back.
+func TestForgetPagesLetsChunksGoAtOnce(t *testing.T) {
+	pageHome(t)
+	now := holdClock(t, time.Date(2026, 9, 30, 12, 0, 0, 0, time.Local))
+	oldIdle, oldForget := requestIdle, requestForget
+	t.Cleanup(func() {
+		requestCache.Lock()
+		requestIdle, requestForget = oldIdle, oldForget
+		requestCache.Unlock()
+	})
+	cacheBudget(t, 1<<30)
+	requestCache.Lock()
+	requestIdle, requestForget = time.Hour, time.Hour
+	requestCache.Unlock()
+	dir := filepath.Join(sessions.CodexDir(), "sessions")
+	os.MkdirAll(dir, 0700)
+	for i := range 3 {
+		meta := fmt.Sprintf(`{"type":"session_meta","payload":{"id":"s%d","model_provider":"custom"}}`, i) + "\n" + `{"type":"turn_context","payload":{"model":"m"}}` + "\n"
+		line := fmt.Sprintf(`{"timestamp":%q,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"output_tokens":1},"last_token_usage":{"input_tokens":10,"output_tokens":1}}}}`+"\n", now.Add(-time.Duration(i)*time.Minute).Format(time.RFC3339Nano))
+		os.WriteFile(filepath.Join(dir, fmt.Sprintf("rollout-2026-09-30T00-00-0%d-s%d.jsonl", i, i)), []byte(meta+line), 0600)
+	}
+	ask := func() {
+		if p := QueryPage(All, Filter{}, 0, 100); p.Total != 3 {
+			t.Fatalf("total %d, want 3", p.Total)
+		}
+	}
+	ask()
+	requestCache.Lock()
+	had, armed := len(requestCache.chunks), requestCache.idle != nil
+	requestCache.Unlock()
+	if had != 3 || !armed {
+		t.Fatalf("after an ask: %d chunks, idle timer armed %v; want 3, true", had, armed)
+	}
+	if !ForgetPages() {
+		t.Fatal("ForgetPages says nothing went")
+	}
+	requestCache.Lock()
+	left, idle := len(requestCache.chunks), requestCache.idle
+	requestCache.Unlock()
+	if left != 0 || idle != nil {
+		t.Fatalf("after ForgetPages: %d chunks, idle timer %v; want 0, nil", left, idle)
+	}
+	ask() // read back from the file of them, the idle timer armed again
+	requestCache.Lock()
+	armed = requestCache.idle != nil
+	requestCache.Unlock()
+	if !armed {
+		t.Fatal("an ask after ForgetPages armed no idle timer")
 	}
 }

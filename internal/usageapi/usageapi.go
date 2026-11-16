@@ -5,11 +5,14 @@
 package usageapi
 
 import (
+	"cmp"
+	"net/http"
 	"net/url"
 	"os"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/yetone/magpie/internal/access"
 	"github.com/yetone/magpie/internal/provider"
@@ -72,7 +75,28 @@ const PageSessions = 100
 // Usage page asks for: over a long history (Vantiboo1ean, ~750k requests)
 // State sent the page every one of ~84k sessions (22 MB) and worked the
 // summary out again for each refresh.
-func Page(p usage.Period) Usage { return stateOf(usage.SummarizeTop(p, PageSessions)) }
+func Page(p usage.Period) Usage { return PageIn(p, nil) }
+
+// PageIn is Page with the period's days and the chart's hours in zone, the
+// reader's (ZoneOf); nil is this computer's.
+func PageIn(p usage.Period, zone *time.Location) Usage {
+	return stateOf(usage.SummarizeTopIn(p, PageSessions, zone))
+}
+
+// ZoneOf is the reader's time zone, which the Usage page names in ?tz= (its
+// browser's IANA name, as Intl gives it) for its days and hours to be the
+// reader's: magpie web may be read from another zone than the computer's
+// (Outvi V on Discord). This computer's when it names none or one unknown
+// here.
+func ZoneOf(r *http.Request) *time.Location { return usage.Zone(r.URL.Query().Get("tz")) }
+
+// FilterIn is FilterOf with the reader's zone, ZoneOf(r), which its Day and
+// the period's days are read in.
+func FilterIn(r *http.Request) usage.Filter {
+	f := FilterOf(r.URL.Query())
+	f.Zone = ZoneOf(r)
+	return f
+}
 
 func stateOf(s usage.Summary) Usage {
 	out := Usage{Summary: s, Agents: []Group{}, Models: []Group{}, Accounts: []Group{}, Path: Tilde(usage.Path())}
@@ -94,11 +118,13 @@ func stateOf(s usage.Summary) Usage {
 		out.Models = append(out.Models, ug)
 	}
 	// each subscription account's share, by the account that answered
-	// (#557); Name "" is the calls whose record names none, the page
+	// (#557), named as the user named it now (provider.AccountShownOf,
+	// plugins#310): the record keeps the vendor's name, which the user's
+	// is kept by; Name "" is the calls whose record names none, the page
 	// saying "account not recorded"
 	for _, g := range s.Accounts {
 		p := which(g.Provider)
-		ug := Group{Group: g, Name: g.Account, Sub: p.Name, Icon: p.Icon}
+		ug := Group{Group: g, Name: provider.AccountShownOf(g.Provider, g.Account), Sub: p.Name, Icon: p.Icon}
 		out.Accounts = append(out.Accounts, ug)
 	}
 	out.CallerKeys = callerGroups(s)
@@ -116,10 +142,14 @@ func providerFaces(all []provider.Provider) func(id string) Named {
 	for _, p := range all {
 		set[p.ID] = p
 	}
+	renames := provider.UsageRenames()
 	return func(id string) Named {
 		a := Named{ID: id}
 		if p, ok := set[id]; ok && p.Name != "" {
 			a.Name, a.Icon = p.Name, p.Icon
+		} else if d, ok := renames.Gone(id); ok {
+			at := d.At
+			a.Name, a.Icon, a.Deleted = d.Shown(), d.Icon, &at
 		} else if id == usage.UnknownProvider {
 			a.Name = "Local session"
 		} else {
@@ -130,6 +160,13 @@ func providerFaces(all []provider.Provider) func(id string) Named {
 		}
 		if a.Icon == "" {
 			a.Icon = "generic"
+		}
+		// the deleted providers the user merged into it, so the page can
+		// part them again
+		for _, m := range renames.Merged(id) {
+			if d, ok := renames.Gone(m); ok {
+				a.Merged = append(a.Merged, Merged{ID: m, Name: d.Shown()})
+			}
 		}
 		return a
 	}
@@ -155,6 +192,29 @@ func callerGroups(s usage.Summary) []Group {
 	return keys
 }
 
+// inKeyOrder puts the Gateway key filter's keys in the order the user
+// gave the keys on the Gateway page (alextjy on Discord), not by what each
+// used: a key removed since, which the store no longer lists, goes after
+// them, in the order it came. The Overview's list stays a ranking.
+func inKeyOrder(groups []Group) []Group {
+	current, err := access.List()
+	if err != nil {
+		return groups
+	}
+	place := make(map[string]int, len(current))
+	for i, k := range current {
+		place[k.ID] = i
+	}
+	at := func(g Group) int {
+		if i, ok := place[g.CallerKeyID]; ok {
+			return i
+		}
+		return len(current)
+	}
+	slices.SortStableFunc(groups, func(a, b Group) int { return at(a) - at(b) })
+	return groups
+}
+
 // PeriodOf is the period a ?period= names: a preset, or days picked as
 // "2026-10-01..2026-10-07" (#1492); 30 days for anything else.
 func PeriodOf(s string) usage.Period {
@@ -164,9 +224,12 @@ func PeriodOf(s string) usage.Period {
 	return usage.Month
 }
 
+// FilterOf is the filter a request's query names. A found routing group's
+// model is taken as magpie keeps it (group/auto-…), as the menu offers it
+// by its public auto/<model>, so either id picks the group's calls.
 func FilterOf(q url.Values) usage.Filter {
 	id, _ := strconv.ParseInt(q.Get("route"), 10, 64)
-	return usage.Filter{Day: q.Get("day"), RouteID: id, Model: q.Get("model"), Agent: q.Get("agent"), Provider: q.Get("provider"), Purpose: q.Get("purpose"), Account: q.Get("account"), CallerKey: q.Get("callerKey"), Failed: q.Get("failed") == "1", Retried: q.Get("retried") == "1", Query: q.Get("q"), Computer: q.Get("computer"), Through: viaOf(q.Get("via"))}
+	return usage.Filter{Day: q.Get("day"), RouteID: id, Model: provider.CanonicalRef(q.Get("model")), Agent: q.Get("agent"), Provider: q.Get("provider"), Purpose: q.Get("purpose"), Account: q.Get("account"), CallerKey: q.Get("callerKey"), Failed: q.Get("failed") == "1", Retried: q.Get("retried") == "1", Query: q.Get("q"), Computer: q.Get("computer"), Through: viaOf(q.Get("via"))}
 }
 
 // viaOf is the source a request's ?via= names, "" for both.
@@ -189,6 +252,15 @@ type Row struct {
 	PricingModel   string `json:"pricing_model,omitempty"`
 	// ComputerName is the other computer a call was made on, shared through sync (#542)
 	ComputerName string `json:"computerName,omitempty"`
+	// Canceled: its agent canceled it before it was answered
+	// (usage.Record.Canceled), which the page shows as no failure
+	Canceled bool `json:"canceled,omitempty"`
+}
+
+// ModelSpeed is a usage.ModelSpeed with the name the page shows the model by.
+type ModelSpeed struct {
+	usage.ModelSpeed
+	Name string `json:"name"`
 }
 
 type Ledger struct {
@@ -207,6 +279,10 @@ type Ledger struct {
 	By      map[string][]Share `json:"by"`
 	ChartBy map[string][]Share `json:"chartBy,omitempty"`
 	Day     string             `json:"day,omitempty"`
+	// Provider is the one provider the filter keeps, if any: every cost
+	// of the page is of its calls alone, so a page whose currency is "by
+	// provider" shows them in what that provider sells in
+	Provider string `json:"provider,omitempty"`
 	usage.Totals
 	// Through and Direct: the rows the gateway served, and the rows read
 	// from the agents' own session files, which it never saw. Totals is
@@ -226,6 +302,14 @@ type Ledger struct {
 	// Computers: this one ("this", no name) and the others whose usage
 	// sync brought (#542), for the filter; none while there are none
 	Computers []Share `json:"computers,omitempty"`
+	// Speeds: the models of the rows the filter keeps by the median speed
+	// of their requests and of their wait for the first token (usage.ModelSpeed)
+	Speeds []ModelSpeed `json:"speeds"`
+	// SpeedMin is the fewest output tokens a request wrote to count in it
+	SpeedMin int `json:"speed_min"`
+	// BigWrite: the request that wrote the most to the cache, of the rows
+	// the filter keeps
+	BigWrite usage.BigWrite `json:"big_write"`
 }
 
 // Share is a usage.Share with the name and logo the page shows it by.
@@ -236,9 +320,12 @@ type Share struct {
 }
 
 // Account is a subscription account the Account filter offers: its
-// name, and the providers it answered for, by name.
+// name, as the record keeps it and the filter asks by, the name the user
+// gave it in magpie when there is one (plugins#310), and the providers it
+// answered for, by name.
 type Account struct {
 	ID        string   `json:"id"`
+	Name      string   `json:"name,omitempty"`
 	Providers []string `json:"providers"`
 }
 
@@ -246,6 +333,73 @@ type Named struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 	Icon string `json:"icon"`
+	// Deleted is when the provider was deleted, for one whose calls are
+	// kept apart from a provider's added under its id since
+	Deleted *time.Time `json:"deleted,omitempty"`
+	// Merged are the deleted providers whose calls the user merged into
+	// this one (provider.MergeDeleted), by the ids they are kept apart by
+	Merged []Merged `json:"merged,omitempty"`
+}
+
+// Merged is a deleted provider merged into another.
+type Merged struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// namer gives a usage.Row the names the page shows it by: its agent and
+// provider, the account type, and a routing group's public model.
+type namer struct {
+	agents map[string]*Named
+	which  func(string) Named
+	access map[string]string
+	// pub: a group magpie found is named as agents pick it, auto/<model>;
+	// the ledger keeps group/auto-<slug> (provider.CanonicalRef)
+	pub func(string) string
+}
+
+func newNamer() namer {
+	all := provider.All()
+	n := namer{agents: clients(), which: providerFaces(all), access: map[string]string{}, pub: provider.PublicRefs()}
+	for _, pr := range all {
+		if pr.Account != nil {
+			n.access[pr.ID] = "subscription"
+		} else if pr.Key != "" {
+			n.access[pr.ID] = "api"
+		}
+	}
+	return n
+}
+
+func (n namer) who(id string) Named {
+	if a := n.agents[id]; a != nil {
+		return Named{ID: id, Name: a.Name, Icon: a.Icon}
+	}
+	return Named{ID: id, Name: id, Icon: "generic"}
+}
+
+func (n namer) row(r usage.Row, callerLabels, computerNames map[string]string) Row {
+	a := n.who(r.Agent)
+	lr := Row{Row: r, AgentName: a.Name, Icon: a.Icon, ProviderName: n.which(r.Provider).Name, Canceled: r.Canceled()}
+	if n.pub != nil {
+		lr.Model, lr.Requested = n.pub(r.Model), n.pub(r.Requested)
+	}
+	if r.Source != "log" && r.Source != usage.SourceReported {
+		lr.Access = n.access[r.Provider]
+	}
+	if r.Priced && r.OwnCost == nil {
+		if model := provider.PricedNameFor(r.Provider, r.Model); model != r.Model {
+			lr.PricingModel = model
+		}
+	}
+	lr.CallerKeyLabel = callerLabels[r.CallerKeyID]
+	if r.Computer != "" {
+		lr.ComputerName = computerNames[r.Computer]
+		if lr.ComputerName == "" {
+			lr.ComputerName = r.Computer
+		}
+	}
+	return lr
 }
 
 // LedgerPage is one page of the ledger: limit rows (100 when none is
@@ -254,61 +408,22 @@ func LedgerPage(p usage.Period, f usage.Filter, offset, limit int) Ledger {
 	l := usage.QueryPage(p, f, offset, limit)
 	offset = max(0, min(offset, l.Total))
 	page := l.Rows
-	agents := clients()
-	all := provider.All()
-	which := providerFaces(all)
-	access := map[string]string{}
-	for _, pr := range all {
-		if pr.Account != nil {
-			access[pr.ID] = "subscription"
-		} else if pr.Key != "" {
-			access[pr.ID] = "api"
-		}
-	}
-	who := func(id string) Named {
-		if a := agents[id]; a != nil {
-			return Named{ID: id, Name: a.Name, Icon: a.Icon}
-		}
-		return Named{ID: id, Name: id, Icon: "generic"}
-	}
+	names := newNamer()
+	which, who, pub := names.which, names.who, names.pub
 	out := Ledger{Period: p, Rows: make([]Row, 0, len(page)), Offset: offset, Total: l.Total, Totals: l.Sum, Agents: []Named{}, Providers: []Named{}, Accounts: []Account{}}
 	out.Through, out.Direct, out.Reported = l.Through, l.Direct, l.Reported
 	out.Bucket, out.Series = l.Bucket, l.Series
 	out.Purposes = l.Purposes
+	out.BigWrite = l.Big
 	out.Day = f.Day
-	out.CallerKeys = callerGroups(usage.Summary{CallerKeys: l.CallerKeys})
+	out.Provider = f.Provider
+	out.CallerKeys = inKeyOrder(callerGroups(usage.Summary{CallerKeys: l.CallerKeys}))
 	callerLabels := map[string]string{}
 	for _, g := range out.CallerKeys {
 		callerLabels[g.CallerKeyID] = g.Name
 	}
-	// a group magpie found is named as agents pick it, auto/<model>; the
-	// ledger keeps group/auto-<slug> (provider.CanonicalRef)
-	pub := map[string]string{}
 	for _, r := range page {
-		a := who(r.Agent)
-		lr := Row{Row: r, AgentName: a.Name, Icon: a.Icon, ProviderName: which(r.Provider).Name}
-		if req := r.Requested; strings.HasPrefix(req, provider.GroupPrefix) {
-			if _, ok := pub[req]; !ok {
-				pub[req] = provider.PublicRef(req)
-			}
-			lr.Requested = pub[req]
-		}
-		if r.Source != "log" && r.Source != usage.SourceReported {
-			lr.Access = access[r.Provider]
-		}
-		if r.Priced && r.OwnCost == nil {
-			if model := provider.PricedNameFor(r.Provider, r.Model); model != r.Model {
-				lr.PricingModel = model
-			}
-		}
-		lr.CallerKeyLabel = callerLabels[r.CallerKeyID]
-		if r.Computer != "" {
-			lr.ComputerName = l.Names[r.Computer]
-			if lr.ComputerName == "" {
-				lr.ComputerName = r.Computer
-			}
-		}
-		out.Rows = append(out.Rows, lr)
+		out.Rows = append(out.Rows, names.row(r, callerLabels, l.Names))
 	}
 	for _, id := range l.Agents {
 		out.Agents = append(out.Agents, who(id))
@@ -321,14 +436,17 @@ func LedgerPage(p usage.Period, f usage.Filter, offset, limit int) Ledger {
 	at := map[string]int{}
 	for _, g := range l.Accounts {
 		name := which(g.Provider).Name
+		own := provider.AccountLabelOf(g.Provider, g.Account)
 		if i, ok := at[g.Account]; ok {
-			if a := &out.Accounts[i]; !slices.Contains(a.Providers, name) {
+			a := &out.Accounts[i]
+			if !slices.Contains(a.Providers, name) {
 				a.Providers = append(a.Providers, name)
 			}
+			a.Name = cmp.Or(a.Name, own)
 			continue
 		}
 		at[g.Account] = len(out.Accounts)
-		out.Accounts = append(out.Accounts, Account{ID: g.Account, Providers: []string{name}})
+		out.Accounts = append(out.Accounts, Account{ID: g.Account, Name: own, Providers: []string{name}})
 	}
 	// what each is of: the rows of the filter, or, for the dimension the
 	// filter has picked, of the rows without that pick
@@ -369,6 +487,15 @@ func LedgerPage(p usage.Period, f usage.Filter, offset, limit int) Ledger {
 	out.By = sharesJSON(l.By)
 	if l.ChartBy != nil {
 		out.ChartBy = sharesJSON(l.ChartBy)
+	}
+	out.Speeds = []ModelSpeed{}
+	out.SpeedMin = usage.MinRankTokens
+	for _, s := range l.Speeds {
+		name := s.Model
+		if pub != nil {
+			name = pub(name)
+		}
+		out.Speeds = append(out.Speeds, ModelSpeed{ModelSpeed: s, Name: name})
 	}
 	for _, s := range l.Computers {
 		ls := Share{Share: s, Name: l.Names[s.ID]}

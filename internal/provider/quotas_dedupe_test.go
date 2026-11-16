@@ -76,7 +76,7 @@ func TestGLMPlanMatchesZCodePlugin(t *testing.T) {
 	for _, id := range []string{"zcode", "zcode-plugin"} {
 		t.Run(id, func(t *testing.T) {
 			sub := quotaOfPlugin(SubscriptionQuota{Provider: id, User: "me@example.com"}, plugin.Usage{
-				Windows: []plugin.UsageWindow{{Name: "Weekly", Span: 7 * 24 * 60 * 60, ResetsAt: reset.Format(time.RFC3339)}},
+				Windows: []plugin.UsageWindow{{Name: "Weekly", Used: fptr(0), Span: 7 * 24 * 60 * 60, ResetsAt: reset.Format(time.RFC3339)}},
 			})
 			for _, provider := range []string{"zhipu", "zai", "custom-glm"} {
 				plan := SubscriptionQuota{Provider: provider, glmPlan: true, User: "work key",
@@ -108,6 +108,7 @@ func TestPlanLeftOutOfACopy(t *testing.T) {
 // place of the models' drawing on it (the shapes TestAntigravityQuotaPools
 // records): one span per pool window, the pool in its name.
 func TestQuotaReportPoolsAntigravity(t *testing.T) {
+	t.Cleanup(AntigravityBuiltinForTest()) // the retired built-in route
 	now := time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)
 	reset := now.Add(48 * time.Hour)
 	five, week := 5*time.Hour, 7*24*time.Hour

@@ -81,6 +81,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
             const page = await context.newPage();
             t.after(() => page.close());
             page.setDefaultTimeout(6000);
+            page.setDefaultNavigationTimeout(60000);
+            await page.addInitScript(() => { try { localStorage.setItem("magpie.gwConnectFolded", "0"); } catch {} });
             const errors = [];
             page.on("pageerror", (e) => errors.push(e.message));
             await page.route("**/*", server(language, { running: true, mine: true, window: true, models: 0, calls: [], groups: [], ...c.gateway }));

@@ -8,6 +8,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 
 	"golang.org/x/term"
 
@@ -17,21 +18,23 @@ import (
 
 // backupCmd writes every provider, setting, profile and agent model, and
 // the library, to one file sealed with a passphrase:
-// magpie backup [--no-keys] [--no-library] [file].
+// magpie backup [--no-keys] [--no-library] [--sign-ins] [file].
 func backupCmd(args []string) error {
-	keys, lib, file := true, true, ""
+	keys, lib, signIns, file := true, true, false, ""
 	for _, a := range args {
 		switch {
 		case a == "--no-keys":
 			keys = false
 		case a == "--no-library":
 			lib = false
+		case a == "--sign-ins":
+			signIns = true
 		case strings.HasPrefix(a, "-"):
-			return fmt.Errorf("unknown flag %s (magpie backup [--no-keys] [--no-library] [file])", a)
+			return fmt.Errorf("unknown flag %s (magpie backup [--no-keys] [--no-library] [--sign-ins] [file])", a)
 		case file == "":
 			file = a
 		default:
-			return errors.New("usage: magpie backup [--no-keys] [--no-library] [file]")
+			return errors.New("usage: magpie backup [--no-keys] [--no-library] [--sign-ins] [file]")
 		}
 	}
 	if file == "" {
@@ -43,6 +46,11 @@ func backupCmd(args []string) error {
 	}
 	if !lib {
 		b.Library = nil
+	}
+	if signIns {
+		if err := backup.WithSignIns(&b); err != nil {
+			return fmt.Errorf("the sign-ins couldn't be read, so no backup was made: %w", err)
+		}
 	}
 	pass, err := passphrase("Passphrase for the backup: ", true)
 	if err != nil {
@@ -64,13 +72,29 @@ func backupCmd(args []string) error {
 		green.Render("saved"), file, len(b.Providers), what, len(b.Profiles), len(b.Agents))
 	if l := b.Library; l != nil {
 		fmt.Printf("; library: %d MCP servers, %d skills", len(l.MCP), len(l.Skills))
+		if l.Subagents != nil && len(*l.Subagents) > 0 {
+			fmt.Printf(", %d subagents", len(*l.Subagents))
+		}
+		if l.Commands != nil && len(*l.Commands) > 0 {
+			fmt.Printf(", %d slash commands", len(*l.Commands))
+		}
+		if l.Hooks != nil && len(*l.Hooks) > 0 {
+			fmt.Printf(", %d hooks", len(*l.Hooks))
+		}
+	}
+	if s := b.SignIns; s != nil {
+		fmt.Printf("; %d sign-ins", len(s.Logins)+len(s.Plugins))
 	}
 	fmt.Println()
-	fmt.Println(muted.Render("Subscriptions are not in it: sign in to them on the other machine. Keep the passphrase: without it the file can't be opened."))
+	if b.SignIns != nil {
+		fmt.Println(muted.Render("The subscriptions' and plugins' sign-ins are in it, sealed with the passphrase: anyone with the file and the passphrase can use those accounts. Keep the passphrase: without it the file can't be opened."))
+	} else {
+		fmt.Println(muted.Render("Subscriptions are not in it: sign in to them on the other machine (or back up with --sign-ins). Keep the passphrase: without it the file can't be opened."))
+	}
 	return nil
 }
 
-// restoreCmd puts a backup in: magpie restore [--no-agents] [--no-library] <file>.
+// restoreCmd puts a backup in: magpie restore [--no-agents] [--no-library] [--no-sign-ins] <file>.
 func restoreCmd(args []string) error {
 	parts, file := backup.All, ""
 	for _, a := range args {
@@ -79,16 +103,18 @@ func restoreCmd(args []string) error {
 			parts.Agents = false
 		case a == "--no-library":
 			parts.Library = false
+		case a == "--no-sign-ins":
+			parts.SignIns = false
 		case strings.HasPrefix(a, "-"):
-			return fmt.Errorf("unknown flag %s (magpie restore [--no-agents] [--no-library] <file>)", a)
+			return fmt.Errorf("unknown flag %s (magpie restore [--no-agents] [--no-library] [--no-sign-ins] <file>)", a)
 		case file == "":
 			file = a
 		default:
-			return errors.New("usage: magpie restore [--no-agents] [--no-library] <file>")
+			return errors.New("usage: magpie restore [--no-agents] [--no-library] [--no-sign-ins] <file>")
 		}
 	}
 	if file == "" {
-		return errors.New("usage: magpie restore [--no-agents] [--no-library] <file>")
+		return errors.New("usage: magpie restore [--no-agents] [--no-library] [--no-sign-ins] <file>")
 	}
 	data, err := os.ReadFile(file)
 	if err != nil {
@@ -113,6 +139,12 @@ func restoreCmd(args []string) error {
 	fmt.Printf("; %d profiles; %d agent settings changed", r.Profiles, r.Agents)
 	if r.Library {
 		fmt.Print("; library")
+	}
+	if s := r.SignIns; s != nil {
+		fmt.Printf("; sign-ins: %d added, %d updated, %d kept as they are here", s.Added, s.Updated, s.Kept)
+		if s.Codex {
+			fmt.Print(" (Codex signed in)")
+		}
 	}
 	fmt.Println()
 	if len(r.NeedKey) > 0 {
@@ -143,15 +175,33 @@ func passphrase(prompt string, confirm bool) (string, error) {
 }
 
 // stdin is read through one reader, so a second secret piped in is the
-// second line and not lost to the first one's buffer.
-var stdin = bufio.NewReader(os.Stdin)
+// second line and not lost to the first one's buffer. The reader is made
+// over os.Stdin as it is when first read, never at package init: package
+// variables are set before any init runs, and on Windows the desktop
+// build's init (console_windows.go) only then swaps in the terminal's
+// CONIN$. A reader made earlier keeps the invalid handle, and every
+// prompt fails with "read /dev/stdin: The handle is invalid".
+var (
+	stdinMu   sync.Mutex
+	stdinFile *os.File
+	stdinBuf  *bufio.Reader
+)
+
+func stdin() *bufio.Reader {
+	stdinMu.Lock()
+	defer stdinMu.Unlock()
+	if stdinBuf == nil || stdinFile != os.Stdin {
+		stdinFile, stdinBuf = os.Stdin, bufio.NewReader(os.Stdin)
+	}
+	return stdinBuf
+}
 
 // secret reads what (a passphrase, a password) as passphrase does; piped
 // in, it is the next line of stdin.
 func secret(what, prompt string, confirm bool) (string, error) {
 	fd := int(os.Stdin.Fd())
 	if !term.IsTerminal(fd) {
-		line, err := stdin.ReadString('\n')
+		line, err := stdin().ReadString('\n')
 		line = strings.TrimRight(line, "\r\n")
 		if line == "" {
 			if err != nil {

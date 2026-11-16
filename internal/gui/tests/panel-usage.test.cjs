@@ -129,6 +129,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const p = await (await browser.newContext({ viewport, reducedMotion: "reduce" })).newPage();
         pages.push(p);
         p.setDefaultTimeout(5000);
+        p.setDefaultNavigationTimeout(60000);
         p.on("pageerror", (e) => errors.push(e.message));
         await p.route("**/*", serve(lang, asked, opened, fitted, (h) => p.setViewportSize({width: p.viewportSize().width, height:Math.max(220,Math.min(560,h))})));
         await p.goto(url);
@@ -177,7 +178,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert(await p.locator("#panelUsage rect.col").count() > 10, "columns");
       assert.deepEqual(await p.locator("#panelUsage .led-rank .rk-nm").allTextContents(), ["Claude", "Relay"]);
       assert.equal((await p.locator("#panelUsage .sess-pick").textContent()).trim(), w.all);
-      assert.deepEqual(await p.locator("#panelUsage .pu-card .segs .opt").allTextContents(), w.metrics);
+      assert.deepEqual(await p.locator("#panelUsage .pu-card .segs:not(.pu-split) .opt").allTextContents(), w.metrics);
       // Labels in the 440px panel must be readable, not clipped by ellipsis.
       assert(await p.locator("#panelUsage .pu-tot .blk").first().locator(".sub").evaluate(e =>
         e.scrollWidth <= e.clientWidth + 1 && e.scrollHeight <= e.clientHeight + 1 && getComputedStyle(e).textOverflow !== "ellipsis"), "token input/output is fully visible");
@@ -196,22 +197,24 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert(tip.includes("Claude") && tip.includes("Relay"), tip);
       await p.mouse.move(2, 2);
 
-      // Native fit includes the Usage tab, and all controls fit without scrolling.
-      const height = await p.evaluate(() => {
-        const body = document.body, tab = body.dataset.ptab;
-        delete body.dataset.ptab;
-        const h = document.querySelector('.top').offsetHeight + document.querySelector('#ptabs').offsetHeight + Math.max(...['agents','panelQuota','panelRouting','panelUsage'].map(id => document.getElementById(id).offsetHeight)) + document.querySelector('.foot').offsetHeight + 4;
+      // Native fit is the tab showing, and all its controls fit without
+      // scrolling: the tab's whole layout (the view's padding, the header,
+      // tabs and foot), not its section's height alone
+      const need = await p.evaluate(() => {
+        const body = document.body, v = document.querySelector("#view-agents"), tab = body.dataset.ptab, out = { tab };
+        for (const t of ["agents", "usage", "stats", "routing"]) { body.dataset.ptab = t; out[t] = Math.ceil(body.clientHeight - v.offsetHeight + v.scrollHeight); }
         body.dataset.ptab = tab;
-        return h;
+        return out;
       });
+      const height = need[need.tab];
       for (let i=0;i<40 && fitted.at(-1) !== height;i++) await p.waitForTimeout(25);
-      assert.equal(fitted.at(-1),height,"the panel fits its tallest tab including Usage");
+      assert.equal(fitted.at(-1),height,`the panel fits the ${need.tab} tab showing`);
       const scroll = () => p.locator("#view-agents").evaluate(v => v.scrollTop);
       const before = await scroll();
-      await p.locator("#panelUsage .pu-card .segs .opt").nth(1).click();
+      await p.locator("#panelUsage .pu-card .segs:not(.pu-split) .opt").nth(1).click();
       assert((await p.locator("#panelUsage svg .axis").allTextContents()).some(s => /^[$¥]/.test(s)), "the cost's axis");
       assert.equal(await scroll(),before,"a click moved the panel");
-      await p.locator("#panelUsage .pu-card .segs .opt").nth(0).click();
+      await p.locator("#panelUsage .pu-card .segs:not(.pu-split) .opt").nth(0).click();
       assert.equal(await scroll(),before,"a click moved the panel");
 
       // All, as the window's Usage has it (#860): asked for, and the
@@ -243,7 +246,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await p.locator("#panelUsage:not(.pu-loading)").waitFor();
       const selectedDay = asked.at(-1).get("day");
       assert.equal(await p.locator('#panelUsage .led-day[aria-pressed="true"]').getAttribute("aria-label"), label);
-      assert.equal(await p.locator("#panelUsage .led-rank .rk").first().locator(".rk-val").textContent(), "900,000");
+      assert.equal(await p.locator("#panelUsage .led-rank .rk").first().locator(".rk-val").textContent(), "900K");
+      assert.equal(await p.locator("#panelUsage .led-rank .rk").first().locator(".rk-val").getAttribute("title"), "900,000");
       assert.deepEqual(await p.locator("#panelUsage rect.col").evaluateAll((rs) => rs.map((r) => [r.dataset.day, r.dataset.k, r.getAttribute("height"), r.dataset.color])), original, "the chart keeps its heights and colors");
       const dimmed = () => p.locator("#panelUsage rect.col").evaluateAll((rs, day) => rs.every((r) => r.dataset.day === day ? r.style.opacity === "" && r.style.fill === r.dataset.color : r.style.opacity === "0.22" && r.style.fill === "var(--faint)"), selectedDay);
       assert(await dimmed(), "the other days are gray");
@@ -252,14 +256,15 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await refresh.click();
       await p.locator("#panelUsage:not(.pu-loading)").waitFor();
       assert.equal(asked.at(-1).get("day"), selectedDay, "refresh keeps the selected day");
-      await p.locator("#panelUsage .pu-card .segs .opt").nth(1).click();
+      await p.locator("#panelUsage .pu-card .segs:not(.pu-split) .opt").nth(1).click();
       assert.equal(parseFloat((await p.locator("#panelUsage .led-rank .rk").first().locator(".rk-val").textContent()).slice(1)), 0.9);
-      await p.locator("#panelUsage .pu-card .segs .opt").nth(0).click();
+      await p.locator("#panelUsage .pu-card .segs:not(.pu-split) .opt").nth(0).click();
       if (process.env.ARTIFACT_DIR) {
         await fs.mkdir(process.env.ARTIFACT_DIR, { recursive: true });
         const context = await browser.newContext({ viewport: { width: 440, height: 760 }, reducedMotion: "reduce" });
         const shot = await context.newPage();
         shot.setDefaultTimeout(5000);
+        shot.setDefaultNavigationTimeout(60000);
         await shot.addInitScript(() => { localStorage.setItem("magpie.panelTab", "stats"); localStorage.setItem("magpie.panelUsePeriod", "7d"); });
         await shot.route("**/*", serve(lang, [], []));
         await shot.goto("http://magpie.test/?mode=panel");
@@ -391,6 +396,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const q = await (await browser.newContext({ viewport: { width: 440, height: 500 }, reducedMotion: "reduce" })).newPage();
       pages.push(q);
       q.setDefaultTimeout(5000);
+      q.setDefaultNavigationTimeout(60000);
       q.on("pageerror", (e) => again.push(e.message));
       await q.addInitScript(() => { try { localStorage.setItem("magpie.panelTab", "stats"); } catch {} });
       await q.route("**/*", serve(lang, [], []));

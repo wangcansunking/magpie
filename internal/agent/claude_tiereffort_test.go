@@ -65,7 +65,7 @@ func TestClaudeTierEffort(t *testing.T) {
 	if a.Field("haiku").Get() != "v/flash" || a.Field("haiku_effort").Get() != "low" || a.Field("sonnet_effort").Get() != "" {
 		t.Fatalf("read back: %v", a.Values())
 	}
-	if v, _ := edit.GetJSON(path, "model"); v != "v/glm" || env("ANTHROPIC_MODEL") != "" || a.Field("effort").Get() != "high" || env("ANTHROPIC_DEFAULT_OPUS_MODEL") != "v/glm" {
+	if v := writtenModel(path); v != "v/glm" || env("ANTHROPIC_MODEL") != "" || a.Field("effort").Get() != "high" || env("ANTHROPIC_DEFAULT_OPUS_MODEL") != "v/glm" {
 		t.Fatalf("the main model's effort changed: %v", a.Values())
 	}
 	// a tier following the main model, at another effort
@@ -106,30 +106,36 @@ func TestClaudeTierEffort(t *testing.T) {
 		t.Fatal("a level that isn't one should fail")
 	}
 
-	// subagents: at an effort of their own on the main model, then on one of
-	// their own, kept through a new main model
+	// subagents: an effort with no model of their own is kept unwritten
+	// (the main model at it pinned every subagent there), and applied once
+	// they have one; see TestClaudeSubagentEffortNeedsAModel
 	set("opus", "")
 	set("opus_effort", "")
 	if env("CLAUDE_CODE_SUBAGENT_MODEL") != "" {
 		t.Fatalf("subagents follow: %v", a.Values())
 	}
 	set("subagent_effort", "low")
-	if env("CLAUDE_CODE_SUBAGENT_MODEL") != "v/flash:low" || a.Field("subagent").Get() != "" || a.Field("subagent_effort").Get() != "low" {
-		t.Fatalf("subagents at low: %v", a.Values())
+	if env("CLAUDE_CODE_SUBAGENT_MODEL") != "" || a.Field("subagent").Get() != "" || a.Field("subagent_effort").Get() != "" {
+		t.Fatalf("subagents at low with no model: %v", a.Values())
 	}
 	set("model", "v/glm")
-	if env("CLAUDE_CODE_SUBAGENT_MODEL") != "v/glm:low" || a.Field("subagent").Get() != "" {
-		t.Fatalf("subagents follow the new model at low: %v", a.Values())
+	if env("CLAUDE_CODE_SUBAGENT_MODEL") != "" || a.Field("subagent").Get() != "" {
+		t.Fatalf("subagents follow the new model: %v", a.Values())
 	}
 	set("subagent", "v/flash")
-	if env("CLAUDE_CODE_SUBAGENT_MODEL") != "v/flash:low" || a.Field("subagent").Get() != "v/flash" {
+	if env("CLAUDE_CODE_SUBAGENT_MODEL") != "v/flash:low" || a.Field("subagent").Get() != "v/flash" || a.Field("subagent_effort").Get() != "low" {
 		t.Fatalf("subagents on flash at low: %v", a.Values())
 	}
 	set("subagent", "")
-	set("subagent_effort", "")
 	if env("CLAUDE_CODE_SUBAGENT_MODEL") != "" || a.Field("subagent_effort").Get() != "" {
 		t.Fatalf("subagents back: %v", a.Values())
 	}
+	set("subagent_effort", "")
+	set("subagent", "v/flash")
+	if env("CLAUDE_CODE_SUBAGENT_MODEL") != "v/flash" || a.Field("subagent_effort").Get() != "" {
+		t.Fatalf("subagents on flash, effort cleared: %v", a.Values())
+	}
+	set("subagent", "")
 	// back to Claude Code as installed: nothing of magpie's left
 	set("model", "")
 	for _, k := range claudeEnv {

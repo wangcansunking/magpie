@@ -24,6 +24,9 @@ func desktopFiles(t *testing.T, h string) (string, string) {
 	p3 := filepath.Join(d, "Claude-3p", "claude_desktop_config.json")
 	if runtime.GOOS == "windows" {
 		p3 = filepath.Join(h, "AppData", "Local", "Claude-3p", "claude_desktop_config.json")
+		// on Windows Desktop is here when its program is
+		// (agent.DesktopApp), not its folders
+		write(t, filepath.Join(h, "AppData", "Local", "AnthropicClaude", "claude.exe"), "")
 	}
 	for _, file := range []string{p, p3} {
 		rel, err := filepath.Rel(h, file)

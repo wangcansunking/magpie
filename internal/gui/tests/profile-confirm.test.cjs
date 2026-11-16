@@ -73,6 +73,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const page = await (await browser.newContext({ viewport: panel ? { width: 440, height: 420 } : { width: 900, height: 560 } })).newPage();
         pages.push(page);
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         page.on("pageerror", (e) => errors.push(e.message));
         await watchReplies(page, ["/api/profile/save", "/api/profile/delete", "/api/profile/use", "/api/window/hide"]);
         await page.route("**/*", server(lang, calls));

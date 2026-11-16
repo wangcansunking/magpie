@@ -14,22 +14,106 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/filememo"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/settings"
 )
 
-// Prompt is Codex's generic system prompt (Apache-2.0, openai/codex,
-// core/gpt-5.2-codex_prompt.md). Third-party models need one because the
-// bundled catalog only carries prompts for OpenAI models.
+// Prompt is what Codex itself sends as the instructions of a model its
+// catalog doesn't list (Apache-2.0, openai/codex rust-v0.166.0,
+// models-manager/prompt.md: BASE_INSTRUCTIONS, model_info_from_slug). A
+// model_catalog_json entry has to carry its own (Codex fails the whole
+// catalog on one with neither base_instructions nor
+// model_messages.instructions_template), so a model no official entry
+// matches carries this one, as official Codex would send for it. Until
+// 11-01 every third-party model got core/gpt-5.2-codex_prompt.md, a GPT-5.2
+// prompt Codex no longer sends for any model (#3759, #4008, #4783).
 //
 //go:embed codex_prompt.md
 var Prompt string
+
+// bundled is the instructions of each model in Codex's own bundled catalog
+// (rust-v0.166.0, models-manager/models.json: model_messages'
+// instructions_template), by slug, word for word; TestBundledIsCodexOwn
+// checks it against that file in testdata.
+//
+//go:embed codex_instructions.json
+var bundledJSON []byte
+
+// It is read the first time a model asks, not at launch: ~0.5 MB a
+// launch that writes no Codex catalog (`magpie statusline`) never uses.
+var bundled = sync.OnceValue(func() map[string]string {
+	var b struct {
+		Instructions map[string]string `json:"instructions"`
+	}
+	if err := json.Unmarshal(bundledJSON, &b); err != nil {
+		panic(err)
+	}
+	return b.Instructions
+})
+
+// longestPrefix is the slug of slugs Codex takes a model's entry from:
+// the longest one the model's id starts with (codex-rs models-manager
+// find_model_by_longest_prefix), so a dated snapshot or a -mini of a
+// model takes that model's. "" when none.
+func longestPrefix(id string, slugs func(func(string) bool)) string {
+	best := ""
+	for s := range slugs {
+		if s != "" && strings.HasPrefix(id, s) && len(s) > len(best) {
+			best = s
+		}
+	}
+	return best
+}
+
+// officialFor is the instructions official Codex sends for the model a
+// magpie model serves, and the model_messages they come with, never a
+// word of magpie's. The model is the id's own model (mycpa/gpt-6-astra,
+// openai/gpt-6-astra on a relay, a found auto/gpt-6.1-sol), matched as
+// Codex matches a slug (longestPrefix) against Codex's own entries: those
+// of the ChatGPT account it last listed (models_cache.json, own), which
+// are this Codex version's and carry model_messages too, else its bundled
+// catalog's (bundled, instructions alone, whose model_messages may not be
+// the shape an older Codex reads). A routing group may hand a turn to any
+// model, and a model no entry matches is unknown to Codex: both get
+// Prompt, Codex's for an unknown model.
+func officialFor(own map[string]map[string]any, id string) (string, map[string]any) {
+	if strings.HasPrefix(id, "group/") {
+		return Prompt, nil
+	}
+	slug := strings.ToLower(id[strings.LastIndex(id, "/")+1:])
+	if s := longestPrefix(slug, maps.Keys(own)); s != "" {
+		e := own[s]
+		msgs, _ := e["model_messages"].(map[string]any)
+		text, _ := e["base_instructions"].(string)
+		if text == "" {
+			text, _ = msgs["instructions_template"].(string)
+		}
+		if text != "" {
+			return text, msgs
+		}
+	}
+	if s := longestPrefix(slug, maps.Keys(bundled())); s != "" {
+		return bundled()[s], nil
+	}
+	return Prompt, nil
+}
+
+// Official is the instructions official Codex sends for the OpenAI model
+// slug when no list of the account's carries them: its bundled catalog's
+// entry for it (matched as Codex matches a slug), else Codex's prompt for
+// an unknown model.
+func Official(slug string) string {
+	text, _ := officialFor(nil, slug)
+	return text
+}
 
 // DefaultEffort picks the middle of the road: "medium" or "high" when
 // offered, else whatever the list starts with.
@@ -82,11 +166,40 @@ func TakesEffort(ms []catalog.Model, id string) string {
 		return ""
 	}
 	slug, chatgpt := strings.CutPrefix(id, "codex/")
-	if raw, ok := CacheEntries()[slug]; ok && (chatgpt || slug == id) {
-		d, _ := raw["default_reasoning_level"].(string)
+	if d, ok := cacheLevels()[slug]; ok && (chatgpt || slug == id) {
 		return d
 	}
 	return DefaultEffort(e)
+}
+
+// cacheLevels is the default_reasoning_level of each of CacheEntries'
+// models, read again only when models_cache.json changes: the window's
+// Codex effort field asks TakesEffort per model every 15s poll, and
+// reading and decoding the whole cache each time was 238 MB of what a
+// live magpie allocated in 37 minutes. Shared: read only.
+func cacheLevels() map[string]string {
+	levels, _ := filememo.Read("codex cache levels", catalog.CodexModelsCache(), func(b []byte) (map[string]string, error) {
+		var cache struct {
+			ETag   string `json:"etag"`
+			Models []struct {
+				Slug        string `json:"slug"`
+				Description string `json:"description"`
+				Level       any    `json:"default_reasoning_level"`
+			} `json:"models"`
+		}
+		if err := json.Unmarshal(b, &cache); err != nil {
+			return nil, err
+		}
+		out := map[string]string{}
+		for _, m := range cache.Models {
+			// as CacheEntries keeps them; a level that isn't a string is none
+			if m.Slug != "" && !catalog.MagpieAdded(cache.ETag, m.Slug, m.Description) {
+				out[m.Slug], _ = m.Level.(string)
+			}
+		}
+		return out, nil
+	})
+	return levels
 }
 
 // Catalog renders models as a whole models.json, for the effort this
@@ -96,16 +209,29 @@ func Catalog(ms []catalog.Model) []byte { return CatalogAt(ms, NewSessionEffort(
 // CatalogAt renders models as a whole models.json for a Codex that starts
 // new sessions at effort ("" for its models' own defaults): each model's
 // default_reasoning_level is ModelDefault's.
-func CatalogAt(ms []catalog.Model, effort string) []byte {
+func CatalogAt(ms []catalog.Model, effort string) []byte { return CatalogUsed(ms, effort, nil) }
+
+// CatalogUsed is CatalogAt with the models Codex used, most recent first,
+// and a ChatGPT account's own (ChatGPTOwn), kept where the Codex app reads
+// them (FitOwn).
+func CatalogUsed(ms []catalog.Model, effort string, used []string) []byte {
+	entries := entriesAt(ms, 0, effort)
+	FitOwn(entries, used, ChatGPTOwn)
 	out := struct {
 		Models []any `json:"models"`
-	}{Models: entriesAt(ms, 0, effort)}
+	}{Models: entries}
 	if out.Models == nil {
 		out.Models = []any{}
 	}
 	b, _ := json.MarshalIndent(out, "", " ")
 	return b
 }
+
+// ChatGPTOwn reports whether slug is a ChatGPT account's own model in
+// magpie's list for Codex (codex/<slug>): Codex's own GPT models, for a
+// Codex that reaches them through magpie, which FitOwn keeps in the first
+// AppList.
+func ChatGPTOwn(slug string) bool { return strings.HasPrefix(slug, "codex/") }
 
 // level, tier and model are an entry of models.json as Entries writes it.
 type level struct {
@@ -118,29 +244,47 @@ type tier struct {
 	Description string `json:"description"`
 }
 type model struct {
-	Slug          string  `json:"slug"`
-	DisplayName   string  `json:"display_name"`
-	Description   string  `json:"description"`
-	Instructions  string  `json:"base_instructions"`
-	DefaultEffort *string `json:"default_reasoning_level"`
-	Efforts       []level `json:"supported_reasoning_levels"`
-	Shell         string  `json:"shell_type"`
-	Visibility    string  `json:"visibility"`
-	InAPI         bool    `json:"supported_in_api"`
-	Priority      int     `json:"priority"`
-	Verbosity     bool    `json:"support_verbosity"`
-	DefVerbosity  *string `json:"default_verbosity"`
-	ApplyPatch    string  `json:"apply_patch_tool_type"`
+	Slug         string `json:"slug"`
+	DisplayName  string `json:"display_name"`
+	Description  string `json:"description"`
+	Instructions string `json:"base_instructions"`
+	// the model_messages of the official entry Instructions came from,
+	// when that is one Codex itself was handed (officialFor): the rest of
+	// what official Codex sends that model, as it sends it
+	Messages      map[string]any `json:"model_messages,omitempty"`
+	DefaultEffort *string        `json:"default_reasoning_level"`
+	Efforts       []level        `json:"supported_reasoning_levels"`
+	Shell         string         `json:"shell_type"`
+	Visibility    string         `json:"visibility"`
+	InAPI         bool           `json:"supported_in_api"`
+	Priority      int            `json:"priority"`
+	Verbosity     bool           `json:"support_verbosity"`
+	DefVerbosity  *string        `json:"default_verbosity"`
+	ApplyPatch    string         `json:"apply_patch_tool_type"`
 	Truncation    struct {
 		Mode  string `json:"mode"`
 		Limit int    `json:"limit"`
 	} `json:"truncation_policy"`
 	Tools      []string `json:"experimental_supported_tools"`
 	Modalities []string `json:"input_modalities"`
-	Context    *int     `json:"context_window,omitempty"`
-	// the model's whole window when Context is the working one
-	// (settings.Working): Codex's model_context_window may raise it
-	// that far, as it does OpenAI's own models'
+	// the model's whole window, which Codex shows (95% of it) as the
+	// context the conversation has
+	Context *int `json:"context_window,omitempty"`
+	// the share of the window Codex counts as the conversation's room, as
+	// every entry of its own catalog says (95): an entry without it left
+	// a newer Codex with no limit to compact against, so a long
+	// conversation ran into the vendor's "too long" (codealc on X)
+	EffectivePct int `json:"effective_context_window_percent"`
+	// where Codex compacts the conversation when that is before the
+	// window: the threshold set on the model or its provider, else
+	// Long conversations' (settings.Working). Codex compacts at the
+	// lesser of this and 90% of Context, and a
+	// model_auto_compact_token_limit the user put in config.toml comes
+	// before it. Until 10-30 the threshold went in Context, so a 1M
+	// model showed 258K in Codex (01huadalang on Discord).
+	AutoCompact *int `json:"auto_compact_token_limit,omitempty"`
+	// never written now; kept a field so it is one magpie owns, and
+	// Keep doesn't carry an old catalog's over
 	MaxContext *int   `json:"max_context_window,omitempty"`
 	Tiers      []tier `json:"service_tiers"`
 	// Without the search, Codex puts every MCP tool's schema (a
@@ -181,6 +325,28 @@ type model struct {
 	// the model Codex's auto-review runs on, settings.CodexAutoReview
 	// (see AutoReview)
 	AutoReview string `json:"auto_review_model_override,omitempty"`
+	// "none" on a DeepSeek model, as DeepSeek's own Codex setup says (see
+	// deepSeek); Codex's default, auto, otherwise, where a value the user
+	// put in by hand stays (Keep).
+	Summary string `json:"default_reasoning_summary,omitempty" keep:"unset"`
+	// Codex may send an image at its original detail: on a DeepSeek model
+	// that takes images, as DeepSeek's setup says. A true the user put in
+	// stays (Keep).
+	DetailOriginal bool `json:"supports_image_detail_original,omitempty" keep:"true"`
+}
+
+// deepSeekModel is a DeepSeek model of the V4 line on any host
+// (deepseek/deepseek-v4-pro, a relay's deepseek-ai/deepseek-v4-pro-0813,
+// DeepSeek's own deepseek-flash, a found auto/deepseek-flash), named by
+// the model's own id after its provider's. A routing group is not one: it
+// may hand the turn to any model.
+var deepSeekModel = lazyre.New(`(?i)^deepseek-(v[4-9]|v\d\d|flash|pro|chat|reasoner)`)
+
+func deepSeek(id string) bool {
+	if strings.HasPrefix(id, "group/") {
+		return false
+	}
+	return deepSeekModel.MatchString(id[strings.LastIndex(id, "/")+1:])
 }
 
 // Entries renders models as models.json entries, ranked after the first
@@ -194,11 +360,12 @@ func Entries(ms []catalog.Model, after int) []any {
 func entriesAt(ms []catalog.Model, after int, effort string) []any {
 	own := CacheEntries()
 	v1 := V1()
-	work := settings.Load()
+	work := settings.Load().ForAgent("codex")
+	autoReview := AutoReviewModel()
 	var entries []any
 	for i, m := range ms {
 		if raw, ok := own[strings.TrimPrefix(m.ID, "codex/")]; ok && strings.HasPrefix(m.ID, "codex/") {
-			e := ownEntry(raw, m.ID, m.Name, after+i+1)
+			e := ownEntry(raw, m.ID, shownName(m), after+i+1)
 			// the window as magpie resolves it — the one the user set,
 			// else the account's list's — not the cache's, which is what
 			// magpie last handed Codex (#674)
@@ -206,24 +373,32 @@ func entriesAt(ms []catalog.Model, after int, effort string) []any {
 			if v1 {
 				Stamp(e)
 			}
-			AutoReview(e)
+			AutoReview(e, autoReview)
 			entries = append(entries, e)
 			continue
 		}
+		if e, ok := listedEntry(m, after+i+1, work, autoReview, v1, effort); ok {
+			entries = append(entries, e)
+			continue
+		}
+		text, msgs := officialFor(own, m.ID)
 		e := model{
-			Slug: m.ID, DisplayName: m.Name, Description: m.Name + " via magpie",
-			Instructions: Prompt, Efforts: []level{},
+			Slug: m.ID, DisplayName: shownName(m), Description: m.Name + " via magpie",
+			Instructions: text, Messages: msgs, Efforts: []level{},
 			Shell: "unified_exec", Visibility: "list", InAPI: true, Priority: after + i + 1,
 			ApplyPatch: "freeform", Tools: []string{}, Modalities: []string{"text"},
 			Tiers: []tier{}, SearchTool: true, Parallel: true,
-			AutoReview: work.CodexAutoReview,
+			AutoReview: autoReview, EffectivePct: effectivePct,
+		}
+		if e.AutoReview == settings.CodexAutoReviewSession {
+			e.AutoReview = m.ID
 		}
 		// Fast mode: a ChatGPT account's GPT model Codex has no entry for,
 		// or a group one is in, gets the tier Codex's own catalog gives its
 		// GPT models
 		if slug, ok := strings.CutPrefix(m.ID, "codex/"); m.Fast || ok && strings.HasPrefix(slug, "gpt-") {
 			e.Tiers = append(e.Tiers, fastTier)
-		} else if m.OwnTier {
+		} else if m.OwnTier && (len(m.Tiers) == 0 || len(ownTiers(own, m)) > 0) {
 			e.Tiers = ownTiers(own, m)
 		} else if len(m.Tiers) > 0 {
 			// another magpie's model: the tiers it offers its own Codex
@@ -231,8 +406,10 @@ func entriesAt(ms []catalog.Model, after int, effort string) []any {
 			e.Tiers = namedTiers(own, m.Tiers)
 		}
 		// an OpenAI model: a ChatGPT account's (codex/), or a group one is
-		// in (Fast, see provider.codexListed)
-		if v1 && (strings.HasPrefix(m.ID, "codex/") || m.Fast) {
+		// in (Fast, see provider.codexListed), or one a provider that seals
+		// a V2 lead's subagent tasks serves (Seals: a relay of the ChatGPT
+		// backend)
+		if v1 && (strings.HasPrefix(m.ID, "codex/") || m.Fast || m.Seals) {
 			e.MultiAgent = "v1"
 		} else if m.AgentsV2 {
 			e.MultiAgent = "v2"
@@ -245,22 +422,72 @@ func entriesAt(ms []catalog.Model, after int, effort string) []any {
 			// (KimYx0207 on X). The description still ends " via magpie",
 			// which is how its entry is told from Codex's own
 			// (catalog.MagpieAdded)
-			e.Description = m.Name + " (text only: Accepts images is in its provider's Names & levels in magpie) via magpie"
+			e.Description = m.Name + " (text only: Accepts images is in its provider's Model settings in magpie) via magpie"
 		}
 		if c := m.Context; c > 0 {
 			// the model's or its provider's threshold, else the one for
-			// every model (#876); one at or above c is its whole window
-			w := work.Working(c)
+			// every model (#876), which by default holds an OpenAI model
+			// to the window Codex's own catalog does (Working: GPT-6.1
+			// Terra's 500K, @flower__daisy on X); one at or above c is
+			// its whole window.
+			// A DeepSeek model too, though DeepSeek's own Codex setup
+			// compacts at none of its 1M: magpie's 272K came of a
+			// DeepSeek report (e950eb080: turns of ~550K waited 70-90s
+			// for a first token), and Full window or the model's own
+			// Compact at gives it the whole window
+			w := Working(work, m.ID, c)
 			if m.Compact > 0 {
 				w = min(c, m.Compact)
 			}
-			e.Context = &w
+			e.Context = &c
 			if w < c {
-				e.MaxContext = &c
+				e.AutoCompact = &w
 			}
+		} else if w := cmp.Or(m.Compact, unknownWorking(work, m.ID)); w > 0 {
+			// a window magpie doesn't know (a relay listing none, a
+			// model models.dev lacks): Codex compacts at no point on an
+			// entry with neither a window nor a limit, and after the
+			// vendor's "too long" it only errors again until a manual
+			// /compact (jiangguochao666 on X). The threshold alone is
+			// one Codex compacts at (ModelInfo::auto_compact_token_limit)
+			e.AutoCompact = &w
 		}
 		e.Truncation.Mode, e.Truncation.Limit = "tokens", 10000
-		for _, ef := range m.Efforts {
+		if deepSeek(m.ID) {
+			// as DeepSeek's own Codex setup has its models (its
+			// models.json; Rollkey8 on X): shell_command, the one-shot
+			// shell tool of a Codex before 0.16x (0.165 reads it as
+			// unified_exec, its only one); low verbosity;
+			// no reasoning summary asked for (DeepSeek streams its
+			// reasoning as text); Codex's agents in V2; an image at its
+			// original detail. Its prompt (base_instructions) is not
+			// taken: magpie never rewrites a model's Codex prompt.
+			e.Shell = "shell_command"
+			low := "low"
+			e.Verbosity, e.DefVerbosity = true, &low
+			e.Summary = "none"
+			if e.MultiAgent == "" {
+				e.MultiAgent = "v2"
+			}
+			// The original detail only on DeepSeek's own API: a relay's
+			// may refuse it, as OpenCode Go does with 400 "invalid image
+			// detail" (qiu_eth)
+			e.DetailOriginal = m.Images && strings.HasPrefix(m.ID, "deepseek/")
+		}
+		levels := m.Efforts
+		if ultraHere(m) {
+			// Codex's Ultra on a model of another vendor's (pingqipai3
+			// on X): Codex sends the model its own top level for it, max
+			// or the highest it lists below (ModelInfo::
+			// resolve_reasoning_effort), so the model is asked nothing it
+			// doesn't take, and in V2 its lead hands parts of the task to
+			// agents of its own unasked (multi_agents.rs: Proactive at
+			// Ultra, ExplicitRequestOnly otherwise). A magpie-served lead
+			// writes their tasks as text, as Copilot's Ultra does (#656)
+			levels = append(slices.Clone(levels), "ultra")
+			e.MultiAgent = "v2"
+		}
+		for _, ef := range levels {
 			e.Efforts = append(e.Efforts, level{Effort: ef})
 		}
 		e.AgentsEffort = agentsEffort(own, m)
@@ -274,10 +501,33 @@ func entriesAt(ms []catalog.Model, after int, effort string) []any {
 	return entries
 }
 
+// ultraHere reports whether magpie's entry for m offers Codex's Ultra
+// beside its levels: a model that reasons, of a vendor other than OpenAI.
+// An OpenAI model has Ultra where OpenAI's own catalog gives it
+// (provider.OffersUltra), never added here: GPT-6 Luna stops at max there.
+// Nor a model whose lead seals its subagents' tasks, which V2 Ultra needs
+// to read (a ChatGPT account's, a group one is in, a relay of the ChatGPT
+// backend: Fast, Seals, #141).
+func ultraHere(m catalog.Model) bool {
+	if len(m.Efforts) == 0 || slices.Contains(m.Efforts, "ultra") || m.Fast || m.Seals || strings.HasPrefix(m.ID, "codex/") {
+		return false
+	}
+	return !openAIModel(m.ID)
+}
+
+// openAIModel reports whether id (provider/model, a relay's dated or
+// renamed one) names an OpenAI model: a GPT, an o-series one, a Codex one.
+func openAIModel(id string) bool {
+	slug := strings.ToLower(id[strings.LastIndex(id, "/")+1:])
+	return gptModel.MatchString(slug) || strings.Contains(slug, "gpt-") || strings.Contains(slug, "codex")
+}
+
 // owned are the keys of an entry magpie writes, or leaves out on purpose:
 // every field of model, and the two ownEntry takes out of Codex's own.
 // keepTrue are those of them where a true the user set by hand stays over
-// magpie's false (keep:"true").
+// magpie's false (keep:"true"). A field tagged keep:"unset" is not owned:
+// written on some models only, the user's own on the rest stays, as
+// before magpie wrote it anywhere.
 var owned, keepTrue = func() (own, yes map[string]bool) {
 	own = map[string]bool{"availability_nux": true, "upgrade": true}
 	yes = map[string]bool{}
@@ -289,8 +539,11 @@ var owned, keepTrue = func() (own, yes map[string]bool) {
 			continue
 		}
 		own[name] = true
-		if f.Tag.Get("keep") == "true" {
+		switch f.Tag.Get("keep") {
+		case "true":
 			yes[name] = true
+		case "unset":
+			delete(own, name)
 		}
 	}
 	return own, yes
@@ -360,7 +613,7 @@ func Keep(cur, b []byte) []byte {
 
 // datedSuffix is a snapshot's date after a model's id (-2026-09-14,
 // -20260914).
-var datedSuffix = regexp.MustCompile(`-(\d{4}-\d{2}-\d{2}|\d{8})$`)
+var datedSuffix = lazyre.New(`-(\d{4}-\d{2}-\d{2}|\d{8})$`)
 
 // agentsEffort is the multi_agent_reasoning_effort of Codex's own entry for
 // the model a third-party one serves (s2a/gpt-6-astra, openai/gpt-6-astra on
@@ -384,19 +637,65 @@ func agentsEffort(own map[string]map[string]any, m catalog.Model) string {
 	return ef
 }
 
+// ownSlug is the slug of Codex's own entry for a model a provider the user
+// added by its address serves: openai/GPT-6-sol-2026-05-01 is gpt-6-sol.
+func ownSlug(id string) string {
+	slug := strings.ToLower(id)
+	if i := strings.LastIndex(slug, "/"); i >= 0 {
+		slug = slug[i+1:]
+	}
+	return datedSuffix.ReplaceAllString(slug, "")
+}
+
+// OwnOffers reports whether Codex's own entry for the model a provider the
+// user added by its address serves (ownSlug) lists tier, as ownTiers offers
+// Codex that tier on it: a routing group may send the model at it too
+// (KoiLx0 on X: Ultrafast on a relay of OpenAI's models). Read through
+// filememo, as a list asks it of every model.
+func OwnOffers(id, tier string) bool {
+	tiers, _ := filememo.Read("codex own tiers", catalog.CodexModelsCache(), parseOwnTiers)
+	return slices.Contains(tiers[ownSlug(id)], tier)
+}
+
+// parseOwnTiers is each of Codex's own entries' service tier ids, by slug;
+// one magpie added to the cache is not Codex's own.
+func parseOwnTiers(b []byte) (map[string][]string, error) {
+	var cache struct {
+		ETag   string `json:"etag"`
+		Models []struct {
+			Slug        string `json:"slug"`
+			Description string `json:"description"`
+			Tiers       []struct {
+				ID string `json:"id"`
+			} `json:"service_tiers"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(b, &cache); err != nil {
+		return nil, err
+	}
+	out := map[string][]string{}
+	for _, m := range cache.Models {
+		if m.Slug == "" || catalog.MagpieAdded(cache.ETag, m.Slug, m.Description) {
+			continue
+		}
+		for _, t := range m.Tiers {
+			if t.ID != "" {
+				out[m.Slug] = append(out[m.Slug], t.ID)
+			}
+		}
+	}
+	return out, nil
+}
+
 // gptModel is an OpenAI model's id, as a relay may serve it: gpt-6-sol, o4.
-var gptModel = regexp.MustCompile(`^(gpt-|o\d)`)
+var gptModel = lazyre.New(`^(gpt-|o\d)`)
 
 // ownTiers are the service tiers Codex's own entry gives the model a
 // provider the user added by its address serves (openai/gpt-6-sol on a
 // relay, a dated snapshot), Ultrafast among them where the entry has it;
 // Fast on another GPT model; none on any other.
 func ownTiers(own map[string]map[string]any, m catalog.Model) []tier {
-	slug := strings.ToLower(m.ID)
-	if i := strings.LastIndex(slug, "/"); i >= 0 {
-		slug = slug[i+1:]
-	}
-	slug = datedSuffix.ReplaceAllString(slug, "")
+	slug := ownSlug(m.ID)
 	if raw, ok := own[slug]["service_tiers"].([]any); ok {
 		var ts []tier
 		for _, r := range raw {
@@ -531,6 +830,125 @@ func Order(entries []any, at map[string]int) {
 	}
 }
 
+// AppList is how much of Codex's model list the Codex app and its VS Code
+// extension read: each asks its app-server for model/list with
+// includeHidden, cursor null and limit 100, and never for the next page
+// (ChatGPT.app 26.1013's and openai.chatgpt 26.51021's webview), so a
+// model past the 100th by priority is in no picker of theirs and can't be
+// chosen there. The CLI's /model lists every one.
+const AppList = 100
+
+// Fit ranks entries, Codex's own and magpie's, so the first AppList by
+// priority are ones the Codex app can show and the user wants: a hidden
+// entry, which no picker shows, goes after every listed one; and when more
+// than AppList are listed, the ones used (slugs, most recent first, as
+// usage.CodexUsed has them) are brought into the first AppList, in the
+// order they stood, in place of the last of the others there. The order
+// is otherwise kept, and the priorities numbered 1 to n in it. The slice
+// is put in that order too.
+func Fit(entries []any, used []string) { FitOwn(entries, used, nil) }
+
+// FitOwn is Fit with Codex's own models (own reports them by slug) kept
+// in the first AppList ahead of the ones used, wherever the user's order
+// (Order) put them: Codex lists them itself, so a user who didn't take
+// them out of its list expects them in the app. An order set while the
+// list had none of them names only magpie's, and put every one past the
+// 100th (maiya on Discord). A hidden one still goes last.
+func FitOwn(entries []any, used []string, own func(slug string) bool) {
+	type ranked struct {
+		e        any
+		slug     string
+		was      int
+		hidden   bool
+		promoted bool
+	}
+	rs := make([]ranked, len(entries))
+	for i, e := range entries {
+		r := ranked{e: e, was: i}
+		switch o := e.(type) {
+		case map[string]any:
+			r.slug, _ = o["slug"].(string)
+			v, _ := o["visibility"].(string)
+			r.hidden = v == "hide"
+			switch p := o["priority"].(type) {
+			case float64:
+				r.was = int(p)
+			case int:
+				r.was = p
+			}
+		case *model:
+			r.slug, r.was, r.hidden = o.Slug, o.Priority, o.Visibility == "hide"
+		}
+		rs[i] = r
+	}
+	slices.SortStableFunc(rs, func(a, b ranked) int {
+		if a.hidden != b.hidden {
+			if a.hidden {
+				return 1
+			}
+			return -1
+		}
+		return a.was - b.was
+	})
+	listed := 0
+	for _, r := range rs {
+		if !r.hidden {
+			listed++
+		}
+	}
+	if listed > AppList && (len(used) > 0 || own != nil) {
+		n := 0
+		// Codex's own first, then the used ones, as room allows
+		if own != nil {
+			for i := range rs[:listed] {
+				if n < AppList && own(rs[i].slug) {
+					rs[i].promoted = true
+					n++
+				}
+			}
+		}
+		at := map[string]int{}
+		for i, r := range rs[:listed] {
+			at[r.slug] = i
+			// a ChatGPT account's own model, which magpie's records name
+			// as codex/<slug>
+			if _, ok := at["codex/"+r.slug]; !ok {
+				at["codex/"+r.slug] = i
+			}
+		}
+		for _, u := range used {
+			if i, ok := at[u]; ok && !rs[i].promoted && n < AppList {
+				rs[i].promoted = true
+				n++
+			}
+		}
+		// the first AppList: the used ones and as many others, from the top,
+		// as there is room for, in the order they stood
+		room := AppList - n
+		first, rest := make([]ranked, 0, AppList), make([]ranked, 0, listed)
+		for _, r := range rs[:listed] {
+			if r.promoted || room > 0 {
+				if !r.promoted {
+					room--
+				}
+				first = append(first, r)
+				continue
+			}
+			rest = append(rest, r)
+		}
+		copy(rs, append(first, rest...))
+	}
+	for n, r := range rs {
+		switch o := r.e.(type) {
+		case map[string]any:
+			o["priority"] = n + 1
+		case *model:
+			o.Priority = n + 1
+		}
+		entries[n] = r.e
+	}
+}
+
 // CacheEntries is Codex's own models, as models_cache.json describes them
 // for the ChatGPT account it last asked with, by slug.
 func CacheEntries() map[string]map[string]any {
@@ -608,14 +1026,39 @@ func unstamp(e map[string]any, was string) {
 // place) runs on the auto_review_model_override of the conversation's
 // model's entry, else on codex-auto-review when the list has it, else on the
 // conversation's model at low effort (#938). With settings.CodexAutoReview
-// every entry magpie hands Codex names that model.
+// every entry magpie hands Codex names that model; set to
+// settings.CodexAutoReviewSession, each of magpie's names itself and Codex's
+// own are left as OpenAI gave them, so the review runs on the session's
+// model.
 
-// AutoReview has one of Codex's own entries name the auto-review model the
-// user picked. With none picked, one magpie put there before — a magpie id,
+// SignInPlan is the plan of the ChatGPT account this machine's Codex is
+// signed in to, as its ID token names it ("free", "plus", "pro" …), ""
+// when it is unknown or Codex isn't signed in (provider.CodexSignInPlan).
+var SignInPlan func() string
+
+// AutoReviewModel is the auto-review setting in effect:
+// settings.CodexAutoReview, but with nothing picked and Codex signed in
+// to a Free ChatGPT plan, the session's (settings.CodexAutoReviewSession).
+// Left to Codex the review runs on codex-auto-review, kept as the default
+// for being free on a ChatGPT sign-in (#1593, from a paid account); on a
+// Free plan it is not (cybercaius on Discord measured it spending the
+// plan's allowance), so there it follows the session as Codex's other
+// side calls do. A plan magpie can't read keeps Codex's pick.
+func AutoReviewModel() string {
+	v := settings.Shared().CodexAutoReview
+	if v == "" && SignInPlan != nil && strings.EqualFold(strings.TrimSpace(SignInPlan()), "free") {
+		return settings.CodexAutoReviewSession
+	}
+	return v
+}
+
+// AutoReview has one of Codex's own entries name the auto-review model in
+// effect, v (AutoReviewModel, read once for a whole list: it reads Codex's
+// sign-in). With none picked, one magpie put there before — a magpie id,
 // which has a "/" where OpenAI's slugs have none, kept in Codex's cache — is
 // taken out, and one OpenAI gave it is left.
-func AutoReview(e map[string]any) {
-	if v := settings.Load().CodexAutoReview; v != "" {
+func AutoReview(e map[string]any, v string) {
+	if v != "" && v != settings.CodexAutoReviewSession {
 		e["auto_review_model_override"] = v
 	} else if was, _ := e["auto_review_model_override"].(string); strings.Contains(was, "/") {
 		delete(e, "auto_review_model_override")
@@ -677,6 +1120,10 @@ func Remember(entries []any) {
 // ChatGPT sign-in: its entry as Codex has it (images, context window, tools,
 // instructions), under magpie's id. The start-up notice and the upgrade
 // prompt are left out; they name slugs the catalog does not have.
+// effectivePct is the effective_context_window_percent of Codex's own
+// entries.
+const effectivePct = 95
+
 func ownEntry(raw map[string]any, id, name string, priority int) map[string]any {
 	e := make(map[string]any, len(raw))
 	for k, v := range raw {
@@ -684,11 +1131,158 @@ func ownEntry(raw map[string]any, id, name string, priority int) map[string]any 
 	}
 	delete(e, "availability_nux")
 	delete(e, "upgrade")
+	if _, ok := e["effective_context_window_percent"]; !ok {
+		e["effective_context_window_percent"] = effectivePct
+	}
 	e["slug"], e["display_name"], e["priority"], e["visibility"] = id, name, priority, "list"
 	if s, _ := e["base_instructions"].(string); s == "" {
-		e["base_instructions"] = Prompt
+		// an entry with model_messages alone carries its instructions
+		// there; one with neither, those official Codex sends its model
+		msgs, _ := e["model_messages"].(map[string]any)
+		s, _ = msgs["instructions_template"].(string)
+		if slug, _ := raw["slug"].(string); s == "" {
+			s = Official(slug)
+		}
+		e["base_instructions"] = s
 	}
 	return e
+}
+
+// shownName is the name Codex's picker shows m by: its Name, with what
+// tells it from another entry of that name after it (catalog.Model.Apart).
+// The picker alone shows it: the description, and the names magpie adds
+// to spawn_agent, which go upstream, keep Name.
+func shownName(m catalog.Model) string {
+	if m.Apart == "" {
+		return m.Name
+	}
+	return m.Name + " · " + m.Apart
+}
+
+// listedEntry is the entry m's vendor lists it under in Codex's own shape
+// (catalog.Model.Codex, a sub2api's), under magpie's id: as the vendor
+// gave it — its instructions, tools, truncation, tiers and the rest, which
+// magpie neither guesses nor rewrites — but for what the user set. A
+// window, compaction or levels the user gave the model, its images
+// switched, and the auto-review model picked in magpie, are said as the
+// entries magpie makes say them; with none of them it is the vendor's
+// entry, its description ending " via magpie" so it is told from Codex's
+// own (catalog.MagpieAdded). False when m has none, or one magpie can't
+// read, which is then made as any other model's.
+func listedEntry(m catalog.Model, priority int, work settings.Settings, autoReview string, v1 bool, effort string) (map[string]any, bool) {
+	var raw map[string]any
+	if len(m.Codex) == 0 || json.Unmarshal(m.Codex, &raw) != nil || raw == nil {
+		return nil, false
+	}
+	e := ownEntry(raw, m.ID, shownName(m), priority)
+	desc, _ := e["description"].(string)
+	e["description"] = cmp.Or(strings.TrimSpace(desc), m.Name) + " via magpie"
+	if c := m.Context; c > 0 {
+		// the window magpie resolves (the user's, else this entry's own),
+		// and where the user has Codex compact it, theirs alone: not
+		// magpie's default working window, as the vendor said its own
+		Window(e, c, 0)
+		w := c
+		if m.Compact > 0 {
+			w = min(c, m.Compact)
+		} else if work.CompactAt > 0 {
+			w = work.Working(c)
+		}
+		if w < c {
+			e["auto_compact_token_limit"] = w
+		}
+	} else if w := m.Compact; w > 0 || work.CompactAt > 0 && !work.FullContext {
+		w = cmp.Or(w, work.CompactAt)
+		// no window magpie knows: the user's threshold still holds,
+		// under the vendor's own window and limit where it says them
+		if n, ok := e["context_window"].(float64); ok && n > 0 && int(n) <= w {
+			w = 0
+		}
+		if l, ok := e["auto_compact_token_limit"].(float64); ok && l > 0 && int(l) < w {
+			w = 0
+		}
+		if w > 0 {
+			e["auto_compact_token_limit"] = w
+		}
+	}
+	// the levels, where the user's differ from the vendor's: those the
+	// vendor lists kept as it wrote them, with their descriptions
+	listed, _ := e["supported_reasoning_levels"].([]any)
+	byEffort := map[string]any{}
+	var had []string
+	for _, l := range listed {
+		o, _ := l.(map[string]any)
+		if ef, _ := o["effort"].(string); ef != "" {
+			byEffort[ef] = l
+			had = append(had, ef)
+		}
+	}
+	if !slices.Equal(had, m.Efforts) {
+		levels := []any{}
+		for _, ef := range m.Efforts {
+			l, ok := byEffort[ef]
+			if !ok {
+				l = map[string]any{"effort": ef}
+			}
+			levels = append(levels, l)
+		}
+		e["supported_reasoning_levels"] = levels
+		if d, _ := e["default_reasoning_level"].(string); !slices.Contains(m.Efforts, d) {
+			if len(m.Efforts) == 0 {
+				e["default_reasoning_level"] = nil
+			} else {
+				e["default_reasoning_level"] = ModelDefault(m.Efforts, effort)
+			}
+		}
+	}
+	// every level says its description: Codex 0.166 fails the whole
+	// catalog on one without the field (#5024), so a level the vendor
+	// listed without one — kept as it wrote it, or made for an effort of
+	// the user's the vendor doesn't — says the effort's display name
+	levels, _ := e["supported_reasoning_levels"].([]any)
+	for _, l := range levels {
+		o, _ := l.(map[string]any)
+		if o == nil {
+			continue
+		}
+		if _, ok := o["description"].(string); ok {
+			continue
+		}
+		ef, _ := o["effort"].(string)
+		o["description"] = effortLabel(ef)
+	}
+	// images, where the user's say (or magpie describing them) differs
+	if in, ok := e["input_modalities"].([]any); ok {
+		has := slices.Contains(in, any("image"))
+		if m.Images && !has {
+			e["input_modalities"] = append(slices.Clone(in), "image")
+		} else if !m.Images && has {
+			e["input_modalities"] = slices.DeleteFunc(slices.Clone(in), func(x any) bool { return x == "image" })
+		}
+	}
+	if v1 && (m.Fast || m.Seals) {
+		Stamp(e)
+	} else if _, ok := e["multi_agent_version"]; !ok && m.AgentsV2 {
+		e["multi_agent_version"] = "v2"
+	}
+	AutoReview(e, autoReview)
+	if autoReview == settings.CodexAutoReviewSession {
+		e["auto_review_model_override"] = m.ID
+	}
+	return e, true
+}
+
+// effortLabels are the reasoning efforts' display names, as the pickers say
+// them (T3 Code's labels, internal/agent/t3code.go).
+var effortLabels = map[string]string{"none": "None", "minimal": "Minimal", "low": "Low", "medium": "Medium", "high": "High", "xhigh": "Extra High", "max": "Max", "ultra": "Ultra"}
+
+// effortLabel is the display name of an effort, the effort itself when it
+// has none.
+func effortLabel(ef string) string {
+	if l, ok := effortLabels[ef]; ok {
+		return l
+	}
+	return ef
 }
 
 // Window has one of Codex's own entries say a context window of n tokens
@@ -712,6 +1306,28 @@ func Window(e map[string]any, n, most int) {
 	}
 }
 
+// Cap holds one of Codex's own entries to a window of at most n tokens
+// (settings.ContextCap), where the user set none for it: its window, the
+// most it may be raised to and the threshold it compacts at come down to n
+// when they are above it, and nothing else changes.
+func Cap(e map[string]any, n int) {
+	if n <= 0 {
+		return
+	}
+	for _, k := range []string{"context_window", "max_context_window", "auto_compact_token_limit"} {
+		switch v := e[k].(type) {
+		case float64:
+			if int(v) > n {
+				e[k] = n
+			}
+		case int:
+			if v > n {
+				e[k] = n
+			}
+		}
+	}
+}
+
 // Codex keeps the model list it was handed in models_cache.json, with the
 // list's ETag, and asks again only once the cache has aged (minutes) — or
 // when a reply's X-Models-Etag differs from it; the same one only makes the
@@ -723,9 +1339,27 @@ func Window(e map[string]any, n, most int) {
 // Tag names a list of magpie's models: another list, another tag.
 func Tag(ms []catalog.Model) string {
 	b, _ := json.Marshal(ms)
+	b = append(b, catalogFormat...)
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:6])
 }
+
+// UsedTag names the set of models Codex used (Fit's used): the list Fit
+// makes changes with the set, not with which of them came last.
+func UsedTag(used []string) string {
+	set := slices.Clone(used)
+	slices.Sort(set)
+	b, _ := json.Marshal(set)
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:6])
+}
+
+// catalogFormat changes when the entries made of the same models change
+// shape, so a Codex holding the list magpie gave before asks again: v2 put
+// the window in context_window and the threshold in
+// auto_compact_token_limit (10-30); v3 offered Ultra on another vendor's
+// models that reason (ultraHere).
+const catalogFormat = "v3"
 
 // tagMark is where a tag starts in an ETag magpie made.
 const tagMark = "+magpie-"

@@ -15,17 +15,19 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/yetone/magpie/internal/ghtoken"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/libc"
 	"github.com/yetone/magpie/internal/netproxy"
 	"github.com/yetone/magpie/internal/source"
+	"github.com/yetone/magpie/internal/stall"
 )
 
 // BunVersion is the Bun magpie downloads to run plugins with the first
@@ -121,7 +123,7 @@ func bunExe() string {
 // missingLibRe finds what a musl Linux's loader says when a program needs
 // a library the system lacks: "Error loading shared library
 // libstdc++.so.6: No such file or directory (needed by …)".
-var missingLibRe = regexp.MustCompile(`Error loading shared library ([^:\s]+)`)
+var missingLibRe = lazyre.New(`Error loading shared library ([^:\s]+)`)
 
 // missingLibs says which libraries a bun that started couldn't be linked
 // with lacks, from what it printed, "" when that isn't why it failed. Bun's
@@ -150,6 +152,9 @@ func whyDied(ctx context.Context, bun string, err error) error {
 	if verr == nil {
 		return err
 	}
+	if ue := wontLoad(bun, verr); ue != nil {
+		return fmt.Errorf("%w (%v)", ue, err)
+	}
 	if hint := missingLibs(string(out)); hint != "" {
 		return fmt.Errorf("%s: %w", hint, err)
 	}
@@ -159,9 +164,13 @@ func whyDied(ctx context.Context, bun string, err error) error {
 // cantStart says what it means when a bun that is on disk can't be
 // started with "no such file or directory": not that the file is missing,
 // but that the interpreter it names is. A glibc build on a musl Linux
-// (Alpine) names glibc's loader, which isn't there (#1877). Any other
+// (Alpine) names glibc's loader, which isn't there (#1877). A bun that
+// Windows or the processor won't load says so (wontLoad). Any other
 // error is given back as it is.
 func cantStart(bun string, err error) error {
+	if ue := wontLoad(bun, err); ue != nil {
+		return ue
+	}
 	if err == nil || !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
@@ -175,24 +184,85 @@ func cantStart(bun string, err error) error {
 	return fmt.Errorf("this system can't start the Bun magpie downloaded (%s, %s), though it is there: the build doesn't match this system's C library (glibc or musl). Set MAGPIE_BUN to a bun built for this system to run plugins on it: %w", target, bun, err)
 }
 
+// The statuses Windows ends a program with when it can't load it.
+const (
+	// a DLL it imports lacks a function it names: Bun 1.3.14 and later
+	// import CreatePseudoConsole from kernel32, which Windows has only
+	// from Windows 10 1809 and Server 2019 on (zgcwkj on Discord)
+	statusEntrypointNotFound = 0xc0000139
+	// the processor lacks an instruction it uses
+	statusIllegalInstruction = 0xc000001d
+)
+
+// BunUnstartableError is a bun this machine can't run at all: Windows is
+// older than Bun needs, or the processor lacks an instruction Bun is
+// built for. No Bun magpie can download runs here, so an install isn't
+// tried again from elsewhere and the GUI says it in the reader's language.
+type BunUnstartableError struct {
+	Bun string
+	// Why is "windows" or "cpu".
+	Why string
+	Err error
+}
+
+func (e *BunUnstartableError) Error() string {
+	if e.Why == "windows" {
+		return fmt.Sprintf("Bun can't start on this version of Windows: it needs Windows 10 version 1809 or later, or Windows Server 2019 or later, and this one lacks a function it uses (%s exited with 0xc0000139, entry point not found). Update Windows to run plugins, or set MAGPIE_BUN to a bun that runs here: %v", e.Bun, e.Err)
+	}
+	return fmt.Sprintf("Bun can't start on this computer's processor: it lacks an instruction Bun uses (%s: %v). Bun's x64 build needs SSE4.2 (an Intel or AMD processor from 2008 on; in a virtual machine, a CPU type that passes it through). Run magpie on such a processor to run plugins, or set MAGPIE_BUN to a bun that runs here", e.Bun, e.Err)
+}
+
+func (e *BunUnstartableError) Unwrap() error { return e.Err }
+
+// wontLoad is a *BunUnstartableError when err is bun's exit with what
+// Windows or the processor says when it can't run it at all: STATUS_
+// ENTRYPOINT_NOT_FOUND, STATUS_ILLEGAL_INSTRUCTION, or SIGILL elsewhere.
+// Else nil.
+func wontLoad(bun string, err error) *BunUnstartableError {
+	if err == nil {
+		return nil
+	}
+	var ec interface{ ExitCode() int }
+	if errors.As(err, &ec) {
+		switch uint32(ec.ExitCode()) {
+		case statusEntrypointNotFound:
+			return &BunUnstartableError{Bun: bun, Why: "windows", Err: err}
+		case statusIllegalInstruction:
+			return &BunUnstartableError{Bun: bun, Why: "cpu", Err: err}
+		}
+	}
+	var ps interface{ Sys() any }
+	if errors.As(err, &ps) {
+		if ws, ok := ps.Sys().(syscall.WaitStatus); ok && ws.Signaled() && ws.Signal() == syscall.SIGILL {
+			return &BunUnstartableError{Bun: bun, Why: "cpu", Err: err}
+		}
+	}
+	return nil
+}
+
 // Bun is the bun to run plugins with: $MAGPIE_BUN when set, else the one
 // magpie downloaded and keeps up to date, downloading it now when there
-// is none yet.
+// is none yet (tried again when a download failed before), for as long as
+// ctx lets it wait. The download goes on in the background when ctx ends
+// first (bunready.go); the plugin host asks hostBun, which waits less.
 func Bun(ctx context.Context) (string, error) {
 	if b := os.Getenv("MAGPIE_BUN"); b != "" {
 		return b, nil
 	}
-	bunMu.Lock()
-	defer bunMu.Unlock()
-	v := inUseLocked()
-	exe := bunExeOf(v)
-	if haveBun(v) {
+	v, exe, ok := bunAtHand()
+	if ok {
 		return exe, nil
 	}
-	if err := downloadBun(ctx, v, exe); err != nil {
-		return "", fmt.Errorf("downloading Bun %s to run plugins: %w", v, err)
+	f := fetchBun(v, exe, true)
+	select {
+	case <-f.done:
+		if f.err != nil {
+			return "", fmt.Errorf("downloading Bun %s to run plugins: %w", v, f.err)
+		}
+		return f.got, nil
+	case <-ctx.Done():
+		return "", f.notReady(ctx.Err())
 	}
-	return exe, nil
 }
 
 // CachedBun returns an already available runtime, without downloading or running
@@ -315,7 +385,28 @@ func getURLOfficial(ctx context.Context, url string, limit int64) ([]byte, error
 	return getURLFrom(ctx, url, limit, false)
 }
 
+// getURLFrom reads url, once more over HTTP/1.1 when the connection broke
+// off (netproxy.AgainOverHTTP1): Bun's zip is tens of MB, which a proxy
+// that cuts HTTP/2 streams part way breaks on each try over HTTP/2.
 func getURLFrom(ctx context.Context, url string, limit int64, mirror bool) ([]byte, error) {
+	ctx = netproxy.Downloads(ctx)
+	var b []byte
+	err := netproxy.AgainOverHTTP1(ctx, func(ctx context.Context) (err error) {
+		b, err = getURLOnce(ctx, url, limit, mirror)
+		return err
+	})
+	return b, err
+}
+
+// downloadStall is how long a download from Bun's release waits for its
+// next byte; there is no bound on the whole, so a slow link still moving
+// finishes (#5572). A var for tests.
+var downloadStall = 60 * time.Second
+
+func getURLOnce(ctx context.Context, url string, limit int64, mirror bool) (b []byte, err error) {
+	ctx, w := stall.Start(ctx, downloadStall)
+	defer w.Stop()
+	defer func() { err = w.Err(err) }()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -335,7 +426,7 @@ func getURLFrom(ctx context.Context, url string, limit int64, mirror bool) ([]by
 	if res.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%s: %s", url, res.Status)
 	}
-	b, err := io.ReadAll(io.LimitReader(res.Body, limit+1))
+	b, err = io.ReadAll(io.LimitReader(w.Reader(res.Body), limit+1))
 	if err != nil {
 		return nil, err
 	}
@@ -347,29 +438,22 @@ func getURLFrom(ctx context.Context, url string, limit int64, mirror bool) ([]by
 
 // bunCommand runs bun with args in dir, the environment's proxy settings
 // passed on (a SOCKS5 one bridged, as Bun can't use it: #1409), the roots
-// the system trusts added to Bun's (caEnv), and npm's registry in China
-// with the 「国内镜像」 switch on (its packages are npm's own, checked
-// against the integrity npm gave).
+// the system trusts added to Bun's (caEnv), and the npm registry in use
+// where bun wouldn't find it itself (registryEnv): one set in magpie, the
+// login shell's, or npm's registry in China with the 「国内镜像」 switch on
+// (its packages are npm's own, checked against the integrity npm gave).
 var bunCommand = func(ctx context.Context, bun, dir string, args ...string) *exec.Cmd {
 	cmd := command(ctx, bun, args...)
 	cmd.Dir = dir
-	cmd.Env = append(netproxy.EnvForBun(env()), "BUN_INSTALL_CACHE_DIR="+installCacheDir())
+	// bun run is the host, whose requests are the plugins' own to their
+	// vendors: magpie's proxy. Every other command downloads plugins, and
+	// takes plugin downloads' proxy (dlEnv).
+	e := dlEnv()
+	if len(args) > 0 && args[0] == "run" {
+		e = env()
+	}
+	cmd.Env = append(netproxy.EnvForBun(e), "BUN_INSTALL_CACHE_DIR="+installCacheDir())
 	cmd.Env = append(cmd.Env, caEnv(cmd.Env, dir)...)
 	cmd.Env = append(cmd.Env, registryEnv(cmd.Env)...)
 	return cmd
-}
-
-// registryEnv is what has bun install from npm's registry in China, with
-// the switch on, unless the environment names a registry already.
-func registryEnv(env []string) []string {
-	if !source.China() {
-		return nil
-	}
-	for _, kv := range env {
-		k, v, _ := strings.Cut(kv, "=")
-		if k = strings.ToUpper(k); (k == "BUN_CONFIG_REGISTRY" || k == "NPM_CONFIG_REGISTRY") && strings.TrimSpace(v) != "" {
-			return nil
-		}
-	}
-	return []string{"BUN_CONFIG_REGISTRY=" + source.NPMMirror + "/"}
 }

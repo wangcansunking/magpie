@@ -58,7 +58,9 @@ const zooExtension = "zoocodeorganization.zoo-code"
 var noticeZoo = newNotice("Zoo Code reads magpie's profile when it starts — run Developer: Reload Window in VS Code to use this.")
 
 func zooCode(home, cfg string) *Agent {
-	return zooCodeAt(vscodeUserDir(vscodeStable, home, cfg), filepath.Join(home, ".vscode", "extensions"))
+	// VS Code's own User and extensions folders: a portable build's are
+	// both in its data folder
+	return zooCodeAt(vscodeDirs(vscodeStable, home, cfg))
 }
 
 // zooCodeImportPath is the file magpie has Zoo Code import, in the VS Code
@@ -232,7 +234,7 @@ func zooCodeProfiles(ref string) map[string]any {
 		"openAiBaseUrl": gatewayV1(), "openAiApiKey": agentKey("zoo-code"),
 		"openAiModelId": ref, "openAiStreamingEnabled": true,
 	}
-	for _, m := range magpieModels("zoo-code") {
+	for _, m := range sharedModels("zoo-code") {
 		if m.ID == ref {
 			p["openAiCustomModelInfo"] = zooCodeModelInfo(m)
 			break
@@ -252,7 +254,7 @@ func zooCodeModelInfo(m catalog.Model) map[string]any {
 	info := map[string]any{"supportsPromptCache": false, "supportsImages": m.Images}
 	// Zoo Code's own default for a model it isn't told about
 	// (openAiModelInfoSaneDefaults)
-	info["contextWindow"] = 128_000
+	info["contextWindow"] = unknownWindow(128_000)
 	if m.Context > 0 {
 		info["contextWindow"] = m.Context
 	}

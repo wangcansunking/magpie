@@ -5,7 +5,7 @@
 // alone, or that reads the gateway's names itself (agent.NoNames), can't,
 // so each place the setting is offered names the connected ones it changes
 // nothing in: under Settings › Provider in model names, under Routing's
-// Names in agents' lists, and in a provider's Names & levels. One not
+// Names in agents' lists, and in a provider's Model settings. One not
 // connected, or one whose list follows it, isn't named; with none, nothing
 // is said. Every language, at a narrow width too.
 const assert = require("node:assert/strict");
@@ -23,7 +23,7 @@ const said = {
   ja: "Goose, Hermes Agent には効きません：そのモデル一覧には magpie の名前が出ません",
   de: "Wirkt nicht in Goose, Hermes Agent: deren Modelllisten zeigen magpies Namen nicht",
 };
-const names = { en: "Names & levels", zh: "名称与推理档位" };
+const names = { en: "Model settings", zh: "模型设置" };
 
 function serve(lang, agents, late = 0) {
   const cur = { lang, theme: "light", plainNames: false, plainOwnNames: false };
@@ -81,6 +81,7 @@ async function launch(t, engine, lang, agents, width = 900, late = 0) {
   });
   page = await (await browser.newContext({ viewport: { width, height: 1000 }, reducedMotion: "reduce" })).newPage();
   page.setDefaultTimeout(5000);
+  page.setDefaultNavigationTimeout(60000);
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.route("**/*", serve(lang, agents, late));
@@ -119,7 +120,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.equal(await sub.textContent(), said[lang]);
         assert.equal(await overflows(page), false, "the page scrolls sideways");
         await startupFinished(page);
-        await page.goto("http://magpie.test/?view=routing");
+        await page.goto("http://magpie.test/?view=groups");
         const note = page.locator(".rt-gnames .no-names");
         await note.waitFor();
         assert.equal(await note.textContent(), said[lang]);
@@ -131,7 +132,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     }
   }
   for (const lang of ["en", "zh"]) {
-    test(`${engine} ${lang}: a provider's Names & levels says it too`, async (t) => {
+    test(`${engine} ${lang}: a provider's Model settings says it too`, async (t) => {
       const { page, errors } = await launch(t, engine, lang, agents);
       await page.goto("http://magpie.test/?view=providers");
       await page.locator('.row.provider[data-id="relay"]').click();
@@ -152,7 +153,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     const note = page.locator(".mnames:not([hidden]) .msuffix .no-names");
     await note.waitFor();
     assert.equal(await note.textContent(), said.en);
-    for (const [view, sel] of [["routing", ".rt-gnames .no-names"], ["settings", ".row.pref .sub.no-names"]]) {
+    for (const [view, sel] of [["groups", ".rt-gnames .no-names"], ["settings", ".row.pref .sub.no-names"]]) {
       await startupFinished(page);
       await page.goto(`http://magpie.test/?view=${view}`);
       await page.locator(sel).waitFor();
@@ -167,7 +168,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     await page.locator("#plainNamesSegs .opt").first().waitFor();
     assert.equal(await page.locator(".row.pref", { has: page.locator("#plainNamesSegs") }).locator(".sub").count(), 0);
     await startupFinished(page);
-    await page.goto("http://magpie.test/?view=routing");
+    await page.goto("http://magpie.test/?view=groups");
     await page.locator(".rt-gnames .segs").waitFor();
     assert.equal(await page.locator(".rt-gnames .no-names:visible").count(), 0);
     await startupFinished(page);

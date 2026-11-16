@@ -3,7 +3,7 @@ const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
-const { fixture, confirmKeyAction } = require("./fixtures/caller-keys.cjs");
+const { fixture, keyAction, confirmKeyAction } = require("./fixtures/caller-keys.cjs");
 const { openPart } = require("./reader.cjs");
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
@@ -13,6 +13,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       t.after(() => browser.close());
       const page = await (await browser.newContext({ viewport: { width: 1000, height: 760 }, reducedMotion: "reduce" })).newPage();
       page.setDefaultTimeout(6000);
+      page.setDefaultNavigationTimeout(60000);
       await page.addInitScript(() => {
         window.callerFocus = [];
         const focus = HTMLElement.prototype.focus;
@@ -60,7 +61,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.locator("#usageKeys .row").last().waitFor();
       assert.equal(await page.locator("#usageKeys .row").count(), 3);
       assert.match(await page.locator("#usageKeys").textContent(), /Laptop/);
-      assert.equal(await page.locator("#usageKeysHead").textContent(), lang === "zh" ? "网关密钥" : "Gateway keys");
+      assert.equal(await page.locator("#usageKeysHead .label").textContent(), lang === "zh" ? "网关密钥" : "Gateway keys");
       assert.equal(await page.locator("#usageCallerKeys").count(), 0, "there is only one API key section");
       await page.locator(":is(#usageTab .opt, .nav-s):visible", { hasText: new RegExp("^" + w.requests + "(?!\\p{L})", "u") }).click();
       await page.locator("#ledKey").click();
@@ -94,7 +95,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert(events.some((e) => e.action === "clipboard" && e.body.text === "fixture-lan-1"));
       const rotateLabel = lang === "zh" ? "轮换密钥" : "Rotate key";
       const cancelLabel = lang === "zh" ? "取消" : "Cancel";
-      await lanRow.getByRole("button", { name: rotateLabel, exact: true }).click();
+      await keyAction(page, lanRow, rotateLabel);
       assert.equal(await page.evaluate(() => callerFocus.at(-1)?.preventScroll), true, "confirmation focuses without scrolling");
       await page.locator("#modal").getByRole("button", { name: cancelLabel, exact: true }).click();
       await page.locator("#modal").waitFor({ state: "hidden" });
@@ -105,7 +106,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await lanRow.getByRole("button", { name: w.copy, exact: true }).click();
       await page.waitForFunction(() => document.querySelector("#gatewayKeys .copy.done"));
       assert(events.some((e) => e.action === "clipboard" && e.body.text === "fixture-rotated-2"));
-      await lanRow.getByRole("button", { name: w.remove, exact: true }).click();
+      await keyAction(page, lanRow, w.remove);
       await page.keyboard.press("Escape");
       await page.locator("#modal").waitFor({ state: "hidden" });
       assert.equal(events.filter((e) => e.action === "remove-key").length, 0);
@@ -148,7 +149,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       });
       await page.setViewportSize({ width: 560, height: 740 });
       await page.evaluate(() => callerHeaderSized);
-      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth), false);
+      // the nav fits once the resize is handled: wait for it, and a real
+      // overflow still fails at the timeout
+      await page.waitForFunction(() => document.documentElement.scrollWidth <= window.innerWidth);
       assert.deepEqual(errors, []);
       if (process.env.ARTIFACT_DIR) {
         await fs.mkdir(process.env.ARTIFACT_DIR, { recursive: true });

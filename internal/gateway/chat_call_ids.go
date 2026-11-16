@@ -20,6 +20,14 @@ import (
 // Chat request, relayed or translated, a plugin's included. A body whose
 // calls all have ids comes back byte for byte.
 func chatCallIDs(body []byte) []byte {
+	if callIDsSet(body) {
+		return body
+	}
+	return giveCallIDs(body)
+}
+
+// giveCallIDs is chatCallIDs past its check, decoding every message.
+func giveCallIDs(body []byte) []byte {
 	at := -1
 	var open []string // the latest call turn's made ids no result has taken yet
 	return editMessages(body, []string{"tool_calls"}, func(m map[string]json.RawMessage) bool {
@@ -136,4 +144,100 @@ func wholeCallIDs(msg map[string]json.RawMessage) bool {
 		msg["tool_calls"], _ = marshalPlain(calls)
 	}
 	return changed
+}
+
+// wholeNameless drops the tool calls of a whole reply's message whose
+// function names nothing in a JSON string — no name, null, another kind
+// (#1475) — and reports whether any was dropped.
+func wholeNameless(msg map[string]json.RawMessage) bool {
+	var calls []map[string]json.RawMessage
+	if decodeJSON(msg["tool_calls"], &calls) != nil {
+		return false
+	}
+	var kept []map[string]json.RawMessage
+	for _, c := range calls {
+		var fn map[string]json.RawMessage
+		if decodeJSON(c["function"], &fn) == nil && aName(fn["name"]) {
+			kept = append(kept, c)
+		}
+	}
+	if len(kept) == len(calls) {
+		return false
+	}
+	if kept == nil {
+		delete(msg, "tool_calls")
+		return true
+	}
+	msg["tool_calls"], _ = marshalPlain(kept)
+	return true
+}
+
+// wholeNamedCall says whether a whole reply's message still carries a
+// tool call whose function names itself in a string.
+func wholeNamedCall(msg map[string]json.RawMessage) bool {
+	var calls []map[string]json.RawMessage
+	if decodeJSON(msg["tool_calls"], &calls) != nil {
+		return false
+	}
+	for _, c := range calls {
+		var fn map[string]json.RawMessage
+		if decodeJSON(c["function"], &fn) == nil && aName(fn["name"]) {
+			return true
+		}
+	}
+	return false
+}
+
+// callIDsSet says, without decoding body, that chatCallIDs has nothing to
+// give: every call has a non-empty string id, so no tool message after
+// one is given an id either. False is "maybe": the decode decides.
+// Nearly every request with tools is so, and decoding each message to
+// see was ~17% of a 2 MB Chat request's CPU.
+func callIDsSet(body []byte) bool {
+	msgs, found, valid := topMember(body, "messages")
+	if !valid || !found || len(msgs) == 0 || msgs[0] != '[' {
+		return !found && valid
+	}
+	set := func(v []byte) bool {
+		s, ok := stringBytes(v)
+		return ok && len(s) > 0
+	}
+	all := true
+	eachElement(msgs, func(el []byte) bool {
+		if el[0] != '{' {
+			all = false
+			return false
+		}
+		var calls []byte
+		eachMember(el, func(k, v []byte) bool {
+			if keyIs(k, "tool_calls") {
+				calls = v
+			}
+			return true
+		})
+		if len(calls) == 0 || string(calls) == "null" {
+			return true
+		}
+		if calls[0] != '[' {
+			all = false
+			return false
+		}
+		eachElement(calls, func(c []byte) bool {
+			if c[0] != '{' {
+				all = false
+				return false
+			}
+			var id []byte
+			eachMember(c, func(k, v []byte) bool {
+				if keyIs(k, "id") {
+					id = v
+				}
+				return true
+			})
+			all = set(id)
+			return all
+		})
+		return all
+	})
+	return all
 }

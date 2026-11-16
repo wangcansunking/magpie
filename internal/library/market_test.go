@@ -233,12 +233,22 @@ func TestFeaturedSkills(t *testing.T) {
 	t.Cleanup(func() { popular.Lock(); popular.list = nil; popular.Unlock() })
 
 	list, _ := MarketSkills("")
-	if len(list) != 2 || list[0].ID != "magpie-community/plugins/magpie-quota" || !list[0].Official || !list[0].Featured ||
-		list[0].Description == "" || list[0].Icon != gh("magpie-community") || !offered(list[0].Icon) || list[1].ID != "o/r/pdf" {
+	if len(list) != 3 || list[0].ID != "magpie-community/plugins/magpie-setup" || list[1].ID != "magpie-community/plugins/magpie-quota" || list[2].ID != "o/r/pdf" {
 		t.Fatalf("market: %+v", list)
 	}
-	if list, _ := MarketSkills("quota"); len(list) == 0 || list[0].SkillID != "magpie-quota" {
+	for _, m := range list[:2] {
+		if !m.Official || !m.Featured || m.Description == "" || m.Icon != gh("magpie-community") || !offered(m.Icon) {
+			t.Fatalf("magpie's own: %+v", m)
+		}
+	}
+	if list, _ := MarketSkills("quota"); len(list) == 0 || list[0].SkillID != "magpie-quota" || slices.ContainsFunc(list, func(m MarketSkill) bool { return m.SkillID == "magpie-setup" }) {
 		t.Fatalf("quota: %+v", list)
+	}
+	// Leyuu_5 on X: an agent sets magpie up; found by what a user searches
+	for _, q := range []string{"setup", "routing", "gateway key"} {
+		if list, _ := MarketSkills(q); len(list) == 0 || list[0].SkillID != "magpie-setup" {
+			t.Fatalf("%s: %+v", q, list)
+		}
 	}
 	if list, _ := MarketSkills("pdf"); slices.ContainsFunc(list, func(m MarketSkill) bool { return m.Featured }) {
 		t.Fatalf("pdf: %+v", list)
@@ -358,5 +368,216 @@ func TestMarketSkillHadByName(t *testing.T) {
 		if got := l.haveSkill(c.source, c.id, c.name); got != c.want {
 			t.Errorf("haveSkill(%s, %s) = %q, want %q", c.source, c.id, got, c.want)
 		}
+	}
+}
+
+// Magpie Browser is magpie's own too, `magpie mcp browser`, given only to
+// the agents picked for it: it acts as the user wherever they're signed in.
+func TestMagpieBrowserIsOptIn(t *testing.T) {
+	sandbox(t)
+	ok(t)(InstallServer(browserServerName, nil, nil))
+	list, err := MarketServers("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := slices.IndexFunc(list, func(m MarketServer) bool { return m.ID == browserServerName })
+	if i < 0 || !list[i].OptIn || list[i].Have != browserServerName {
+		t.Fatalf("market: %+v", list)
+	}
+	l, err := load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := l.server(browserServerName)
+	if s == nil || len(s.Agents) != 0 || !filepath.IsAbs(s.Command) || strings.Join(s.Args, " ") != "mcp browser" {
+		t.Fatalf("added as %+v", s)
+	}
+	if v, ok := valueOf((&mcpFile{Format: fmtCodex}).encode(s), "tool_timeout_sec"); !ok || v != 120 {
+		t.Fatalf("Codex's entry: tool_timeout_sec = %v %v", v, ok)
+	}
+}
+
+// Magpie Web Search is magpie's own too, `magpie mcp search` (lutra_fs on
+// Discord: Settings named the search MCP, the Library didn't have it),
+// given only to the agents picked for it: a search costs what the search
+// set in Settings charges.
+func TestMagpieWebSearchIsOptIn(t *testing.T) {
+	sandbox(t)
+	ok(t)(InstallServer(searchServerName, nil, nil))
+	list, err := MarketServers("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := slices.IndexFunc(list, func(m MarketServer) bool { return m.ID == searchServerName })
+	if i < 0 || !list[i].OptIn || list[i].Have != searchServerName || list[i].Title != "Magpie Web Search" {
+		t.Fatalf("market: %+v", list)
+	}
+	l, err := load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := l.server(searchServerName)
+	if s == nil || len(s.Agents) != 0 || !filepath.IsAbs(s.Command) || strings.Join(s.Args, " ") != "mcp search" {
+		t.Fatalf("added as %+v", s)
+	}
+	if v, ok := valueOf((&mcpFile{Format: fmtCodex}).encode(s), "tool_timeout_sec"); !ok || v != 120 {
+		t.Fatalf("Codex's entry: tool_timeout_sec = %v %v", v, ok)
+	}
+	// written by hand with another magpie binary, it is the same server
+	other := Server{Name: "web", Transport: "stdio", Command: "/opt/other/magpie", Args: []string{"mcp", "search"}}
+	if serverKey(&other) != serverKey(s) {
+		t.Fatalf("keys %q and %q", serverKey(&other), serverKey(s))
+	}
+}
+
+// Magpie Image Recognition is in Discover beside Magpie Image and Magpie
+// Web Search, added for no agent until the user picks them, with time to
+// look (matrix0487 on Discord); any binary's `mcp vision` is the same
+// server.
+func TestMagpieImageRecognitionIsOptIn(t *testing.T) {
+	sandbox(t)
+	list, err := MarketServers("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{selfServerName, searchServerName, visionServerName} {
+		if !slices.ContainsFunc(list, func(m MarketServer) bool { return m.ID == id && m.OptIn }) {
+			t.Fatalf("%s not in Discover: %+v", id, list)
+		}
+	}
+	ok(t)(InstallServer(visionServerName, nil, nil))
+	list, err = MarketServers("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := slices.IndexFunc(list, func(m MarketServer) bool { return m.ID == visionServerName })
+	if i < 0 || list[i].Have != visionServerName || list[i].Title != "Magpie Image Recognition" {
+		t.Fatalf("market: %+v", list)
+	}
+	l, err := load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := l.server(visionServerName)
+	if s == nil || len(s.Agents) != 0 || !filepath.IsAbs(s.Command) || strings.Join(s.Args, " ") != "mcp vision" {
+		t.Fatalf("added as %+v", s)
+	}
+	if v, ok := valueOf((&mcpFile{Format: fmtCodex}).encode(s), "tool_timeout_sec"); !ok || v != 120 {
+		t.Fatalf("Codex's entry: tool_timeout_sec = %v %v", v, ok)
+	}
+	other := Server{Name: "eyes", Transport: "stdio", Command: "/opt/other/magpie", Args: []string{"mcp", "vision"}}
+	if serverKey(&other) != serverKey(s) {
+		t.Fatalf("keys %q and %q", serverKey(&other), serverKey(s))
+	}
+	if search := (Server{Name: "web", Transport: "stdio", Command: s.Command, Args: []string{"mcp", "search"}}); serverKey(&search) == serverKey(s) {
+		t.Fatal("vision and search share a key")
+	}
+}
+
+// Magpie Memory is offered beside magpie's other servers and, being there
+// to be shared, is given to every agent that can take it when added; a
+// copy at another path is the same server.
+func TestMemoryServerInDiscover(t *testing.T) {
+	sandbox(t)
+	list, err := MarketServers("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(list, func(m MarketServer) bool { return m.ID == memoryServerName && !m.OptIn }) {
+		t.Fatalf("%s not in Discover for everyone: %+v", memoryServerName, list)
+	}
+	ok(t)(InstallServer(memoryServerName, nil, nil))
+	l, err := load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := l.server(memoryServerName)
+	if s == nil || len(s.Agents) == 0 || !filepath.IsAbs(s.Command) || strings.Join(s.Args, " ") != "mcp memory" {
+		t.Fatalf("added as %+v", s)
+	}
+	other := Server{Name: "mem", Transport: "stdio", Command: "/opt/other/magpie", Args: []string{"mcp", "memory"}}
+	if serverKey(&other) != serverKey(s) {
+		t.Fatalf("keys %q and %q", serverKey(&other), serverKey(s))
+	}
+}
+
+// Magpie Sessions is offered beside magpie's other servers but, since an
+// agent given it reads the user's other conversations, only to the agents
+// picked for it; it acts as this computer's user, and a copy at another
+// path is the same server.
+func TestSessionsServerInDiscover(t *testing.T) {
+	sandbox(t)
+	list, err := MarketServers("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(list, func(m MarketServer) bool { return m.ID == sessionsServerName && m.OptIn }) {
+		t.Fatalf("%s not in Discover as opt-in: %+v", sessionsServerName, list)
+	}
+	ok(t)(InstallServer(sessionsServerName, nil, []string{"claude"}))
+	l, err := load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := l.server(sessionsServerName)
+	if s == nil || strings.Join(s.Agents, ",") != "claude" || !filepath.IsAbs(s.Command) || strings.Join(s.Args, " ") != "mcp sessions" {
+		t.Fatalf("added as %+v", s)
+	}
+	if !hereOnly(s) {
+		t.Fatal("the sessions server is offered to other computers")
+	}
+	other := Server{Name: "said", Transport: "stdio", Command: "/opt/other/magpie", Args: []string{"mcp", "sessions"}}
+	if serverKey(&other) != serverKey(s) {
+		t.Fatalf("keys %q and %q", serverKey(&other), serverKey(s))
+	}
+	if mem := (Server{Name: "m", Transport: "stdio", Command: s.Command, Args: []string{"mcp", "memory"}}); serverKey(&mem) == serverKey(s) {
+		t.Fatal("memory and sessions share a key")
+	}
+}
+
+// EverMe and Nowledge Mem are offered as memory sources, each added in one
+// step with what its own docs give (OipsAnthony on X).
+func TestThirdPartyMemoryServers(t *testing.T) {
+	sandbox(t)
+	ok(t)(InstallServer("nowledge-mem", nil, []string{"claude"}))
+	if _, err := InstallServer("everme-memory", nil, []string{"claude"}); err == nil {
+		t.Fatal("EverMe added without its token")
+	}
+	ok(t)(InstallServer("everme-memory", map[string]string{"EVERME_AGENT_ID": "agt_1", "EVERME_AGENT_TOKEN": "evt_x"}, []string{"claude"}))
+	l, err := load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, e := l.server("nowledge-mem"), l.server("everme-memory")
+	if n == nil || n.Transport != "http" || n.URL != "http://127.0.0.1:14242/mcp" || len(n.Headers) != 0 {
+		t.Fatalf("nowledge %+v", n)
+	}
+	if e == nil || e.Command != "npx" || strings.Join(e.Args, " ") != "-y @everme/memory-mcp" ||
+		e.Env["EVERME_API_BASE"] != "https://api.everme.evermind.ai" || e.Env["EVERME_AGENT_TOKEN"] != "evt_x" || e.Env["EVERME_AGENT_ID"] != "agt_1" {
+		t.Fatalf("everme %+v", e)
+	}
+}
+
+func TestReaKeepsItsOwnLogo(t *testing.T) {
+	const logo = "https://rea.tools/assets/favicon.svg"
+	i := slices.IndexFunc(popularServers(), func(m MarketServer) bool { return m.ID == "io.github.morluto/rea" })
+	if i < 0 || popularServers()[i].Icon != logo {
+		t.Fatalf("crawl icon: %v", i)
+	}
+	var r registryServer
+	if err := json.Unmarshal([]byte(`{"name":"io.github.morluto/rea","repository":{"url":"https://github.com/morluto/rea"},"packages":[{"registryType":"npm","identifier":"rea-agents","transport":{"type":"stdio"}}]}`), &r); err != nil {
+		t.Fatal(err)
+	}
+	m, ok := fromRegistry(&r)
+	if !ok || m.Icon != logo {
+		t.Fatalf("live icon: %q %v", m.Icon, ok)
+	}
+	s := popularServers()[i].server
+	l := &Library{Icons: map[string]string{serverKey(&s): gh("morluto")}}
+	if got := serverIcon(l, &s); got != logo {
+		t.Fatalf("added with the avatar: %q", got)
+	}
+	if !offered(logo) {
+		t.Fatal("not offered")
 	}
 }

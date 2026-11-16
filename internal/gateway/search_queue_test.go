@@ -21,15 +21,20 @@ import (
 // after the client receives progress, so content cannot hide a lost heartbeat.
 func TestSearchQueueKeepsCodexAlive(t *testing.T) {
 	keepFast(t, 10*time.Millisecond, 20*time.Millisecond, 100*time.Millisecond)
-	held, quiet, watch := keepHeldAfter, agentQuietMost, watchEvery
-	keepHeldAfter, agentQuietMost, watchEvery = 10*time.Millisecond, 50*time.Millisecond, 5*time.Millisecond
-	t.Cleanup(func() { keepHeldAfter, agentQuietMost, watchEvery = held, quiet, watch })
+	held, quiet, watch, silent := keepHeldAfter, agentQuietMost, watchEvery, translatedQuietLongest
+	keepHeldAfter, agentQuietMost, watchEvery, translatedQuietLongest = 10*time.Millisecond, 50*time.Millisecond, 5*time.Millisecond, 40*time.Millisecond
+	t.Cleanup(func() { keepHeldAfter, agentQuietMost, watchEvery, translatedQuietLongest = held, quiet, watch, silent })
 	for _, mode := range []string{"comments", "progress", "cancel", "silent"} {
 		t.Run(mode, func(t *testing.T) {
 			fresh(t)
 			release, stopped := make(chan struct{}), make(chan struct{})
-			var once sync.Once
+			proceed := make(chan struct{})
+			var once, onceGo sync.Once
 			finish := func() { once.Do(func() { close(release) }) }
+			// #5666: a client that fails before go (t.Fatal on a loaded
+			// runner) must not leave the handler on proceed, or up.Close
+			// waits for it until the package alarm.
+			goOn := func() { onceGo.Do(func() { close(proceed) }) }
 			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				defer close(stopped)
 				var q struct{ Tools []struct{ Type, Name string } }
@@ -45,6 +50,11 @@ func TestSearchQueueKeepsCodexAlive(t *testing.T) {
 				if !search || !client {
 					t.Error("search translation lost the search or client tool")
 					http.Error(w, "missing tools", 400)
+					return
+				}
+				select {
+				case <-proceed:
+				case <-r.Context().Done():
 					return
 				}
 				w.Header().Set("Content-Type", "text/event-stream")
@@ -79,6 +89,7 @@ func TestSearchQueueKeepsCodexAlive(t *testing.T) {
 			}))
 			defer up.Close()
 			defer finish()
+			defer goOn()
 			if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Key: "fixture", Models: []string{"m1"}, Responses: up.URL + "/v1"}); err != nil {
 				t.Fatal(err)
 			}
@@ -94,15 +105,34 @@ func TestSearchQueueKeepsCodexAlive(t *testing.T) {
 			req.Header.Set("Authorization", "Bearer magpie")
 			// The idle deadline is much longer than the simulated queue tick;
 			// comments cannot reset it. A hard cap also catches runaway pings.
-			hard := time.AfterFunc(5*time.Second, cancel)
+			// It starts at the headers: a loaded machine's path to them is
+			// not the stream's, and a 5s cap from before the request cut
+			// silent on macOS CI before any header came (context canceled).
+			hard := time.AfterFunc(60*time.Second, cancel)
 			defer hard.Stop()
 			res, err := http.DefaultClient.Do(req)
 			if err != nil {
 				t.Fatal(err)
 			}
+			hard.Reset(5 * time.Second)
 			defer res.Body.Close()
-			idle := time.AfterFunc(300*time.Millisecond, cancel)
-			defer idle.Stop()
+			// #2547: the idle window starts at the first data line, not at
+			// the headers: a loaded machine's path to the first translated
+			// event is not the client's idle, and the hard cap still ends a
+			// stream that never speaks.
+			var idle *time.Timer
+			defer func() {
+				if idle != nil {
+					idle.Stop()
+				}
+			}()
+			// Hold the queue's first event back past the fixed window the
+			// idle once started at headers with, so silent keeps a red if
+			// the window ever starts ahead of the state again.
+			if mode == "silent" {
+				time.Sleep(500 * time.Millisecond)
+			}
+			goOn()
 			var body strings.Builder
 			pings, completed := 0, false
 			sc := bufio.NewScanner(res.Body)
@@ -110,7 +140,11 @@ func TestSearchQueueKeepsCodexAlive(t *testing.T) {
 				line := sc.Text()
 				body.WriteString(line + "\n")
 				if strings.HasPrefix(line, "data:") {
-					idle.Reset(300 * time.Millisecond)
+					if idle == nil {
+						idle = time.AfterFunc(300*time.Millisecond, cancel)
+					} else {
+						idle.Reset(300 * time.Millisecond)
+					}
 				}
 				if strings.Contains(line, `"type":"response.in_progress"`) {
 					pings++

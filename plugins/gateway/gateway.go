@@ -27,6 +27,7 @@ func init() {
 			keys, err := access.List()
 			return len(keys), err
 		},
+		SetAt:    "network #portList",
 		Parts:    []pluginrt.Part{{Slot: "nav.page", Key: "gateway"}, {Slot: "nav.page", Key: "wan"}},
 		Settings: Settings{CallsPage: 20},
 		Client:   []string{"i18n.js", "keys.js", "wan.js", "client.js"},

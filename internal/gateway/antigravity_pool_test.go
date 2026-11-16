@@ -12,11 +12,13 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/provider"
+	"github.com/yetone/magpie/internal/settings"
 )
 
 // Discovery and routing agree when a new model is available only to a
 // secondary account, including the family id clients actually request.
 func TestAntigravityPoolRoutesDiscoveredModels(t *testing.T) {
+	t.Cleanup(provider.AntigravityBuiltinForTest()) // the retired built-in route
 	fresh(t)
 	var logins []map[string]any
 	for _, user := range []string{"old", "new"} {
@@ -71,5 +73,20 @@ func TestAntigravityPoolRoutesDiscoveredModels(t *testing.T) {
 				t.Error("routing did not use the account's own reasoning levels")
 			}
 		}
+	}
+
+	// listed by an id of the user's own (SetModelID), the model is still
+	// the one each account's own list names, levels and all
+	s := settings.Load()
+	s.ModelIDs = map[string]string{"antigravity/my-opus": "claude-opus-5-5"}
+	if err := settings.Save(s); err != nil {
+		t.Fatal(err)
+	}
+	on, _, left := perKeyOf(*p, "my-opus", provider.Chat)
+	if len(on) != 1 || on[0].p.Account.User != "new@example.com" || len(left) != 1 {
+		t.Fatalf("my-opus: eligible=%d, not listed=%d; expected only new@example.com", len(on), len(left))
+	}
+	if !takesEffort(on[0], "high") || takesEffort(on[0], "xhigh") {
+		t.Error("my-opus: routing did not use the account's own reasoning levels")
 	}
 }

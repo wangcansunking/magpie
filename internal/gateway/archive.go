@@ -3,7 +3,9 @@ package gateway
 // The request archive: with it on (settings' RequestArchive), each call the
 // gateway serves is kept — the headers and bodies both ways, every secret
 // taken out first — in the user's own S3 bucket, the one sync keeps its
-// backup in, at <prefix>/magpie/archive/<date>/<id>.json: the call's date,
+// backup in, at <prefix>/magpie/archive/<date>/<id>.json, or, while sync
+// has no bucket and RequestArchiveLocal is on, in the same file on this
+// computer (archive_local.go): the call's date,
 // in UTC, and an id of its own, sent back on the response as
 // X-Magpie-Archive-Id. The call, and its rows in the usage log, carry
 // "<date>/<id>", for the Gateway and Usage pages to read it back by.
@@ -41,6 +43,7 @@ type Putter interface {
 
 // ArchiveBucket is the bucket the archive goes to, and false when there is
 // none (sync is off, or to a WebDAV folder): set by main to the S3 sync's.
+// With none, the archive is this computer's (archiveDest).
 var ArchiveBucket func() (Putter, bool)
 
 // ArchiveHeader carries a call's archive id on its response.
@@ -56,7 +59,7 @@ const archiveQueue = 16
 // is read whole into memory once, for its secrets to be taken out, while
 // its call is uploaded, one call at a time.
 func archiveLimit() int64 {
-	mb := settings.Load().RequestArchiveMaxMB
+	mb := settings.Shared().RequestArchiveMaxMB
 	if mb <= 0 {
 		mb = 32
 	}
@@ -76,24 +79,73 @@ type wire struct {
 	to           Putter
 }
 
-// archiving is r's wire when the archive is on and has a bucket, nil
-// otherwise: nothing is kept, and nothing sent. body is the request's, as
-// Recent calls has it before the first 256 KB is cut from it.
+// archiveDest is where a call is archived, and false when it isn't: the S3
+// bucket sync is to while RequestArchive is on, or, with no bucket, this
+// computer's folder while RequestArchiveLocal is on (archive_local.go). A
+// bucket that goes away never sends calls to the disk in its place: that
+// takes the local switch, turned on at this computer.
+func archiveDest() (Putter, bool) {
+	s := settings.Load()
+	if !s.RequestArchive && !s.RequestArchiveLocal {
+		return nil, false // off, as it is unless turned on: sync's file isn't read
+	}
+	if ArchiveBucket != nil {
+		if b, ok := ArchiveBucket(); ok && b != nil {
+			return b, s.RequestArchive
+		}
+	}
+	if s.RequestArchiveLocal {
+		return LocalArchive(), true
+	}
+	return nil, false
+}
+
+// archiving is r's wire when the archive is on, nil otherwise: nothing is
+// kept, and nothing sent. body is the request's, as Recent calls has it
+// before the first 256 KB is cut from it.
 func archiving(r *http.Request, res *captureResponseWriter, start time.Time, body []byte) *wire {
-	if ArchiveBucket == nil || !settings.Load().RequestArchive {
+	to, ok := archiveDest()
+	if !ok {
 		return nil
 	}
-	to, ok := ArchiveBucket()
-	if !ok || to == nil {
-		return nil
-	}
-	b := make([]byte, 8)
-	rand.Read(b)
-	id := start.UTC().Format("150405") + "-" + hex.EncodeToString(b)
+	name, id := archiveID(start)
 	res.Header().Set(ArchiveHeader, id)
 	res.full = &spool{limit: archiveLimit()}
-	return &wire{name: start.UTC().Format("2006-01-02") + "/" + id, method: r.Method, path: r.URL.Path,
+	return &wire{name: name, method: r.Method, path: r.URL.Path,
 		query: r.URL.RawQuery, req: r.Header.Clone(), body: body, res: res, to: to}
+}
+
+// archiveID is a new call's name in the archive, "<date>/<id>", and its
+// id: the date it began, in UTC, and an id of its own.
+func archiveID(start time.Time) (name, id string) {
+	b := make([]byte, 8)
+	rand.Read(b)
+	id = start.UTC().Format("150405") + "-" + hex.EncodeToString(b)
+	return start.UTC().Format("2006-01-02") + "/" + id, id
+}
+
+// archiveOwn keeps a call magpie made itself, which no client sent it
+// (a Jev classifier's System One question, systemOne), as archive keeps
+// one it served: sent is the request as it went, with the headers magpie
+// signed it with (their secrets are taken out as a client's are), and
+// status, head and answer what came back. It is the name c is kept at,
+// "" with the archive off.
+func archiveOwn(c Call, sent *http.Request, body []byte, status int, head http.Header, answer []byte) string {
+	to, ok := archiveDest()
+	if !ok || sent == nil {
+		return ""
+	}
+	name, _ := archiveID(c.Time)
+	c.Archive, c.Status, c.wire = name, status, nil
+	w := &wire{name: name, method: sent.Method, path: sent.URL.Path, query: sent.URL.RawQuery, req: sent.Header.Clone(), to: to}
+	req, res := &spool{limit: archiveLimit()}, &spool{limit: archiveLimit()}
+	req.add(body)
+	res.add(answer)
+	if head == nil {
+		head = http.Header{}
+	}
+	queueArchive(archiveJob{c: c, w: w, resHead: head.Clone(), req: req, res: res})
+	return name
 }
 
 // archiveName is where the archive keeps c, "<date>/<id>", or "" when it
@@ -134,6 +186,12 @@ type Archived struct {
 	Call     Call        `json:"call"` // as Recent calls has it, its bodies below
 	Request  ArchivePart `json:"request"`
 	Response ArchivePart `json:"response"`
+	// Upstream: each request magpie sent upstream for it, its headers
+	// both ways (wire_headers.go), their secrets taken out; none in an
+	// archive from before them
+	Upstream []UpstreamHeaders `json:"upstream,omitempty"`
+	// UpstreamMore: the upstream requests past those, not kept
+	UpstreamMore int `json:"upstreamMore,omitempty"`
 }
 
 // ArchivePart is one way of a call: the request, or the response.
@@ -173,15 +231,6 @@ var (
 // archive queues c's upload; c.wire is set.
 func archive(c Call) {
 	w := c.wire
-	archiveOnce.Do(func() {
-		archiveJobs = make(chan archiveJob, archiveQueue)
-		go func() {
-			for j := range archiveJobs {
-				upload(j)
-				archivePending.Done()
-			}
-		}()
-	})
 	// the response's file is the job's now, and the request's body goes
 	// to one, so nothing whole is held while the call waits
 	req := &spool{limit: archiveLimit()}
@@ -192,7 +241,23 @@ func archive(c Call) {
 	if res == nil {
 		res = &spool{}
 	}
-	j := archiveJob{c: c, w: w, resHead: w.res.Header().Clone(), req: req, res: res}
+	queueArchive(archiveJob{c: c, w: w, resHead: w.res.Header().Clone(), req: req, res: res})
+}
+
+// queueArchive puts j in the upload queue, or drops it when the queue is
+// full.
+func queueArchive(j archiveJob) {
+	w := j.w
+	archiveOnce.Do(func() {
+		archiveJobs = make(chan archiveJob, archiveQueue)
+		go func() {
+			for j := range archiveJobs {
+				upload(j)
+				archivePending.Done()
+			}
+		}()
+	})
+	req, res := j.req, j.res
 	archivePending.Add(1)
 	select {
 	case archiveJobs <- j:
@@ -227,6 +292,9 @@ func upload(j archiveJob) {
 		Response: ArchivePart{Status: c.Status, Headers: scrubHeaders(j.resHead),
 			Body: string(redact.ScrubJSON(resBody)), Size: j.res.size, Truncated: j.res.cut()},
 	}
+	if h := j.c.headers.masked(); h != nil {
+		a.Upstream, a.UpstreamMore = h.Upstream, h.More
+	}
 	// as it reads in the bucket: a query's & and a body's <tags> as they are
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
@@ -242,6 +310,9 @@ func upload(j archiveJob) {
 	if err != nil {
 		archiveFailed(j.w.name, err)
 		return
+	}
+	if k, ok := j.w.to.(archiveKeeper); ok {
+		bucketAdded(k, "archive/"+j.w.name+".json", int64(buf.Len())) // kept under its size (archive_bucket.go)
 	}
 	archiveMu.Lock()
 	archiveErr = ""

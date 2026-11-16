@@ -9,12 +9,17 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+
+	"github.com/tidwall/gjson"
 )
 
 // Transcript is what was said in a session, in the order it was said.
 type Transcript struct {
-	Parts    []Part `json:"parts"`
-	Cut      bool   `json:"cut,omitempty"` // there was more than is kept here
+	Parts []Part `json:"parts"`
+	Cut   bool   `json:"cut,omitempty"` // there was more than is kept here
+	// From is the parts before the first one kept, left out so that the
+	// part a search found is shown (TranscriptAt)
+	From     int    `json:"from,omitempty"`
 	Source   string `json:"source,omitempty"`
 	Captured int    `json:"captured,omitempty"`
 }
@@ -30,10 +35,17 @@ var ErrNoTranscript = errors.New("this agent's conversations can't be shown")
 // transcript.
 func HasTranscript(agent string) bool {
 	switch agent {
-	case "claude", "qoder", "qoder-cn", "codex", "pi", "omp", "cursor", "opencode", "kimi":
+	case "claude", "qoder", "qoder-cn", "codex", "pi", "raft", "cindy", "omp", "cursor", "opencode", "kimi", "agy", "openmausbot":
 		return true
 	}
 	return false
+}
+
+// readable says whether a session's conversation can be read: its agent's
+// can, and its file is the one they are read from (an agy conversation
+// listed from its row alone has none).
+func readable(s Session) bool {
+	return HasTranscript(s.Agent) && !(s.Agent == "agy" && agyRowOnly(s.Path))
 }
 
 func (t *Transcript) add(_ bool, p Part) bool {
@@ -53,11 +65,77 @@ func (t *Transcript) add(_ bool, p Part) bool {
 
 // TranscriptOf reads a session's conversation from its (main) file.
 func TranscriptOf(s Session) (Transcript, error) {
+	if !Reads(s.Agent) {
+		return Transcript{Parts: []Part{}}, ErrNotRead
+	}
 	out := Transcript{Parts: []Part{}}
 	if !HasTranscript(s.Agent) || s.Path == "" {
 		return out, ErrNoTranscript
 	}
 	return out, readTranscript(s, out.add)
+}
+
+// transcriptLead is the parts kept before the one TranscriptAt finds,
+// when the ones before it are left out.
+const transcriptLead = 6
+
+// TranscriptAt is TranscriptOf for a reader brought to the part that
+// holds needle (NeedleOf), the first said one, else the first anywhere,
+// as SearchSession's hit: when TranscriptOf would be cut before that
+// part, the parts before it are left out (but a few) and From says how
+// many were.
+func TranscriptAt(s Session, needle string) (Transcript, error) {
+	if needle == "" {
+		return TranscriptOf(s)
+	}
+	if !Reads(s.Agent) {
+		return Transcript{Parts: []Part{}}, ErrNotRead
+	}
+	if !HasTranscript(s.Agent) || s.Path == "" {
+		return Transcript{Parts: []Part{}}, ErrNoTranscript
+	}
+	// the parts TranscriptOf keeps are counted as it keeps them, and the
+	// found one's place among them noted, and the characters before it
+	at, saidAt, n, size, sizeAt, saidSize := -1, -1, 0, 0, 0, 0
+	if err := readTranscript(s, func(_ bool, p Part) bool {
+		p, ok := keep(p)
+		if !ok {
+			return true
+		}
+		if searched(p) {
+			if _, hit := hitIn(p, needle); hit {
+				if at < 0 {
+					at, sizeAt = n, size
+				}
+				if said(p) && saidAt < 0 {
+					saidAt, saidSize = n, size
+				}
+			}
+		}
+		n++
+		size += len(p.Text)
+		return saidAt < 0
+	}); err != nil {
+		return Transcript{Parts: []Part{}}, err
+	}
+	if saidAt >= 0 {
+		at, sizeAt = saidAt, saidSize
+	}
+	if at < 0 || sizeAt < transcriptMax {
+		return TranscriptOf(s)
+	}
+	out := Transcript{Parts: []Part{}, From: max(0, at-transcriptLead)}
+	i := 0
+	return out, readTranscript(s, func(in bool, p Part) bool {
+		if _, ok := keep(p); !ok {
+			return true
+		}
+		i++
+		if i <= out.From {
+			return true
+		}
+		return out.add(in, p)
+	})
 }
 
 // readTranscript tells add each part of a session's conversation, in order,
@@ -78,13 +156,76 @@ func readTranscriptOf(s Session, keep func([]byte) bool, add func(bool, Part) bo
 		return cursorTranscript(s.Path, add)
 	case "codex":
 		return codexContentOf(whole, keep, add)
-	case "pi", "omp":
+	case "pi", "raft", "cindy", "omp":
 		return piTranscript(s.Path, add)
 	case "kimi":
 		return kimiTranscript(s.Path, keep, add)
+	case "agy":
+		return agyTranscript(s.Path, keep, add)
+	case "openmausbot":
+		return ombTranscript(s, add)
 	default:
+		if s.BranchOf != "" && keep == nil {
+			return branchTranscript(s, add)
+		}
 		return claudeContentOf(whole, keep, add)
 	}
+}
+
+// branchTranscript reads a branch (ccFamily) as its conversation went: the
+// session it is a branch of from its start up to the last message the two
+// share, then what the branch said on its own. A fork made after a
+// compaction holds only the summary and what follows it, and opened on
+// that summary and one turn (Neo, #feedback). A search reads the branch's
+// own file only, so a hit in the shared part is the head's, not each
+// branch's again.
+func branchTranscript(s Session, add func(bool, Part) bool) error {
+	ends := map[string]int64{}
+	if _, err := scanThin(s.BranchOf, 0, nil, thinClaude, func(b []byte, _, end int64) bool {
+		if u := ccMessageUUID(b); u != "" {
+			ends[u] = end
+		}
+		return true
+	}); err != nil {
+		// the head unread: the branch alone, as before it was known to be one
+		return claudeContentOf(Call{Agent: s.Agent, File: s.Path, To: math.MaxInt64}, nil, add)
+	}
+	fork := int64(-1)
+	if _, err := scanThin(s.Path, 0, nil, thinClaude, func(b []byte, _, _ int64) bool {
+		if e, ok := ends[ccMessageUUID(b)]; ok && e > fork {
+			fork = e
+		}
+		return true
+	}); err != nil {
+		return err
+	}
+	if fork < 0 {
+		return claudeContentOf(Call{Agent: s.Agent, File: s.Path, To: math.MaxInt64}, nil, add)
+	}
+	more := true
+	if err := claudeContentOf(Call{Agent: s.Agent, File: s.BranchOf, To: fork}, nil, func(in bool, p Part) bool {
+		more = add(in, p) && more
+		return more
+	}); err != nil || !more {
+		return err
+	}
+	return claudeContentOf(Call{Agent: s.Agent, File: s.Path, To: math.MaxInt64}, func(b []byte) bool {
+		_, shared := ends[ccMessageUUID(b)]
+		return !shared
+	}, add)
+}
+
+// ccMessageUUID is the uuid of a Claude-format user or assistant line, ""
+// for any other line.
+func ccMessageUUID(b []byte) string {
+	if !bytes.Contains(b, ccUser) && !bytes.Contains(b, ccAssistant) {
+		return ""
+	}
+	r := gjson.GetManyBytes(b, "type", "uuid")
+	if t := r[0].String(); (t == "user" || t == "assistant") && r[1].Type == gjson.String {
+		return r[1].String()
+	}
+	return ""
 }
 
 // piEntry is a line of a Pi (or oh-my-pi) session: an entry of its tree.

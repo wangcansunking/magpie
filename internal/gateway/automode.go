@@ -1,12 +1,12 @@
 package gateway
 
 import (
-	"bytes"
 	"slices"
 	"strings"
 
 	"github.com/tidwall/gjson"
 
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -14,20 +14,37 @@ import (
 // Behind a gateway, its first requests ask the API to do it: the
 // dangerous-tool-use beta and a `safeguards` field, answered by
 // `safeguard_results` in the reply: a whole reply's own, a stream's in its
-// message_delta. Anthropic's own API (and a relay in front of it) gets them
-// as they were sent, relayed or built (buildAnthropic), and the results
-// come back as it gave them, on a stream made of a whole reply too
+// message_delta's delta. Anthropic's own API (and a relay in front of it)
+// gets them as they were sent, relayed or built (buildAnthropic), and the
+// results come back as it gave them, on a stream made of a whole reply too
 // (anthropicWholeEvents). Any other model neither sees them nor answers
-// them (serverReview), and Claude Code, finding no result, classifies
-// locally for the rest of the session, naming the gateway in a notice.
-// magpie says nothing on the API's behalf. Where no model Claude Code can
-// reach through magpie is reviewed (AutoModeReviewed), the agent's wiring
-// turns the review off in Claude Code's settings instead
-// (CLAUDE_CODE_AUTO_MODE_SERVER=0, as Anthropic's page on the notice says to
-// for a gateway that can't run the checks), so it classifies locally from
-// the start and says nothing about the gateway (1EFLOPS on X). Where one
-// is, it is left on: /model can take the same session to that model,
-// which reviews it.
+// them (serverReview), and magpie says nothing on the API's behalf.
+//
+// What Claude Code does with a reply that has no results is Anthropic's
+// choice. Up to 2.1.316, with its flag (tengu_bright_dragonfly) off, it
+// classified locally for the rest of the session, naming the gateway in a
+// notice; with it on, every action the check would have judged asked for
+// approval ("Auto mode can't check actions in this session … your
+// requests go through 127.0.0.1:3425, which doesn't pass it through",
+// chenxiang0010 on Discord). 2.1.322 reads the flag as on wherever it
+// can't read flags or send telemetry (WJe in its bundle:
+// DISABLE_TELEMETRY, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC,
+// DO_NOT_TRACK, CLAUDE_CODE_DISABLE_FEATURE_FLAGS, DISABLE_GROWTHBOOK),
+// unless CLAUDE_CODE_AUTO_MODE_SERVER is "0". So a user who turned
+// Claude Code's telemetry off, on magpie's Agents page or in their shell,
+// had every action refused on a model whose route drops the results, a
+// Claude model on a relay as well as DeepSeek (JoyYoung2Lucky on X).
+// With "0", Claude Code asks for no review and runs its local classifier
+// from the start, which magpie serves on any model.
+//
+// So the agent's wiring writes CLAUDE_CODE_AUTO_MODE_SERVER=0 in Claude
+// Code's settings unless every model Claude Code can reach through magpie
+// is one whose results surely come back (AutoModeAnswered: Anthropic's own
+// API, or the Claude subscription, whose bridge hands the review to Claude
+// Code's own binary). A relay may pass the field through or drop it, and
+// /model can take a session from a reviewed model to one that isn't, so
+// either turns the review off; Claude Code's environment, the shell's
+// included, can't be read from here to tell whether it would fall back.
 //
 // Locally, the classifier is a request of its own on the session's model:
 // the transcript in <transcript> blocks, a system prompt asking for
@@ -86,6 +103,43 @@ func AutoModeReviewed(p provider.Provider, model string) bool {
 	return anthropicModel.MatchString(model)
 }
 
+// AutoModeReviewable reports whether Claude Code, asking for model at p
+// through magpie, can have its actions reviewed: AutoModeReviewed, on a
+// route that reaches the Messages API. A Claude model p serves only on
+// Chat or Responses (a relay with no Anthropic endpoint, or one the user
+// set to be asked on another API) is asked translated, and a translation
+// carries neither the safeguards nor their results (nexnull on Discord).
+// The agent's wiring asks this before a request is made; serverReview,
+// on the Messages route already, asks AutoModeReviewed.
+func AutoModeReviewable(p provider.Provider, model string) bool {
+	if !AutoModeReviewed(p, model) {
+		return false
+	}
+	if p.Account != nil {
+		return true // the Claude subscription, through Claude Code's own binary
+	}
+	if p.Base(provider.Anthropic) == "" {
+		return false
+	}
+	apis := p.APIs(model)
+	return apis == nil || slices.Contains(apis, provider.Anthropic)
+}
+
+// AutoModeAnswered reports whether Claude Code, asking for model at p
+// through magpie, surely gets the review's results back: AutoModeReviewable
+// on Anthropic's own API, or on the Claude subscription. A relay in front
+// of Anthropic is sent the safeguards (AutoModeReviewed) but may drop the
+// results, which 2.1.322 with its telemetry off reads as no check at all.
+func AutoModeAnswered(p provider.Provider, model string) bool {
+	if !AutoModeReviewable(p, model) {
+		return false
+	}
+	if p.Account != nil {
+		return p.Account.Agent == "claude"
+	}
+	return provider.HostOf(p.Base(provider.Anthropic)) == "api.anthropic.com"
+}
+
 // classifierRoom is what a model that reasons is given on top of the
 // classifier's own budget, as Claude Code gives a Claude model that can't
 // turn its thinking off.
@@ -123,8 +177,15 @@ func hasReply(msgs []Message) bool {
 
 // fitAutoModeClassifier asks a model that isn't Claude, for Claude Code's
 // auto mode classifier, to reason least — none when it can go without, its
-// lowest level otherwise, left to the vendor when its levels aren't known —
-// with room for that reasoning and the verdict.
+// lowest level otherwise — with room for that reasoning and the verdict.
+// A model whose levels aren't known (one on a relay the user added, under
+// the relay's own name for it) is asked for none too, as magpie's own ask
+// (OwnEffort): left to the vendor, a model that reasons did so at its
+// default over the whole policy and transcript, and Claude Code, which
+// waits 60 seconds an attempt for the verdict (2.1.310), closed the
+// request first (CyberCaius on Discord: every classifier request 499 on
+// a new-api relay's gpt6.1-sol). One that turns none away is asked at
+// low, and one that takes no effort at all without it (forwardTranslated).
 func fitAutoModeClassifier(p provider.Provider, model string, req *Request) {
 	if anthropicModel.MatchString(model) || !autoModeClassifier(req) {
 		return
@@ -135,19 +196,48 @@ func fitAutoModeClassifier(p provider.Provider, model string, req *Request) {
 	if req.Effort == "" {
 		if levels := p.Efforts(model); len(levels) > 0 {
 			req.Effort = fitEffort("none", levels)
+		} else {
+			req.Effort, req.OwnEffort = "none", true
 		}
 	}
+}
+
+// ownEffortField is the effort magpie added (OwnEffort), remembered in
+// unfit for a model whose upstream turned the field away.
+func ownEffortField(model string) string { return "own effort\x00" + model }
+
+var (
+	// effortFieldUnknown is an upstream that doesn't know the effort's
+	// field: OpenAI's "Unrecognized request argument supplied:
+	// reasoning_effort", a validator's "Extra inputs are not permitted"
+	effortFieldUnknown = lazyre.New(`(?i)(?:unrecogni[sz]ed|unknown|unsupported|unexpected|extra)\s+(?:request\s+)?(?:argument|parameter|field|property|name|key)s?(?:\s+supplied)?\W{0,4}reasoning(?:[._]effort)?\b|\breasoning(?:[._]effort)?['"\x60]?\W{0,4}(?:extra inputs are not permitted|is not (?:supported|allowed|permitted)|unsupported)`)
+)
+
+// ownEffortRefused reads a 400 to the effort magpie added (OwnEffort) as
+// turned away, and whether it was the level sent (value) rather than the
+// field. Anything else is the request's own fault and reaches the client.
+func ownEffortRefused(status int, body []byte, sent string) (refused, value bool) {
+	if !badRequest(status) || sent == "" {
+		return false, false
+	}
+	_, named := effortRefused(body, sent)
+	if !named && !effortFieldUnknown.Match(body) {
+		return false, false
+	}
+	low := strings.ToLower(string(body))
+	for _, q := range []string{"'", `"`, "`", `\"`} {
+		if strings.Contains(low, q+sent+q) {
+			return true, true
+		}
+	}
+	return true, false
 }
 
 // autoModeClassifierBody is fitAutoModeClassifier for a request relayed to
 // an Anthropic endpoint as it was sent: a model that isn't Claude gets the
 // room to reason in. The rest of the body is left alone.
 func autoModeClassifierBody(model string, body []byte) []byte {
-	if anthropicModel.MatchString(model) || !bytes.Contains(body, []byte("<transcript>")) || !bytes.Contains(body, []byte("<block>")) && !bytes.Contains(body, []byte("<severity>")) {
-		return body
-	}
-	req, err := parseAnthropic(body)
-	if err != nil || !autoModeClassifier(req) {
+	if anthropicModel.MatchString(model) || !autoModeClassifierAsk(body) {
 		return body
 	}
 	asked := gjson.GetBytes(body, "max_tokens").Int()
@@ -155,4 +245,35 @@ func autoModeClassifierBody(model string, body []byte) []byte {
 		return body
 	}
 	return withFields(body, map[string]any{"max_tokens": asked + classifierRoom})
+}
+
+// autoModeClassifierAsk reports whether body, a Messages API request, is
+// Claude Code's auto mode classifier asking about an action. The bytes
+// are looked at before the body is parsed: every request passes here.
+func autoModeClassifierAsk(body []byte) bool {
+	if !bodyHas(body, "<transcript>") || !bodyHas(body, "<block>") && !bodyHas(body, "<severity>") {
+		return false
+	}
+	req, err := parseAnthropic(body)
+	return err == nil && autoModeClassifier(req)
+}
+
+// ClassifierStandIn is the model Claude Code's auto mode classifier goes
+// to in place of the tier's it named, while that tier follows a main model
+// /model has moved since magpie wrote it; "" leaves it as asked. Set by
+// main (agent.ClassifierStandIn).
+var ClassifierStandIn func(agent, model string) string
+
+// classifierStandIn is ClassifierStandIn for a request Claude Code sent,
+// when it is the auto mode classifier: Claude Code names its sonnet tier
+// for it, not the session's model, so the first one after a switch in
+// /model went to the model before it until magpie moved the tier.
+func classifierStandIn(agent string, from provider.Protocol, asked string, body []byte) string {
+	if ClassifierStandIn == nil || agent != "claude" || from != provider.Anthropic || !autoModeClassifierAsk(body) {
+		return ""
+	}
+	if m := ClassifierStandIn(agent, asked); m != asked {
+		return m
+	}
+	return ""
 }

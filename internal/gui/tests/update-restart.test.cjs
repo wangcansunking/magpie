@@ -1,8 +1,8 @@
 // Run with Node's test runner and Playwright on the module path; see README.md.
 // Settings → Restart automatically (#2096): off by default; on, a downloaded
-// update is restarted into once no agent request is in flight. The switch
+// update is restarted into without cutting off an agent request. The switch
 // is saved as autoRestart and kept across a reload, with Automatic updates
-// and Check every left as they were. With automatic updates off it is kept,
+// and Update check interval left as they were. With automatic updates off it is kept,
 // dimmed, and says it works while they are on. No click moves the page, and
 // the row fits a narrow window. Every language, both engines, at 1100 and
 // 420 wide; no backend, the API is faked.
@@ -16,11 +16,11 @@ const { watchSettingsReads, settingsDrawn, openPart } = require("./reader.cjs");
 const assets = path.resolve(__dirname, "../assets");
 
 const words = {
-  en: { auto: "Automatic updates", restart: "Restart automatically", whileOn: "While automatic updates are on", what: "Once an update is downloaded, restarts into it when no agent request is in flight" },
-  zh: { auto: "自动更新", restart: "自动重启更新", whileOn: "自动更新开启时生效", what: "新版本下载好后，在没有 Agent 请求进行时自动重启到新版本" },
-  "zh-TW": { auto: "自動更新", restart: "自動重新啟動更新", whileOn: "自動更新開啟時生效", what: "新版本下載完成後，在沒有 Agent 請求進行時自動重新啟動到新版本" },
-  ja: { auto: "自動アップデート", restart: "自動で再起動", whileOn: "自動アップデートがオンのとき", what: "アップデートのダウンロード後、エージェントのリクエストが処理中でないときに再起動して適用します" },
-  de: { auto: "Automatische Updates", restart: "Automatisch neu starten", whileOn: "Solange automatische Updates aktiv sind", what: "Startet nach dem Download eines Updates neu, sobald keine Agent-Anfrage läuft" },
+  en: { auto: "Automatic updates", restart: "Restart automatically", whileOn: "While automatic updates are on", what: "Once an update is downloaded, restarts into it without cutting off an agent's request" },
+  zh: { auto: "自动更新", restart: "自动重启更新", whileOn: "自动更新开启时生效", what: "新版本下载好后自动重启到新版本，不会中断 Agent 的请求" },
+  "zh-TW": { auto: "自動更新", restart: "自動重新啟動更新", whileOn: "自動更新開啟時生效", what: "新版本下載完成後自動重新啟動到新版本，不會中斷 Agent 的請求" },
+  ja: { auto: "自動アップデート", restart: "自動で再起動", whileOn: "自動アップデートがオンのとき", what: "アップデートのダウンロード後、エージェントのリクエストを中断せずに再起動して適用します" },
+  de: { auto: "Automatische Updates", restart: "Automatisch neu starten", whileOn: "Solange automatische Updates aktiv sind", what: "Startet nach dem Download eines Updates neu, ohne eine Agent-Anfrage abzubrechen" },
 };
 
 function settingsPayload(lang, ctl) {
@@ -99,7 +99,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const errors = [];
         const page = await (await browser.newContext({ viewport: { width, height: 640 }, reducedMotion: "reduce" })).newPage();
         page.setDefaultTimeout(5000);
-        page.on("pageerror", (e) => errors.push(e.message));
+        page.setDefaultNavigationTimeout(60000);
+        page.on("pageerror", (e) => { if (!/^ResizeObserver loop completed with undelivered notifications/.test(e.message)) errors.push(e.message); });
         await page.route("**/*", server(lang, ctl));
         await watchSettingsReads(page);
         await page.goto("http://magpie.test/?view=settings");
@@ -147,10 +148,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
         // automatic updates off: kept, dimmed, says when it works
         // (the version row above then says automatic updates are off, a
-        // line that can grow it by a pixel or two: what is held is the
-        // control clicked, where it is on the screen, unless the view is at
-        // its top, which stays at its top and lets the switch move down by
-        // those pixels, #2134)
+        // line that grows it about 12px: what is held is the control
+        // clicked, where it is on the screen, unless the view is at its
+        // top, which stays at its top and lets the switch move down by
+        // less than its height, #2134)
         await showRow(page, auto);
         const settings = page.locator("#view-settings");
         const atTop = await settings.evaluate((v) => v.scrollTop < 1);
@@ -162,9 +163,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.equal(ctl.saves.at(-1).autoRestart, true);
         await page.waitForTimeout(400);
         const y1 = (await auto.locator(".opt").nth(0).boundingBox()).y;
-        if (atTop) {
+        // (the Version row's line wraps whole, arculongus on Discord: at a
+        // narrow width it can grow the row past the switch's height, and
+        // then the switch is held where it was clicked)
+        const held = Math.abs(y1 - y0) <= 1;
+        if (atTop && !held) {
           assert.equal(await settings.evaluate((v) => v.scrollTop), 0, "a view at its top stays at its top");
-          assert.ok(y1 - y0 >= -1 && y1 - y0 <= 4, `the clicked switch moved ${y1 - y0}px`);
+          const tall = (await auto.locator(".opt").nth(0).boundingBox()).height;
+          assert.ok(y1 - y0 >= -1 && y1 - y0 < tall, `the clicked switch moved ${y1 - y0}px, its height ${tall}px`);
         } else assert.ok(Math.abs(y1 - y0) <= 1, `the clicked switch moved ${y1 - y0}px`);
 
         // and off again

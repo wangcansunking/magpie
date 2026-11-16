@@ -10,6 +10,7 @@ package wslrun
 import (
 	"bufio"
 	"context"
+	"errors"
 	"net"
 	"net/url"
 	"os"
@@ -23,6 +24,8 @@ import (
 	"time"
 	"unicode/utf16"
 
+	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/settings"
 )
@@ -35,6 +38,7 @@ type Tool struct {
 	Mount  string // where Windows' drives are mounted: "/mnt/"
 	Host   string // the Windows host's address inside the distro, "" when it is 127.0.0.1 (HostLoopback)
 	Root   bool   // the distro's default user, as whom the command runs, is root
+	Home   string // that user's home folder, inside the distro
 }
 
 // On is whether there is WSL to look in: on Windows, or in tests.
@@ -46,7 +50,10 @@ var Run = func(timeout time.Duration, args ...string) ([]byte, error) {
 	defer cancel()
 	cmd := proc.CommandContext(ctx, "wsl.exe", args...)
 	cmd.Env = append(os.Environ(), "WSL_UTF8=1")
-	return cmd.Output()
+	out, err := cmd.Output()
+	// one that says WSL must be updated isn't run again for hours
+	proc.WSLSaid(out, err)
+	return out, err
 }
 
 var found struct {
@@ -64,7 +71,7 @@ const findAge = time.Minute
 // Detect agents in WSL off, or when no running distro has it.
 func Find(name string) (Tool, bool) {
 	// Settings' Detect agents in WSL, off, looks in no distro (#1264)
-	if !On || settings.Load().NoWSLAgents {
+	if !On || settings.Shared().NoWSLAgents {
 		return Tool{}, false
 	}
 	found.Lock()
@@ -112,6 +119,67 @@ func Find(name string) (Tool, bool) {
 	return Tool{}, false
 }
 
+// ErrDown is In's answer for a distro that isn't running, which it doesn't
+// start to look.
+var ErrDown = errors.New("the distro isn't running")
+
+// ErrNotFound is In's answer for a command the distro hasn't.
+var ErrNotFound = errors.New("not in the distro")
+
+// plainName is a command In can look for: the probe names it in a shell
+// script unquoted, so a name with anything else in it isn't looked for.
+var plainName = lazyre.New(`^[A-Za-z0-9_./+@:-]+$`)
+
+var foundIn struct {
+	sync.Mutex
+	at    map[string]time.Time
+	tools map[string]Tool
+}
+
+// In is command name, a program's name or its path, as distro has it, for
+// a run there: found as Find finds one (a login shell's PATH, then an
+// interactive one's, where nvm puts node), in that distro only. A distro
+// that isn't running is ErrDown and isn't started. A path the probe can't
+// name for the shell is taken as it is, on a login shell's usual PATH.
+// What was found is kept for findAge.
+func In(distro, name string) (Tool, error) {
+	if !On {
+		return Tool{}, errors.New("no WSL")
+	}
+	if !Up(distro) {
+		return Tool{}, ErrDown
+	}
+	if !plainName.MatchString(name) {
+		if strings.HasPrefix(name, "/") {
+			return Tool{Distro: distro, Path: name, PATH: defaultPATH, Mount: "/mnt/"}, nil
+		}
+		return Tool{}, ErrNotFound
+	}
+	key := distro + "\x00" + name
+	foundIn.Lock()
+	t, ok := foundIn.tools[key]
+	fresh := ok && time.Since(foundIn.at[key]) < findAge
+	foundIn.Unlock()
+	if fresh {
+		return t, nil
+	}
+	out, err := Run(30*time.Second, "-d", distro, "-e", "sh", "-lc", probeScript(name))
+	if err != nil {
+		return Tool{}, err
+	}
+	t, ok = parseProbe(distro, string(out))
+	if !ok {
+		return Tool{}, ErrNotFound
+	}
+	foundIn.Lock()
+	if foundIn.at == nil {
+		foundIn.at, foundIn.tools = map[string]time.Time{}, map[string]Tool{}
+	}
+	foundIn.at[key], foundIn.tools[key] = time.Now(), t
+	foundIn.Unlock()
+	return t, nil
+}
+
 var up struct {
 	sync.Mutex
 	at    time.Time
@@ -139,7 +207,8 @@ func running() (names []string, ok bool) {
 	}
 	if up.at.IsZero() || time.Since(up.at) > age {
 		b, err := Run(10*time.Second, "-l", "--running", "-q")
-		up.names, up.ok, up.at = Distros(b), err == nil, time.Now()
+		// no distro registered at all is an answer: none runs
+		up.names, up.ok, up.at = Distros(b), err == nil || errors.Is(err, proc.ErrNoWSLDistro), time.Now()
 		if err != nil {
 			up.names = nil
 		}
@@ -171,11 +240,14 @@ func Known(name string) (Tool, bool) {
 	return Tool{}, false
 }
 
-// Forget drops what Find knows, so the next Find looks again.
+// Forget drops what Find and In know, so the next one looks again.
 func Forget() {
 	found.Lock()
 	found.at, found.tools = nil, nil
 	found.Unlock()
+	foundIn.Lock()
+	foundIn.at, foundIn.tools = nil, nil
+	foundIn.Unlock()
 	up.Lock()
 	up.at = time.Time{}
 	up.Unlock()
@@ -193,10 +265,13 @@ func probeScript(name string) string {
 		`case "$p" in /mnt/*|"") continue;; esac; ` +
 		`[ -x "$p" ] && { echo "bin:$p"; ` +
 		`echo "path:$(bash -ic 'echo $PATH' 2>/dev/null </dev/null | tail -n1)"; echo "lpath:$PATH"; break; }; done; ` +
-		`echo "mount:$(wslpath -u 'C:\' 2>/dev/null)"; echo "uid:$(id -u)"; ` +
+		`echo "mount:$(wslpath -u 'C:\' 2>/dev/null)"; echo "uid:$(id -u)"; echo "home:$HOME"; ` +
 		`ip route show default 2>/dev/null | head -n1 | sed 's/^/route:/'; ` +
 		`command -v wslinfo >/dev/null 2>&1 && echo "net:$(wslinfo --networking-mode 2>/dev/null)"; true`
 }
+
+// defaultPATH is a login shell's PATH, for a distro that printed none.
+const defaultPATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 func parseProbe(distro, out string) (Tool, bool) {
 	t := Tool{Distro: distro, Mount: "/mnt/"}
@@ -227,6 +302,10 @@ func parseProbe(distro, out string) (Tool, bool) {
 			net_ = strings.ToLower(v)
 		case "uid":
 			t.Root = v == "0"
+		case "home":
+			if strings.HasPrefix(v, "/") {
+				t.Home = v
+			}
 		}
 	}
 	if !strings.HasPrefix(t.Path, "/") {
@@ -237,16 +316,155 @@ func parseProbe(distro, out string) (Tool, bool) {
 		t.PATH = ipath
 	}
 	if t.PATH == "" {
-		t.PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+		t.PATH = defaultPATH
 	}
 	if dir := t.Path[:strings.LastIndex(t.Path, "/")]; dir != "" && !onPath(t.PATH, dir) {
 		t.PATH = dir + ":" + t.PATH
 	}
-	if HostLoopback(net_) {
-		t.Host = ""
-	}
+	t.Host = HostAt(net_, t.Host, Nets())
 	return t, true
 }
+
+// Nets are the networks Windows has an address on that WSL distros reach
+// it through: the IPv4 addresses of its vEthernet (WSL…) adapters (NAT's
+// "vEthernet (WSL)" or "vEthernet (WSL (Hyper-V firewall))", a bridged
+// switch's "vEthernet (WSL_Bridge_Switch)"), there while WSL's VM runs.
+// None off Windows. A var for the tests.
+var Nets = nets
+
+func nets() []*net.IPNet {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	ifs, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	var out []*net.IPNet
+	for _, i := range ifs {
+		if i.Flags&net.FlagUp == 0 || !strings.Contains(i.Name, "(WSL") {
+			continue
+		}
+		addrs, _ := i.Addrs()
+		for _, a := range addrs {
+			if n, ok := a.(*net.IPNet); ok && n.IP.To4() != nil && !n.IP.IsLinkLocalUnicast() {
+				out = append(out, n)
+			}
+		}
+	}
+	return out
+}
+
+// HostAt is the address a distro in networking mode reaches Windows at,
+// from its default route's next hop (route) and the networks Windows has
+// on WSL's adapters (nets, Nets): "" where its 127.0.0.1 is Windows'
+// (HostLoopback). Under NAT the next hop is Windows' address on
+// vEthernet (WSL) itself, and is kept. Under bridged networking the
+// distro is a peer on the LAN and its next hop is the LAN's router
+// (192.168.9.1, ecalpal_ on Discord), not Windows: Windows is at its own
+// address on the bridge's adapter, the one whose network holds that
+// router. A next hop on no WSL network is kept as it was: NAT's
+// vEthernet (WSL) can be up beside a bridge on another subnet, and is
+// not where a bridged distro reaches Windows.
+func HostAt(mode, route string, nets []*net.IPNet) string {
+	if HostLoopback(mode) {
+		return ""
+	}
+	ip := net.ParseIP(route)
+	if ip == nil {
+		return route
+	}
+	var in []*net.IPNet
+	for _, n := range nets {
+		if n.IP.Equal(ip) {
+			return route // Windows' own: NAT's
+		}
+		if n.Contains(ip) {
+			in = append(in, n)
+		}
+	}
+	if len(in) == 1 {
+		return in[0].IP.String()
+	}
+	return route
+}
+
+// Via are Windows' own addresses off the WSL networks that a distro under
+// NAT reaches Windows at instead of its address on vEthernet (WSL), where a
+// firewall keeps WSL off that one (agent.wslFindVia, gateway.WSLVia), and
+// those being tried for it (listened at while a distro is asked, never
+// written into an agent): kept in magpie's folder (wsl-via), one a line,
+// a tried one after "try ", read again after viaAge. A file that can't be
+// read keeps the last read.
+func Via() (via, trying []net.IP) {
+	path := viaPath()
+	viaState.Lock()
+	defer viaState.Unlock()
+	if viaState.path == path && time.Since(viaState.at) < viaAge {
+		return viaState.ips, viaState.trying
+	}
+	b, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return viaState.ips, viaState.trying
+	}
+	for _, l := range strings.Split(string(b), "\n") {
+		l = strings.TrimSpace(l)
+		to := &via
+		if t, ok := strings.CutPrefix(l, "try "); ok {
+			l, to = strings.TrimSpace(t), &trying
+		}
+		if ip := net.ParseIP(l); viaOK(ip) && !slices.ContainsFunc(*to, ip.Equal) {
+			*to = append(*to, ip)
+		}
+	}
+	viaState.ips, viaState.trying, viaState.at, viaState.path = via, trying, time.Now(), path
+	return via, trying
+}
+
+// SetVia makes via the vias and trying those tried (Via); none of either
+// removes the file.
+func SetVia(via, trying []string) error {
+	path := viaPath()
+	var lines []string
+	parse := func(ss []string, prefix string) (out []net.IP) {
+		for _, s := range ss {
+			if ip := net.ParseIP(s); viaOK(ip) && !slices.ContainsFunc(out, ip.Equal) {
+				out = append(out, ip)
+				lines = append(lines, prefix+ip.String())
+			}
+		}
+		return out
+	}
+	v, t := parse(via, ""), parse(trying, "try ")
+	var err error
+	if len(lines) == 0 {
+		if err = os.Remove(path); errors.Is(err, os.ErrNotExist) {
+			err = nil
+		}
+	} else if err = os.MkdirAll(settings.Dir(), 0o700); err == nil {
+		err = edit.WriteAtomic(path, []byte(strings.Join(lines, "\n")+"\n"))
+	}
+	if err != nil {
+		return err
+	}
+	viaState.Lock()
+	viaState.ips, viaState.trying, viaState.at, viaState.path = v, t, time.Now(), path
+	viaState.Unlock()
+	return nil
+}
+
+var viaState struct {
+	sync.Mutex
+	ips, trying []net.IP
+	at          time.Time
+	path        string
+}
+
+const viaAge = 10 * time.Second
+
+func viaPath() string { return filepath.Join(settings.Dir(), "wsl-via") }
+
+func viaOK(ip net.IP) bool { return ip != nil && !ip.IsUnspecified() }
 
 // HostLoopback reports whether 127.0.0.1 inside a WSL 2 distro reaches
 // Windows' own 127.0.0.1 in networking mode, as wslinfo --networking-mode
@@ -323,6 +541,10 @@ var runSeq struct {
 	n int
 }
 
+// Args is Command's arguments to wsl.exe, without what Command adds to end
+// the run with ctx: for a program that starts wsl.exe itself.
+func (t Tool) Args(args ...string) []string { return t.argv(args) }
+
 func (t Tool) argv(args []string) []string {
 	runSeq.Lock()
 	runSeq.n++
@@ -343,6 +565,12 @@ func (t Tool) Linux(win string) string {
 		mount = "/mnt/"
 	}
 	return mount + strings.ToLower(win[:1]) + "/" + strings.TrimPrefix(rest, "/")
+}
+
+// Windows is where path linux inside the distro is on Windows:
+// \\wsl$\<distro>\home\me for /home/me.
+func (t Tool) Windows(linux string) string {
+	return `\\wsl$\` + t.Distro + strings.ReplaceAll(linux, "/", `\`)
 }
 
 func isLetter(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }

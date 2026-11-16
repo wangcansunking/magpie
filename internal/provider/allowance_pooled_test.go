@@ -16,9 +16,9 @@ func TestAllowancePooled(t *testing.T) {
 	month := now.Add(20 * 24 * time.Hour)
 	pool := map[string]bool{"auto": true, "composer-2": true}
 	q := quotaOfPlugin(SubscriptionQuota{}, plugin.Usage{Windows: []plugin.UsageWindow{
-		{Name: "Cursor Models", Used: 12, Models: []string{"auto", "composer-2"}},
-		{Name: "Other Models", Used: 100, NotModels: []string{"auto", "composer-2"}},
-		{Name: "Total", Used: 60, Aside: true},
+		{Name: "Cursor Models", Used: fptr(12), Models: []string{"auto", "composer-2"}},
+		{Name: "Other Models", Used: fptr(100), NotModels: []string{"auto", "composer-2"}},
+		{Name: "Total", Used: fptr(60), Aside: true},
 	}})
 	cursor := allowanceOf(q.Windows, now)
 	for _, m := range []string{"auto", "composer-2", "claude-4.6-sonnet", "gpt-5.5"} {
@@ -59,9 +59,9 @@ func TestPluginPoolCountsBareIDOfSizes(t *testing.T) {
 	now := time.Now()
 	pool := []string{"auto", "grok-4.7@256k", "grok-4.7@500k", "composer-2.5", "default"}
 	q := quotaOfPlugin(SubscriptionQuota{}, plugin.Usage{Windows: []plugin.UsageWindow{
-		{Name: "Cursor Models", Used: 16, Models: pool},
-		{Name: "Other Models", Used: 100, NotModels: pool},
-		{Name: "Total", Used: 60, Aside: true},
+		{Name: "Cursor Models", Used: fptr(16), Models: pool},
+		{Name: "Other Models", Used: fptr(100), NotModels: pool},
+		{Name: "Total", Used: fptr(60), Aside: true},
 	}})
 	a := allowanceOf(q.Windows, now)
 	for m, want := range map[string]float64{
@@ -89,11 +89,39 @@ func TestPluginPoolCountsBareIDOfSizes(t *testing.T) {
 	// the other way: the pool lists a bare id (Cursor's autoBucketModels),
 	// and the model is asked for at a size
 	q = quotaOfPlugin(SubscriptionQuota{}, plugin.Usage{Windows: []plugin.UsageWindow{
-		{Name: "Cursor Models", Used: 16, Models: []string{"auto", "grok-4.8"}},
-		{Name: "Other Models", Used: 100, NotModels: []string{"auto", "grok-4.8"}},
+		{Name: "Cursor Models", Used: fptr(16), Models: []string{"auto", "grok-4.8"}},
+		{Name: "Other Models", Used: fptr(100), NotModels: []string{"auto", "grok-4.8"}},
 	}})
 	a = allowanceOf(q.Windows, now)
 	if used, _ := a.For("grok-4.8@1m", now); used != 16 {
 		t.Errorf("grok-4.8@1m: used %v, want 16 (Cursor Models)", used)
+	}
+}
+
+// A model no window counts, on an account whose every window is some
+// models' only — Antigravity's Gemini models that fetchAvailableModels
+// gives no quota (#3737) beside Claude's own — is refused alone: nothing
+// says the account is out, and Claude used up never stopped Gemini 4
+// either (runking on Discord). With a window of the whole account, its
+// refusal is still the account's.
+func TestAllowancePooledModelNoWindowCounts(t *testing.T) {
+	now := time.Now()
+	week := now.Add(5 * 24 * time.Hour)
+	agy := allowanceOf([]QuotaWindow{
+		{Name: "Claude Sonnet 4.6", Model: "claude-sonnet-4-6", Family: "Claude", Used: 100, ResetsAt: &week},
+		{Name: "Gemini 3 Flash", Model: "gemini-3-flash", Family: "Gemini", Used: 8, ResetsAt: &week},
+		{Name: "5 hours", Pool: "Gemini", Used: 8, Aside: true},
+	}, now)
+	for _, m := range []string{"gemini-4-argon-high", "claude-sonnet-4-6", "gemini-3-flash"} {
+		if !agy.Pooled(m, 100, now) {
+			t.Errorf("Antigravity: %s refused rests the account", m)
+		}
+	}
+	whole := Allowance{{Used: 30, Resets: week, Span: 7 * 24 * time.Hour}, {Used: 10, Resets: week, Model: "opus"}}
+	if whole.Pooled("gemini-4-argon-high", 100, now) {
+		t.Error("a model the account's own week counts, refused, rests only the model")
+	}
+	if (Allowance{{Used: 10, Resets: week, Model: "opus"}, {Used: 20, Resets: week}}).Pooled("x", 100, now) {
+		t.Error("with a window of the whole account, a model no window counts is refused alone")
 	}
 }

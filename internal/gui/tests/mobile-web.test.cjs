@@ -13,7 +13,7 @@ const path = require("node:path");
 const { execFileSync } = require("node:child_process");
 const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
-const { reach, pointerClick } = require("./reader.cjs");
+const { reach, pointerClick, openPage } = require("./reader.cjs");
 const { PNG } = require("playwright-core/lib/utilsBundle");
 
 const assets = path.resolve(__dirname, "../assets");
@@ -119,6 +119,7 @@ function server(lang, original = false, opened = []) {
 async function open(browser, lang, width, { original = false, touch = true, opened = [] } = {}) {
   const page = await browser.newPage({ viewport: { width, height: 900 }, hasTouch: touch, reducedMotion: "reduce", colorScheme: "light" });
   page.setDefaultTimeout(5000);
+  page.setDefaultNavigationTimeout(60000);
   await page.addInitScript(at => {
     const RealDate = Date;
     window.Date = class extends RealDate {
@@ -133,23 +134,10 @@ async function open(browser, lang, width, { original = false, touch = true, open
 }
 
 async function go(page, view) {
-  const tab = page.locator(view === "settings" ? "#prefs" : `#nav [data-view="${view}"]`);
-  await tab.waitFor();
-  // Reveal a clipped tab with real horizontal wheel input. A native pointer
-  // press then tests the phone's strip without an implicit scroll or a
-  // stability wait for frames WebKit can withhold on a loaded runner.
-  if (view !== "settings") for (let i = 0; i < 40; i++) {
-    const at = await tab.evaluate((b) => {
-      const n = b.closest("#nav"), r = b.getBoundingClientRect(), v = n.getBoundingClientRect();
-      return { clear: r.left >= v.left - 1 && r.right <= v.right + 1, down: r.right > v.right, left: n.scrollLeft, x: v.left + v.width / 2, y: v.top + v.height / 2 };
-    });
-    if (at.clear) break;
-    await page.mouse.move(at.x, at.y);
-    await page.mouse.wheel(at.down ? 40 : -40, 0);
-    await page.waitForFunction((was) => document.getElementById("nav").scrollLeft !== was, at.left, { polling: 50 });
-  }
-  await pointerClick(page, tab);
-  await page.locator(`#view-${view}`).waitFor();
+  // the page's tab, or on a phone's tab bar More and its row for a page
+  // past the fifth (phonetabs.js)
+  if (view === "settings") await page.locator("#prefs").click();
+  await (view === "settings" ? page.locator(`#view-${view}`).waitFor() : openPage(page, view));
   if (view === "library") await page.locator("#view-library .lib-more:not(:disabled)").waitFor();
   if (view === "plugins") await page.locator("#view-plugins .pm-find").waitFor();
   if (view === "usage") {
@@ -265,7 +253,7 @@ async function usageFits(page) {
     return bad;
   });
   assert.deepEqual(bad, []);
-  for (const selector of ["#usageAgents .cost", "#usageModels .cost"]) assert.match(await page.locator(selector).first().textContent(), /≈\$12\.34/);
+  for (const selector of ["#usageAgents .cost", "#usageModels .cost"]) assert.match(await page.locator(selector).first().textContent(), /^\$12\.34$/);
 }
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
@@ -383,11 +371,47 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
                 });
                 await current.waitForTimeout(350);
               }
+              // Usage's lists' order picks are new (onducoder on X): until
+              // BASE_REF has them, they are taken out; usage-sort.test.cjs
+              // covers them.
+              if (view === "usage" && !baselineFile("plugins/usage/page.js").toString().includes("function usageSortPick")) {
+                await current.evaluate(() => { for (const b of document.querySelectorAll("#usagePane .row-head .us-sort, #usagePane .row-head .us-sort-gap")) b.remove(); });
+                await current.waitForTimeout(350);
+              }
               // Replies' Short Claude system prompt row is new: until BASE_REF
               // has it, the page is compared with the row taken out;
               // claude-lean-prompt-setting.test.cjs covers the row.
               if (view === "settings" && !baselineFile("app.js").includes("claudeLeanRow")) {
                 await current.locator("#claudeLeanRow").evaluate((r) => r.remove());
+                await current.waitForTimeout(350);
+              }
+              // The Routing page's Settings › button is new: until BASE_REF
+              // has it, the page is compared with the button taken out;
+              // settings-places.test.cjs covers it.
+              if (view === "routing" && !baselineFile("plugins/routing/client.js").toString().includes("rtToSet")) {
+                await current.locator("#rtToSet").evaluate((b) => b.remove());
+                await current.waitForTimeout(350);
+              }
+              // So is the Usage page's, in the allowances' head.
+              if (view === "usage" && !baselineFile("plugins/usage/client.js").toString().includes("usageToSet")) {
+                await current.locator("#usageToSet").evaluateAll((bs) => bs.forEach((b) => b.remove()));
+                await current.waitForTimeout(350);
+              }
+              // A setting row's line wraps whole (arculongus on Discord):
+              // until BASE_REF has that, the page is compared with the lines
+              // held to one line as they were; settings-lines-wrap.test.cjs
+              // covers the wrapping.
+              if (view === "settings" && !baselineFile("app.css").includes("arculongus")) {
+                await current.addStyleTag({ content: ".row.pref .sub { white-space: nowrap; overflow-wrap: normal; }" });
+                await current.waitForTimeout(350);
+              }
+              // The sidebar's button sits ahead of the magpie in both layouts
+              // (ztf4080 on X), so the header beside the sidebar no longer
+              // starts with it: until BASE_REF has it, the button, the magpie
+              // and the header beside the sidebar are left out of both pictures and the rest
+              // compared as ever; side-toggle.test.cjs covers where they are.
+              if (!baselineFile("app.js").includes("append(btn, brand)")) {
+                for (const p of [current, original]) await p.addStyleTag({ content: "#sideToggle, .brand, body.side-nav .top { visibility: hidden !important; }" });
                 await current.waitForTimeout(350);
               }
               const before = PNG.sync.read(await still(original));

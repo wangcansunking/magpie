@@ -60,7 +60,7 @@ func TestOutOfCreditLeavesFreeModels(t *testing.T) {
 
 	var mu sync.Mutex
 	var keys []string // the key each request for fake-1 came with
-	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	up := testenv.FakeVendor(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var q struct {
 			Model string `json:"model"`
 		}
@@ -80,7 +80,6 @@ func TestOutOfCreditLeavesFreeModels(t *testing.T) {
 		io.WriteString(w, `data: {"id":"c","object":"chat.completion.chunk","model":"fake-1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`+"\n\ndata: [DONE]\n\n")
 	}))
 	defer up.Close()
-	t.Setenv("FAKE_BASE", up.URL+"/v1")
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
@@ -142,5 +141,24 @@ func TestOutOfCreditLeavesFreeModels(t *testing.T) {
 	defer mu.Unlock()
 	if len(keys) != 1 || keys[0] != "Bearer k1" {
 		t.Fatalf("fake-1 went with %v, want the first account's (k1); rests %v", keys, got)
+	}
+}
+
+// OpenAI answers an organization whose prepaid API credits are spent with
+// 429 and the code credit_balance_exhausted (hey_boyce on X, 11-06). The
+// body here carries OpenAI's documented code alone, not a captured reply:
+// it is out of credit, so the next account takes the request, not a rate
+// limit that asks the same key again in a minute.
+func TestOpenAICreditBalanceExhaustedIsCredit(t *testing.T) {
+	for _, body := range []string{
+		`{"error":{"code":"credit_balance_exhausted"}}`,
+		`{"error":{"code":"credit_balance_exhausted","type":"rate_limit_exceeded"}}`,
+	} {
+		if got := failure(429, []byte(body)); got != failCredit {
+			t.Errorf("%s: %s, want %s", body, got, failCredit)
+		}
+		if minuteRate([]byte(body)) {
+			t.Errorf("%s: read as a minute's rate limit", body)
+		}
 	}
 }

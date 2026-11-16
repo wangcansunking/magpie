@@ -27,7 +27,7 @@ func TestContextSetByUser(t *testing.T) {
 	}
 
 	e := func(p, m string, ctx int) Entry {
-		return Entry{ID: p + "/" + m, Model: m, Name: m, Provider: Provider{ID: p}, Context: ctx}
+		return Entry{ID: p + "/" + m, Model: m, Name: m, Provider: &Provider{ID: p}, Context: ctx}
 	}
 	entries := []Entry{e("a", "m1", 128000), e("b", "m2", 200000)}
 	of := func() int {
@@ -85,7 +85,7 @@ func TestGroupToldItsLargestWindow(t *testing.T) {
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	e := func(p, m string, ctx int) Entry {
-		return Entry{ID: p + "/" + m, Model: m, Name: m, Provider: Provider{ID: p}, Context: ctx}
+		return Entry{ID: p + "/" + m, Model: m, Name: m, Provider: &Provider{ID: p}, Context: ctx}
 	}
 	entries := []Entry{
 		e("workbuddy-ai", "deepseek-v4.1-flash", 1000000),
@@ -184,5 +184,72 @@ func TestProviderWindowNoLargerThanTheModels(t *testing.T) {
 	}
 	if got := p.WindowOf(catalog.Model{ID: "gpt-6-sol", Context: 272000, MaxContext: 400000}); got != 400000 {
 		t.Errorf("codex past its max: %d", got)
+	}
+}
+
+// MisakaNatsuxun on Discord (10-23): a custom OpenAI-compatible provider set
+// to 1M for all of its models (Advanced → Context window) still told its
+// claude-sonnet-4-5 200K, the window models.dev gives that id under other
+// vendors. A relay's list says nothing of its window, and a guess from
+// another vendor's entry is magpie's default, not the provider's own word,
+// so the user's 1M is told. The models.dev bytes are anthropic's own entry
+// for the model, as it has it today. A window set lower than the guess
+// still holds, and a vendor's own list still caps "*" (#2112, above).
+func TestProviderWindowSetOverAnotherVendorsGuess(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	os.MkdirAll(filepath.Dir(catalog.CachePath()), 0o755)
+	if err := os.WriteFile(catalog.CachePath(), []byte(`{"anthropic":{"models":{
+	  "claude-sonnet-4-5":{"id":"claude-sonnet-4-5","name":"Claude Sonnet 4.5 (latest)","attachment":true,"reasoning":true,"tool_call":true,
+	    "modalities":{"input":["text","image","pdf"],"output":["text"]},"limit":{"context":200000,"output":64000}}}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	catalog.Reset()
+	t.Cleanup(catalog.Reset)
+	of := func(id string) int {
+		for _, e := range Served() {
+			if e.ID == id {
+				return e.Context
+			}
+		}
+		t.Fatalf("no %s", id)
+		return 0
+	}
+	relay := func(cx map[string]int) {
+		t.Helper()
+		if err := Save(Provider{ID: "relay", Name: "Relay", Key: "k", Chat: "https://relay.test/v1",
+			Models: []string{"claude-sonnet-4-5", "my-own-model-x"}, Contexts: cx}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	relay(nil)
+	if got := of("relay/claude-sonnet-4-5"); got != 200000 {
+		t.Fatalf("nothing set: told %d, want models.dev's 200000", got)
+	}
+	for _, c := range []struct {
+		cx        map[string]int
+		sonnet, x int
+	}{
+		{map[string]int{"*": 1000000}, 1000000, 1000000},
+		{map[string]int{"*": 128000}, 128000, 128000},
+		{map[string]int{"*": 128000, "claude-sonnet-4-5": 1000000}, 1000000, 128000},
+		{map[string]int{"claude-sonnet-4-5": 1000000}, 1000000, 0},
+	} {
+		relay(c.cx)
+		if got := of("relay/claude-sonnet-4-5"); got != c.sonnet {
+			t.Errorf("%v: claude-sonnet-4-5 told %d, want %d", c.cx, got, c.sonnet)
+		}
+		if got := of("relay/my-own-model-x"); got != c.x {
+			t.Errorf("%v: my-own-model-x told %d, want %d", c.cx, got, c.x)
+		}
+	}
+	// a window the provider's own list gives is its word, and "*" stays
+	// within it, as for OpenCode Go's catalog (#2112)
+	p := Provider{ID: "relay", Contexts: map[string]int{"*": 1000000}}
+	if got := p.WindowOf(catalog.Model{ID: "claude-sonnet-4-5", Context: 200000}); got != 200000 {
+		t.Errorf("listed by the vendor: %d", got)
 	}
 }

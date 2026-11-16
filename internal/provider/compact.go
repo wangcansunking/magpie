@@ -1,6 +1,8 @@
 package provider
 
 import (
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/yetone/magpie/internal/catalog"
@@ -28,6 +30,12 @@ func compactOf(s settings.Settings, providerID, model string) int {
 // outgrows its own. 0 when none is set: settings.Compact then answers.
 func CompactSet(id string) int {
 	return compactSet(settings.Load(), id, GroupFinder())
+}
+
+// CompactSetIn is CompactSet with the settings and group finder its caller
+// has already read (CompactFor's).
+func CompactSetIn(s settings.Settings, id string, find func(string) (Group, []Member, bool)) int {
+	return compactSet(s, id, find)
 }
 
 // CompactFor is where Codex compacts a conversation on e (catalog.Model's
@@ -121,12 +129,16 @@ func catalogID(id string) string {
 }
 
 func compactSet(s settings.Settings, id string, find func(string) (Group, []Member, bool)) int {
-	if len(s.ModelCompacts) == 0 {
-		return 0
-	}
 	id = catalogID(id)
 	if strings.HasPrefix(id, GroupPrefix) {
-		_, ms, _ := find(id)
+		g, ms, _ := find(id)
+		// the group's own, before what its members say
+		if g.Compact > 0 {
+			return g.Compact
+		}
+		if len(s.ModelCompacts) == 0 {
+			return 0
+		}
 		least := 0
 		for _, m := range ms {
 			if n := compactOf(s, m.Provider.ID, entryModel(m)); n > 0 && (least == 0 || n < least) {
@@ -134,6 +146,9 @@ func compactSet(s settings.Settings, id string, find func(string) (Group, []Memb
 			}
 		}
 		return least
+	}
+	if len(s.ModelCompacts) == 0 {
+		return 0
 	}
 	pid, model, ok := strings.Cut(id, "/")
 	if !ok {
@@ -158,7 +173,7 @@ func entryModel(m Member) string {
 // model id, "*" for all of them: what its editor's Compact at shows.
 func CompactsOf(providerID string) map[string]int {
 	out := map[string]int{}
-	for k, n := range settings.Load().ModelCompacts {
+	for k, n := range settings.Shared().ModelCompacts {
 		if model, ok := strings.CutPrefix(k, providerID+"/"); ok && model != "" && n > 0 {
 			out[model] = n
 		}
@@ -168,14 +183,16 @@ func CompactsOf(providerID string) map[string]int {
 
 // SetModelCompacts makes a provider's thresholds cs, by model id, "*" for
 // all of them, as its editor's Compact at says: those it leaves out are
-// taken away, and every one set has to be a model the provider serves, as
-// for a reply limit (SetModelOutputs). Codex's and Claude Code's lists are
-// written again when anything changed.
+// taken away, and every one set or changed has to be a model the provider
+// serves, as for a reply limit (SetModelOutputs); one sent back as it is
+// for a model the provider no longer lists is kept, not refused (#3305).
+// Codex's and Claude Code's lists are written again when anything changed.
 func SetModelCompacts(providerID string, cs map[string]int) error {
 	p, err := Find(providerID)
 	if err != nil {
 		return err
 	}
+	s := settings.Load()
 	for model, n := range cs {
 		if n < 0 {
 			return errorf("a compaction threshold is a number of tokens, not %d", n)
@@ -183,11 +200,10 @@ func SetModelCompacts(providerID string, cs map[string]int) error {
 		if err := settings.CheckModelKey("a compaction threshold", p.ID+"/"+model); err != nil {
 			return err
 		}
-		if model != "*" && n > 0 && !p.serves(model) {
+		if model != "*" && n > 0 && s.ModelCompacts[p.ID+"/"+model] != n && !p.serves(model) {
 			return errorf("%s has no model %s (magpie provider %s lists them)", p.ID, model, p.ID)
 		}
 	}
-	s := settings.Load()
 	changed := false
 	for k := range s.ModelCompacts {
 		if model, ok := strings.CutPrefix(k, p.ID+"/"); ok && cs[model] <= 0 {
@@ -215,6 +231,45 @@ func SetModelCompacts(providerID string, cs map[string]int) error {
 	return nil
 }
 
+// SetAgentCompact gives an agent of CompactAgents a Long conversations of
+// its own, c, over the one for every agent; nil takes it away, and the
+// agent follows that one again.
+func SetAgentCompact(agent string, c *settings.AgentCompact) error {
+	if !slices.Contains(settings.CompactAgents, agent) {
+		return errorf("%q writes no compaction window magpie sets", agent)
+	}
+	if c != nil && c.At < 0 {
+		return errorf("a compaction threshold is a number of tokens, not %d", c.At)
+	}
+	s := settings.Load()
+	cur, had := s.AgentCompacts[agent]
+	if c == nil {
+		if !had {
+			return nil
+		}
+		s.AgentCompacts = maps.Clone(s.AgentCompacts)
+		delete(s.AgentCompacts, agent)
+	} else {
+		n := *c
+		if n.At == settings.WorkingWindow {
+			n.At = 0
+		}
+		if had && cur == n {
+			return nil
+		}
+		s.AgentCompacts = maps.Clone(s.AgentCompacts)
+		if s.AgentCompacts == nil {
+			s.AgentCompacts = map[string]settings.AgentCompact{}
+		}
+		s.AgentCompacts[agent] = n
+	}
+	if err := settings.Save(s); err != nil {
+		return err
+	}
+	catalog.Touched()
+	return nil
+}
+
 // SetCompactAt has every model without a threshold of its own compacted at
 // n tokens, Full window turned off; 0 is the working window again
 // (settings.WorkingWindow).
@@ -230,6 +285,40 @@ func SetCompactAt(n int) error {
 		return nil
 	}
 	s.CompactAt, s.FullContext = n, false
+	if err := settings.Save(s); err != nil {
+		return err
+	}
+	catalog.Touched()
+	return nil
+}
+
+// SetContextCapAll chooses whether the longest context (SetContextCap) also
+// holds a window the user set for a model or its provider.
+func SetContextCapAll(all bool) error {
+	s := settings.Load()
+	if s.ContextCapAll == all {
+		return nil
+	}
+	s.ContextCapAll = all
+	if err := settings.Save(s); err != nil {
+		return err
+	}
+	catalog.Touched()
+	return nil
+}
+
+// SetContextCap holds every model's window to n tokens at most
+// (settings.ContextCap), where the user set none for the model or its
+// provider; 0 takes the cap away. Agents' lists are written again.
+func SetContextCap(n int) error {
+	if n < 0 {
+		return errorf("a context cap is a number of tokens, not %d", n)
+	}
+	s := settings.Load()
+	if s.ContextCap == n {
+		return nil
+	}
+	s.ContextCap = n
 	if err := settings.Save(s); err != nil {
 		return err
 	}

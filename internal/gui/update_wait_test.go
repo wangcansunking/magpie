@@ -40,11 +40,14 @@ func quick(t *testing.T, busy *fakeBusy, u *updater) {
 	t.Setenv("MAGPIE_UPDATE_FEED", "http://127.0.0.1:1/") // never the real one
 	oldBusy, oldSettle, oldMost, oldTick, oldRecheck := gatewayBusy, idleSettle, waitMost, waitTick, waitRecheck
 	gatewayBusy, idleSettle, waitMost, waitTick = busy.get, 80*time.Millisecond, time.Minute, 5*time.Millisecond
-	waitRecheck = func(*updater) {}
+	waitRecheck = func(*updater, bool) {}
+	oldAt, oldOpen := usedAt.Swap(0), usedOpen.Swap(false) // no window used
 	t.Cleanup(func() {
 		u.cancelWait()
 		u.loops.Wait()
 		gatewayBusy, idleSettle, waitMost, waitTick, waitRecheck = oldBusy, oldSettle, oldMost, oldTick, oldRecheck
+		usedAt.Store(oldAt)
+		usedOpen.Store(oldOpen)
 	})
 }
 
@@ -121,7 +124,7 @@ func TestRestartWhenIdle(t *testing.T) {
 	var told atomic.Int32
 	u.onWait = func() { told.Add(1) }
 	var restarts atomic.Int32
-	u.waitIdle(func() bool { restarts.Add(1); return true })
+	u.waitIdle(func() bool { restarts.Add(1); return true }, true)
 	time.Sleep(40 * time.Millisecond)
 	if restarts.Load() != 0 {
 		t.Fatal("restarted while streaming")
@@ -152,16 +155,19 @@ func TestRestartWhenIdle(t *testing.T) {
 	u.loops.Wait()
 	waitMost = 40 * time.Millisecond
 	busy.set(gateway.Busy{Requests: 1})
-	u.waitIdle(func() bool { restarts.Add(1); return true })
+	u.waitIdle(func() bool { restarts.Add(1); return true }, true)
 	eventually(t, "never gave up", func() bool { return u.json().GaveUp })
 	if j := u.json(); j.Waiting || restarts.Load() != 1 || j.Busy == nil {
 		t.Fatalf("gave up: %+v, %d restarts", j, restarts.Load())
 	}
 }
 
-// Versions out while a restart waits collapse into the newest: the restart
-// is into the last one, downloaded once the gateway is idle, not into each.
-func TestRestartWhenIdleIntoTheNewest(t *testing.T) {
+// Versions out while a click's restart waits for the gateway don't change
+// what it goes into: the one downloaded and waiting, with downloads on a
+// click too, and nothing downloaded again (sakamotokurome on X). The new
+// version's first check finds the newer ones.
+func TestRestartWhenIdleIntoTheWaiting(t *testing.T) {
+	sandboxHome(t)
 	busy := &fakeBusy{}
 	u := &updater{}
 	quick(t, busy, u)
@@ -195,6 +201,7 @@ func TestRestartWhenIdleIntoTheNewest(t *testing.T) {
 	if j := u.json(); j.State != "ready" || j.Latest != "0.1.11" {
 		t.Fatalf("%+v", j)
 	}
+	downloadsOnClick(t)
 	busy.set(gateway.Busy{Requests: 1})
 	into := make(chan string, 4)
 	u.waitIdle(func() bool {
@@ -202,20 +209,20 @@ func TestRestartWhenIdleIntoTheNewest(t *testing.T) {
 		into <- u.latest.Version
 		u.mu.Unlock()
 		return true
-	})
+	}, true)
 	latest.Store("0.1.12")
 	time.Sleep(30 * time.Millisecond)
 	latest.Store("0.1.13")
 	busy.set(gateway.Busy{})
 	select {
 	case v := <-into:
-		if v != "0.1.13" {
+		if v != "0.1.11" {
 			t.Fatalf("restarted into %s", v)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatalf("never restarted: %+v", u.json())
 	}
-	if j := u.json(); j.State != "ready" || j.Latest != "0.1.13" {
+	if j := u.json(); j.State != "ready" || j.Latest != "0.1.11" || u.staged == "" {
 		t.Fatalf("%+v", j)
 	}
 }

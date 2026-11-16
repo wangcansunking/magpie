@@ -14,7 +14,8 @@ function fixture() {
     { ...base, id: "antigravity", name: "Antigravity", keyList: [], account: { agent: "antigravity", agentName: "Antigravity", user: logins[0].user, logins } },
     { ...base, id: "relay", name: "Relay", keyList: Array.from({ length: 5 }, (_, i) => ({ id: `key-${i + 1}`, name: `Key ${i + 1}`, masked: `test-key-${i + 1}`, active: i === 0, on: i !== 2 })) },
   ], presets: [], excluded: [], gateway: { running: false, window: true } };
-  const state = { agents: ["alpha", "beta", "gamma"].map(id => ({ id, name: id, icon: "generic", path: "/fixture", fields: [] })), profiles: [], settings: { lang: "en", theme: "light" } };
+  // Get started put away: under it a new user's agents are folded
+  const state = { agents: ["alpha", "beta", "gamma"].map(id => ({ id, name: id, icon: "generic", path: "/fixture", fields: [] })), profiles: [], settings: { lang: "en", theme: "light", guideHidden: true } };
   const f = { providers, state, posted: [], failNext: false };
   const items = p => p.account ? p.account.logins : p.keyList;
   const id = (p, item) => p.account ? item.user : item.id;
@@ -73,18 +74,21 @@ function fixture() {
 const rows = page => page.locator(".accts [data-account-id]");
 const ids = page => rows(page).evaluateAll(rs => rs.map(r => r.dataset.accountId));
 const settled = page => page.waitForFunction(() => !accountArranging && !accountSaving);
-async function accountsDrawn(page) {
-  await rows(page).first().waitFor();
-  // Account rows appear before their allowance read. Its finally redraws
-  // the editor, so measuring the first rows can return a detached box.
+// drawn: the editor's rows as they stay. A signed-in provider's editor is
+// drawn at once and again when its accounts' allowances come in
+// (loginUsageOf), which replaces every row; a row held from the first draw
+// had no box by then (#4468, WebKit on a busy machine). It follows a
+// load, so its first draw has a load's room, not a click's (#4470).
+async function drawn(page) {
+  await rows(page).first().waitFor({ timeout: 60000 });
   await page.waitForFunction(() => {
-    const a = providers?.providers.find(p => p.id === editing)?.account?.agent;
-    return !a || (loginUsage[a]?.at && !loginUsage[a].loading);
+    const agent = providers?.providers.find(p => p.id === editing)?.account?.agent;
+    return !agent || (loginUsage[agent]?.at && !loginUsage[agent].loading);
   });
 }
 async function open(page, id, heldUsage) {
   await page.goto(`http://magpie.test/?view=providers&edit=${id}`);
-  await rows(page).first().waitFor();
+  await rows(page).first().waitFor({ timeout: 60000 });
   if (heldUsage) {
     let deadline;
     try {
@@ -95,11 +99,11 @@ async function open(page, id, heldUsage) {
     const early = await rows(page).first().locator(".n").elementHandle();
     assert(await early.boundingBox(), "the provisional name is visible before the usage reply");
     heldUsage.releaseUsage();
-    await accountsDrawn(page);
+    await drawn(page);
     assert.equal(await early.evaluate(e => e.isConnected), false, "usage completion replaced the provisional name");
     await early.dispose();
   }
-  await accountsDrawn(page);
+  await drawn(page);
 }
 async function point(row) {
   await row.scrollIntoViewIfNeeded();
@@ -135,6 +139,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     const context = await browser.newContext({ viewport: { width: 1000, height: 850 }, reducedMotion: "reduce", hasTouch: true });
     const page = await context.newPage(), errors = [];
     page.setDefaultTimeout(5000);
+    page.setDefaultNavigationTimeout(60000);
     page.on("pageerror", e => errors.push(e.message));
     await page.route("**/*", f.route);
     for (const id of ["antigravity", "relay"]) {
@@ -143,6 +148,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         // picked, then made with the editor's Save, which closes it
         const saveResponse = page.waitForResponse(response =>
           new URL(response.url()).pathname === "/api/provider/save" && response.request().method() === "POST");
+        // Routing is under Advanced, open already when it isn't Smart
+        { const adv = page.locator(".editor details.advanced"); await adv.waitFor({ state: "attached" }); if (!(await adv.evaluate(d => d.open))) await adv.locator(":scope > summary").click(); }
         await page.locator(".editor .segs button", { hasText: new RegExp(`^${label}$`) }).click();
         await page.locator(".editor .bar button", { hasText: /^Save$/ }).click();
         assert.equal((await saveResponse).status(), 200);
@@ -154,10 +161,17 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         assert.deepEqual(await ids(page), [before[1], before[0], ...before.slice(2)]);
         assert.equal(f.posted.filter(p => p.action === "/api/provider/arrange").length, count + 1);
         await checkFirst(page, f, id);
-        await page.reload(); await accountsDrawn(page);
+        await page.reload(); await drawn(page);
         await checkFirst(page, f, id);
         const wanted = (await ids(page))[1];
-        await rows(page).nth(1).getByRole("button", { name: "Make first", exact: true }).click();
+        // Smart and Least used first go by a subscription's quota, so Make
+        // first says the order only settles ties there; a relay's keys keep
+        // their order under Smart, never that the gateway uses it
+        // first (CryptoSarom on X)
+        const make = rows(page).nth(1).getByRole("button", { name: "Make first", exact: true });
+        const title = await make.getAttribute("title") || "";
+        assert.equal(/still goes by each account's quota/.test(title), id !== "relay" && (mode === "" || mode === "usage"), `${id} ${mode || "smart"}: ${title}`);
+        await make.click();
         await page.waitForFunction(ref => document.querySelector(".accts [data-account-id]").dataset.accountId === ref, wanted);
         await checkFirst(page, f, id);
       }

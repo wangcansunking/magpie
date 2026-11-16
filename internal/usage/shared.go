@@ -118,7 +118,7 @@ func OwnDays(since time.Time) map[string][]SharedCall {
 		if r.Via != "" {
 			continue
 		}
-		r.Archive, r.Computer = "", ""
+		r.Archive, r.Computer, r.ClientIP = "", "", "" // the address a call came from stays here
 		if len(r.Error) > 300 {
 			r.Error = r.Error[:300]
 		}
@@ -245,8 +245,11 @@ func sharedSources(since time.Time) (out []sharedSource, some bool) {
 	}
 	self, _ := Computer()
 	from := ""
-	if !since.IsZero() { // a day's calls began where it was a day: one before
-		from = since.AddDate(0, 0, -1).Format(time.DateOnly)
+	// A day's calls began where it was a day, and since is the reader's
+	// day, which can begin up to 26 hours from that computer's (UTC-12 and
+	// UTC+14): two days before.
+	if !since.IsZero() {
+		from = since.AddDate(0, 0, -2).Format(time.DateOnly)
 	}
 	for _, k := range kept {
 		c, day, _ := strings.Cut(k, "/")

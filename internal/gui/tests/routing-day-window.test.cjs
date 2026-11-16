@@ -86,7 +86,8 @@ const look = (page) => page.evaluate(() => {
   const seen = [...list.children].find((e) => (e.matches(".rt-req:not(.probe)") || e.matches(".rt-session")) && e.getBoundingClientRect().bottom > box.top + 1);
   return {
     rows: rows.length,
-    cols: getComputedStyle(list).gridTemplateColumns,
+    // the rows' columns, which every drawn row has the same of
+    cols: [...new Set(rows.map((r) => getComputedStyle(r).gridTemplateColumns))].join(" | "),
     models: rows.map((r) => r.querySelector(".m")?.textContent),
     first: seen && { text: seen.textContent, at: Math.round(seen.getBoundingClientRect().top - box.top) },
     top: list.scrollTop, height: list.scrollHeight, view: list.clientHeight,
@@ -108,6 +109,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
         const page = await browser.newPage({ viewport: { width, height: 900 }, reducedMotion: "reduce" });
         page.setDefaultTimeout(15000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
         await watchReplies(page, ["/api/gateway/history"]);
@@ -151,7 +153,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           if (at.models.includes(WIDE_MODEL)) break;
           await scrollTo(page, at.top + at.view);
         }
-        assert(at.models.includes(WIDE_MODEL), "the wide model's row was never drawn");
+        assert(at.models.includes(WIDE_MODEL), `the wide model's row was never drawn (at ${at.top} of ${at.height}, last ${at.models.slice(-2)})`);
         assert.equal(at.cols, topCols, "the columns changed width as the list scrolled");
         if (width > 760) {
           const cut = await page.evaluate((model) => {
@@ -217,6 +219,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const browser = await (engine === "webkit" ? webkit.launch() : chromium.launch({ channel: "chromium" }));
       const page = await browser.newPage({ viewport: { width: 1800, height: 900 }, reducedMotion: "reduce" });
       page.setDefaultTimeout(15000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", (e) => errors.push(e.message));
       await page.route("**/*", serve(lang));

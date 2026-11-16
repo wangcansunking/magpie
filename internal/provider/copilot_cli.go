@@ -54,21 +54,33 @@ func copilotCLIHome() string {
 	return filepath.Join(home, ".copilot")
 }
 
-// CopilotWSLHomes, set by internal/agent, are the homes, as magpie opens
-// them, of the WSL distros that run now: magpie on Windows finds a Copilot
-// CLI signed in inside one (#723, jia2). nil, or none, off Windows. A
-// stopped distro isn't in it: reading its files would start it.
-var CopilotWSLHomes func() []string
+// CopilotWSLDirs, set by internal/agent, are the Copilot CLI's folders
+// (~/.copilot), as magpie opens them, in the WSL distros that run now:
+// magpie on Windows finds a Copilot CLI signed in inside one (#723,
+// jia2). Where ~/.copilot is a link the folder is where it leads (#4502).
+// nil, or none, off Windows. A stopped distro isn't in it: reading its
+// files would start it.
+var CopilotWSLDirs func() []string
 
 // copilotWSLAge is how long a WSL distro's Copilot CLI sign-in is kept as
 // read: its files are read over WSL's file share, slower than a disk's.
 var copilotWSLAge = 20 * time.Second
 
+// copilotWSLWait is how long a request waits for a distro's sign-in to
+// be read again, from when that read started: one read at a time, outside
+// copilotWSL's lock, and a read WSL holds up answers the sign-in read
+// before. Held under the lock, a hung WSL queued every request behind
+// the first, and the gateway sent 504s after 30s (vsoullai on X, #6167).
+// A var for tests.
+var copilotWSLWait = 2 * time.Second
+
 var copilotWSL struct {
 	sync.Mutex
-	at  time.Time
-	app copilotApp
-	ok  bool
+	at    time.Time
+	app   copilotApp
+	ok    bool
+	done  chan struct{} // closed when the read in flight ends
+	start time.Time     // when it started
 }
 
 // copilotCLILogin is the account the Copilot CLI is signed in to, with its
@@ -83,23 +95,43 @@ func copilotCLILogin() (copilotApp, bool) {
 	if app, ok := copilotCLILoginIn(copilotCLIHome(), copilotCLISecret); ok {
 		return app, true
 	}
-	if CopilotWSLHomes == nil {
+	if CopilotWSLDirs == nil {
 		return copilotApp{}, false
 	}
 	c := &copilotWSL
 	c.Lock()
-	defer c.Unlock()
 	if !c.at.IsZero() && time.Since(c.at) < copilotWSLAge {
+		defer c.Unlock()
 		return c.app, c.ok
 	}
-	c.app, c.ok = copilotApp{}, false
-	for _, home := range CopilotWSLHomes() {
-		if app, ok := copilotCLILoginIn(filepath.Join(home, ".copilot"), nil); ok {
-			c.app, c.ok = app, true
-			break
-		}
+	if c.done == nil {
+		done, dirs := make(chan struct{}), CopilotWSLDirs
+		c.done, c.start = done, time.Now()
+		go func() {
+			var found copilotApp
+			ok := false
+			for _, dir := range dirs() {
+				if app, in := copilotCLILoginIn(dir, nil); in {
+					found, ok = app, true
+					break
+				}
+			}
+			c.Lock()
+			c.app, c.ok, c.at, c.done = found, ok, time.Now(), nil
+			c.Unlock()
+			close(done)
+		}()
 	}
-	c.at = time.Now()
+	done, start := c.done, c.start
+	c.Unlock()
+	t := time.NewTimer(time.Until(start.Add(copilotWSLWait)))
+	defer t.Stop()
+	select {
+	case <-done:
+	case <-t.C:
+	}
+	c.Lock()
+	defer c.Unlock()
 	return c.app, c.ok
 }
 
@@ -224,7 +256,7 @@ func copilotDirect(ctx context.Context, app copilotApp) (copilotSession, error) 
 	}
 	req.Header.Set("Authorization", "token "+github)
 	req.Header.Set("Accept", "application/json")
-	res, err := http.DefaultClient.Do(req)
+	res, err := Keyed(http.DefaultClient).Do(req)
 	if err != nil {
 		return copilotSession{}, errors.New("Copilot sign-in: " + err.Error())
 	}

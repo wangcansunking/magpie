@@ -220,7 +220,11 @@ func TestZCodeOutputAndReasoning(t *testing.T) {
 	b, _ := os.ReadFile(path)
 	for _, want := range []string{
 		`"limit":{"context":204800,"output":128000}`,
-		`"reasoning":{"defaultVariant":"high","enabled":true,"variants":["disabled","low","high","max"]}`,
+		// the reasoning keys ZCode reads (#3852): levels and defaultLevel,
+		// with thinking sent per level, at the level's budget (a Claude
+		// before 4.6 refuses "enabled" without one), and off for the level
+		// named disabled
+		`"reasoning":{"defaultLevel":"high","enabled":true,"levels":["disabled","low","high","max"],"providerOptionsByLevel":{"disabled":{"thinking":{"type":"disabled"}},"high":{"thinking":{"budget_tokens":24000,"type":"enabled"}},"low":{"thinking":{"budget_tokens":4096,"type":"enabled"}},"max":{"thinking":{"budget_tokens":32000,"type":"enabled"}}}}`,
 		`"GLM-5-Turbo":{"reasoning":{"enabled":true,"variants":["enabled","off"],"defaultVariant":"enabled"},"limit":{"context":200000,"output":64000}}`,
 	} {
 		if !strings.Contains(string(b), want) {
@@ -617,4 +621,194 @@ func TestZCodeKeepsTheUsersSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	check("pick")
+}
+
+// ZCode reads $HOME before os.homedir() on every OS, so on a Windows where
+// the user set HOME (for Git Bash, MSYS2, Emacs) its providers, settings
+// and moved data folder are under %HOME%\.zcode, not %USERPROFILE%\.zcode,
+// Go's home. magpie wrote its provider under USERPROFILE: connected, no
+// error, and no magpie in ZCode (Gearclickist on Discord).
+func TestZCodeOnWindowsUsesTheHomeZCodeReads(t *testing.T) {
+	profile := syncHome(t)
+	old := zcodeOS
+	zcodeOS = "windows"
+	t.Cleanup(func() { zcodeOS = old })
+	set := t.TempDir()
+	t.Setenv("HOME", set)
+	if err := provider.Save(provider.Provider{ID: "deepseek", Name: "DeepSeek", Chat: "https://api.deepseek.com/v1", Key: "k", Models: []string{"pro"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	want := filepath.Join(set, ".zcode")
+	a := zcode(profile)
+	if a.Dir != want || a.Path != filepath.Join(want, "v2", "config.json") {
+		t.Fatalf("ZCode's folder on Windows with HOME set: %s, %s; want %s", a.Dir, a.Path, want)
+	}
+	if err := a.Field("provider").Set("magpie"); err != nil {
+		t.Fatal(err)
+	}
+	if !zcodeRuled(filepath.Join(want, "v2", "provider_config.json")) {
+		t.Fatalf("no magpie in %s:\n%s", want, readFile(filepath.Join(want, "v2", "provider_config.json")))
+	}
+	if _, ok := edit.GetJSON(filepath.Join(want, "v2", "config.json"), "provider.magpie"); !ok {
+		t.Fatal("no magpie in config.json under HOME")
+	}
+	if _, err := os.Stat(filepath.Join(profile, ".zcode")); err == nil {
+		t.Fatal("written under USERPROFILE, which ZCode doesn't read while HOME is set")
+	}
+
+	// the data folder moved in ZCode's settings is read from the setting.json
+	// under HOME, where ZCode keeps it
+	moved := t.TempDir()
+	setting, _ := json.Marshal(map[string]any{"dataBaseDir": moved})
+	os.WriteFile(filepath.Join(want, "v2", "setting.json"), setting, 0o644)
+	if got := zcode(profile).Dir; got != filepath.Join(moved, ".zcode") {
+		t.Fatalf("moved data folder under HOME's settings: %s", got)
+	}
+	os.Remove(filepath.Join(want, "v2", "setting.json"))
+
+	// no HOME, or one that isn't rooted: USERPROFILE, as ZCode's os.homedir()
+	for _, h := range []string{"", "  ", "relative"} {
+		t.Setenv("HOME", h)
+		if got := zcode(profile).Dir; got != filepath.Join(profile, ".zcode") {
+			t.Fatalf("HOME %q: %s", h, got)
+		}
+	}
+	// a folder that isn't the user's own home (a test's, a WSL distro's) is
+	// ZCode's as given
+	t.Setenv("HOME", set)
+	other := t.TempDir()
+	if got := zcode(other).Dir; got != filepath.Join(other, ".zcode") {
+		t.Fatalf("a given folder that isn't USERPROFILE: %s", got)
+	}
+	// elsewhere Go's home is HOME already: the folder given stays
+	zcodeOS = "darwin"
+	if got := zcode(profile).Dir; got != filepath.Join(profile, ".zcode") {
+		t.Fatalf("darwin: %s", got)
+	}
+}
+
+// A model whose source lists video input is one ZCode attaches a video to
+// (Flandern1211 on X, #5098): both of ZCode's files say it takes video while
+// the provider is on Messages or Chat, which the gateway carries a video on,
+// and neither does on Responses, where ZCode refuses one. A model without
+// video says nothing of it, and no PDF is offered while a translated
+// request loses one (#5452).
+func TestZCodeToldOfVideoInput(t *testing.T) {
+	home := syncHome(t)
+	base := "https://example.test/v1"
+	if err := provider.Save(provider.Provider{ID: "media", Name: "Media", Chat: base, Key: "k", Models: []string{"gemini", "plain"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.SaveLive("media", base, []catalog.Model{
+		{ID: "gemini", Images: true, InputModalities: []string{"text", "image", "video", "audio", "pdf"}},
+		{ID: "plain", Images: true, InputModalities: []string{"text", "image"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(home, ".zcode", "v2")
+	path, rules := filepath.Join(dir, "config.json"), filepath.Join(dir, "provider_config.json")
+	os.MkdirAll(dir, 0o755)
+	a := zcode(home)
+	if err := a.Field("provider").Set("magpie"); err != nil {
+		t.Fatal(err)
+	}
+	read := func() (in map[string][]string, format map[string]map[string]any, api string) {
+		t.Helper()
+		var c struct {
+			Provider map[string]struct {
+				Models map[string]struct {
+					Modalities struct {
+						Input []string `json:"input"`
+					} `json:"modalities"`
+				} `json:"models"`
+			} `json:"provider"`
+		}
+		if err := json.Unmarshal([]byte(readFile(path)), &c); err != nil {
+			t.Fatal(err)
+		}
+		in = map[string][]string{}
+		for id, m := range c.Provider["magpie"].Models {
+			in[id] = m.Modalities.Input
+		}
+		var d struct {
+			Config struct {
+				ProviderConfigRules struct {
+					ProviderRules []struct {
+						ProviderID string `json:"providerId"`
+						Config     struct {
+							API struct {
+								Type string `json:"type"`
+							} `json:"api"`
+						} `json:"config"`
+					} `json:"providerRules"`
+				} `json:"providerConfigRules"`
+				ModelConfigRules struct {
+					ProviderModelRules []struct {
+						ModelID string `json:"modelId"`
+						Config  struct {
+							Properties struct {
+								InputFormat map[string]any `json:"inputFormat"`
+							} `json:"properties"`
+						} `json:"config"`
+					} `json:"providerModelRules"`
+				} `json:"modelConfigRules"`
+			} `json:"config"`
+		}
+		if err := json.Unmarshal([]byte(readFile(rules)), &d); err != nil {
+			t.Fatal(err)
+		}
+		format = map[string]map[string]any{}
+		for _, r := range d.Config.ModelConfigRules.ProviderModelRules {
+			format[r.ModelID] = r.Config.Properties.InputFormat
+		}
+		for _, r := range d.Config.ProviderConfigRules.ProviderRules {
+			if r.ProviderID == "magpie" {
+				api = r.Config.API.Type
+			}
+		}
+		return in, format, api
+	}
+	for _, api := range []string{"anthropic-messages", "openai-chat-completions", "openai-responses"} {
+		if api != "anthropic-messages" {
+			// the format picked in ZCode's settings, kept by a sync
+			doc := map[string]any{}
+			if err := json.Unmarshal([]byte(readFile(rules)), &doc); err != nil {
+				t.Fatal(err)
+			}
+			for _, r := range doc["config"].(map[string]any)["providerConfigRules"].(map[string]any)["providerRules"].([]any) {
+				if r := r.(map[string]any); r["providerId"] == "magpie" {
+					r["config"].(map[string]any)["api"].(map[string]any)["type"] = api
+				}
+			}
+			b, _ := json.Marshal(doc)
+			os.WriteFile(rules, b, 0o600)
+			later := time.Now().Add(time.Minute)
+			os.Chtimes(rules, later, later)
+			if err := a.Sync(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		in, format, got := read()
+		if got != api {
+			t.Fatalf("format %q, want %q:\n%s", got, api, readFile(rules))
+		}
+		video := api != "openai-responses"
+		want := []string{"text", "image"}
+		if video {
+			want = append(want, "video")
+		}
+		if !slices.Equal(in["media/gemini"], want) {
+			t.Fatalf("%s: config.json's media/gemini takes %v, want %v", api, in["media/gemini"], want)
+		}
+		if !slices.Equal(in["media/plain"], []string{"text", "image"}) {
+			t.Fatalf("%s: config.json's media/plain takes %v", api, in["media/plain"])
+		}
+		if f := format["media/gemini"]; f["supportsImage"] != true || (f["supportsVideo"] == true) != video || f["supportsPdf"] != nil || f["supportsAudio"] != nil {
+			t.Fatalf("%s: media/gemini's inputFormat %v", api, f)
+		}
+		if f := format["media/plain"]; f["supportsImage"] != true || f["supportsVideo"] != nil {
+			t.Fatalf("%s: media/plain's inputFormat %v", api, f)
+		}
+	}
 }
