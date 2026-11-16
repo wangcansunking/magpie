@@ -11,11 +11,11 @@ import (
 func TestWANRecoveryNoticeOpensWAN(t *testing.T) {
 	for _, goos := range []string{"windows", "darwin", "linux"} {
 		response := notifications.NotificationResponse{ID: wanNotice + "fixture", ActionIdentifier: linuxClick}
-		if got := notificationView(goos, response); got != "wan" {
+		if got := clickView(goos, response); got != "wan" {
 			t.Fatalf("%s WAN notice opens %q", goos, got)
 		}
 	}
-	if got := notificationView("linux", notifications.NotificationResponse{ID: wanNotice + "fixture", ActionIdentifier: notifications.DefaultActionIdentifier}); got != "" {
+	if got := clickView("linux", notifications.NotificationResponse{ID: wanNotice + "fixture", ActionIdentifier: notifications.DefaultActionIdentifier}); got != "" {
 		t.Fatal("dismissing a WAN alert opened a window")
 	}
 }

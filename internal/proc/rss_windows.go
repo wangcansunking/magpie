@@ -31,13 +31,14 @@ type processMemoryCounters struct {
 func (t *Tree) rss(cmd *exec.Cmd) (int64, bool) {
 	defer t.mu.Unlock()
 	pids := []uint32{uint32(cmd.Process.Pid)}
-	if t.job != 0 {
+	g, _ := t.treeGroup.(*group)
+	if g != nil && g.job != 0 {
 		// JOBOBJECT_BASIC_PROCESS_ID_LIST: two counts, then the ids
 		var list struct {
 			assigned, listed uint32
 			ids              [256]uintptr
 		}
-		if err := windows.QueryInformationJobObject(t.job, windows.JobObjectBasicProcessIdList,
+		if err := windows.QueryInformationJobObject(g.job, windows.JobObjectBasicProcessIdList,
 			uintptr(unsafe.Pointer(&list)), uint32(unsafe.Sizeof(list)), nil); err == nil && list.listed > 0 {
 			pids = pids[:0]
 			for _, id := range list.ids[:min(int(list.listed), len(list.ids))] {

@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/yetone/magpie/internal/lazyre"
 	"io"
 	"log"
 	"net"
@@ -15,7 +16,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -839,7 +839,7 @@ func readTunnel(path string) (tunnelConfig, bool, error) {
 }
 
 // Anchored from @microsoft/dev-tunnels-contracts 1.3.6 TunnelConstraints.
-var canonicalCluster = regexp.MustCompile(`^(([a-z]{3,4}[0-9]{1,3})|asse|aue|brs|euw|use)$`)
+var canonicalCluster = lazyre.New(`^(([a-z]{3,4}[0-9]{1,3})|asse|aue|brs|euw|use)$`)
 
 func validCanonicalConfig(config tunnelConfig) bool {
 	return config.Version == 2 && validTunnelID(config.ID) && canonicalCluster.MatchString(config.ClusterID) && config.Port > 0 && config.Port <= 65535

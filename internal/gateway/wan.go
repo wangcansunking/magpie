@@ -27,9 +27,9 @@ func wanRequest(r *http.Request) bool {
 // The owner of its listener controls lifetime; stopping a key applies to
 // new requests while already authenticated streams finish normally.
 func (s *Server) WANHandler() http.Handler {
-	mux := http.NewServeMux()
+	mux := &routeMux{ServeMux: http.NewServeMux()}
 	s.inferenceRoutes(mux)
-	return wanSurface(mux, wanGuard(s.apiHandler(mux)))
+	return wanSurface(mux.ServeMux, wanGuard(s.apiHandler(mux)))
 }
 
 // wanSurface rejects noncanonical paths before ServeMux can redirect or

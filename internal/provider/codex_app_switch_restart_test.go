@@ -119,9 +119,9 @@ type fakeCodexApp struct {
 func (f *fakeCodexApp) start() {
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := proc.CommandContext(ctx, os.Args[0], "-test.run=^TestCodexSwitchAppHelper$")
-	// TMPDIR is this test's: given no testenv.Marker, the helper makes a
-	// test home of its own there, which it never removes once ended
-	cmd.Env = []string{"MAGPIE_CODEX_SWITCH_HELPER=1", "TMPDIR=" + f.t.TempDir(), "HOME=" + f.t.TempDir()}
+	// Keep TestMain's isolated environment and marker, including the Windows
+	// system folders needed to start this test binary again.
+	cmd.Env = append(os.Environ(), "MAGPIE_CODEX_SWITCH_HELPER=1")
 	out, _ := cmd.StdoutPipe()
 	if err := cmd.Start(); err != nil {
 		cancel()
