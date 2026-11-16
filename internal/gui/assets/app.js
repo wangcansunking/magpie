@@ -1185,16 +1185,18 @@ function connectSaid(a) {
 // switched on, Codex kept its last pick, Claude Code started on a Sonnet
 // through magpie and Antigravity on some model, with nothing to say why).
 // c is agent.Connection: how the model was chosen.
+const CONN_WAS = "{agent} is connected to magpie · on {model} through magpie, the model it was on";
 const CONNECTED_HOW = {
   again: "{agent} is connected to magpie · back on {model}, what it was on when it was switched off",
-  same: "{agent} is connected to magpie · on {model} through magpie, the model it was on",
-  alike: "{agent} is connected to magpie · on {model} through magpie, the model it was on",
+  same: CONN_WAS,
+  alike: CONN_WAS,
   default: "{agent} is connected to magpie · on {model} through magpie: it had no model set, so the first of its own",
   first: "{agent} is connected to magpie · on {model} through magpie: magpie doesn't serve the model it was on",
+  remote: "{agent} is connected to magpie · on {model}, as on the remote magpie",
 };
 function connectedSaid(a, c) {
   const plain = t("{agent} is connected to magpie", { agent: a.name });
-  if (a.native && c?.how === "joined") return t("{agent} is connected to magpie", { agent: a.name });
+  if (a.native && c?.how === "joined") return plain;
   if (c?.how === "joined") return t("{agent} is connected to magpie · it stays on its own last pick; magpie's models join its {cmd}", { agent: a.name, cmd: PICKS_IN[kindOf(a)] || "/model" });
   const now = state.agents.find((x) => x.id === a.id);
   const f = now && startField(now);
@@ -12362,7 +12364,7 @@ function kindTag(c, kind) {
 // renderRouting: spread over keys or accounts and stickiness, staged in
 // the draft and made with Save (01huadalang on Discord)
 const ROUTINGS = [
-  ["", "Smart", "Not load balancing: requests go to one account at a time, the one whose quota renews soonest, since what it has left is lost then; the next takes over when it is at 90% or can't answer. Keys go in their order. To spread requests evenly, pick In turn or Least used first. One out of credit sits out half an hour, one out of quota until it resets, one rate limited as long as the vendor asks, and one that fails a minute, longer each time it fails again."],
+  ["", "Smart", "Not load balancing: every request, new conversations too, goes to the one account whose quota renews soonest, since what it has left is lost then, until it runs low or can't answer. Keys go in their order. To spread requests evenly, pick In turn or Least used first. One out of credit sits out half an hour, one out of quota until it resets, one rate limited as long as the vendor asks, and one that fails a minute, longer each time it fails again."],
   ["order", "In order", "Requests go to the first; the next takes over when the one before runs out of quota, hits a rate limit or fails."],
   // dzxx0496 on Discord: free accounts one after another, the first not
   // taking the requests back once it renews (routes.Drain)
@@ -17252,8 +17254,11 @@ function planTerm(q) {
   return t(q.renew === "auto" ? "Renews {date}" : q.renew === "off" ? "Expires {date}" : "Until {date}", { date });
 }
 // planName: a plan id as the vendor's own app names it (visamzh on X:
-// ChatGPT's self_serve_business_prolite is its Business)
-const PLAN_NAMES = { self_serve_business_prolite: "Business", self_serve_business_usage_based: "Business", free_workspace: "Free", ent26: "Enterprise", prolite: "Pro Lite", promax: "Pro Max", edu_plus: "Edu Plus", edu_pro: "Edu Pro" };
+// ChatGPT's self_serve_business_prolite is its Business). ChatGPT's app
+// names its Pro plans by price: prolite Pro 100, promax Pro 500
+// (shangyuan0818 on X: "Pro Lite" is no plan it sells). Its plain pro
+// stays Pro, as Claude's and Grok's pro share the id
+const PLAN_NAMES = { self_serve_business_prolite: "Business", self_serve_business_usage_based: "Business", free_workspace: "Free", ent26: "Enterprise", prolite: "Pro 100", promax: "Pro 500", edu_plus: "Edu Plus", edu_pro: "Edu Pro" };
 const planName = (p) => p && (PLAN_NAMES[p] || (/^enterprise_cbp_/.test(p) ? "Enterprise" : p));
 const planChip = (s) => Object.assign(el("span", "plan", s), { title: s });
 function planSpan(q) {
@@ -23376,6 +23381,8 @@ const navList = (k) => { try { return JSON.parse(localStorage.getItem("magpie.na
 const navMine = () => navList("Hidden");
 function navHides() {
   if (mode !== "window") return;
+  // the reader's own order (navorder.js), imported only once there is one
+  window.navArrange ? navArrange() : navList("Order").length && import("./navorder.js").then(navHides, () => {});
   for (const b of $("#nav").querySelectorAll("button[data-view]")) b.hidden = (gatewayMode && GATEWAY_HIDES.includes(b.dataset.view)) || featureHides(b) || navMine().includes(b.dataset.view);
 }
 function applyFeatures(list) {

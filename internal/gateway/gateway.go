@@ -1061,6 +1061,7 @@ func (s *Server) routes() *routeMux {
 	mux.HandleFunc("GET /v1/magpie/quotas/history", s.quotasHistory)
 	mux.HandleFunc("GET "+provider.RemoteCardsPath, s.quotaCards)
 	mux.HandleFunc("GET "+provider.RemoteLibraryPath, s.sharedLibrary)
+	mux.HandleFunc("GET "+provider.RemoteAgentModelsPath, s.sharedAgentModels)
 	mux.HandleFunc("POST "+provider.RemoteRefreshPath, s.quotaCardsRefresh)
 	mux.HandleFunc("POST "+provider.RemoteCodexResetPath, s.codexReset)
 	mux.HandleFunc("GET /v1/magpie/route", s.sessionRoute)
@@ -1330,6 +1331,39 @@ func (s *Server) sharedLibrary(w http.ResponseWriter, r *http.Request) {
 	b, err := SharedLibrary()
 	if err != nil {
 		writeError(w, provider.Chat, http.StatusInternalServerError, "reading the Library: "+err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Write(b)
+}
+
+// SharedAgentModels is the models this magpie's agents are on as another
+// magpie is told them (JSON, provider.AgentModels), set by the agent
+// package: the gateway doesn't read agents' configs.
+var SharedAgentModels func() ([]byte, error)
+
+// sharedAgentModels tells another magpie that has this one as its
+// provider the models this computer's agents are on, so its own agents
+// start on them and follow a change made here (KoiLx0 on X). Asked as the
+// Library is: this computer, or a full-access key of a magpie shared on
+// the local network.
+func (s *Server) sharedAgentModels(w http.ResponseWriter, r *http.Request) {
+	if !local(r) && !sharedWith(r) {
+		writeError(w, provider.Chat, http.StatusForbidden, "magpie's agent models are told to another machine only when magpie is shared on the local network (Settings → Share on local network) and the request carries its API key (Authorization: Bearer <key> or x-api-key: <key>)")
+		return
+	}
+	if heldKey(access.Caller(r.Context())) {
+		refuseHeld(w, r, heldQuotasOff)
+		return
+	}
+	if SharedAgentModels == nil {
+		writeError(w, provider.Chat, http.StatusNotFound, "this magpie has no agents to tell")
+		return
+	}
+	b, err := SharedAgentModels()
+	if err != nil {
+		writeError(w, provider.Chat, http.StatusInternalServerError, "reading the agents' models: "+err.Error())
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -5920,6 +5954,15 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 	if relay && !keep && customOff() {
 		relay, ownAPI = false, true
 	}
+	// and input items a model turned away before (input_kinds.go: a
+	// subagent's agent_message to a server that knows OpenAI's first
+	// items alone)
+	itemsOff := func() bool {
+		return from == provider.Responses && !inCompaction(r.Context()) && !s.fits(p.ID, inputKindsRefused(model), from) && hasOtherItem(body)
+	}
+	if relay && !keep && itemsOff() {
+		relay, ownAPI = false, true
+	}
 	// and a backend that turned a request for one body away because it
 	// only streams (stream_only.go) is asked streamed, translated
 	streamOnly := (from == provider.Chat || from == provider.Responses) && !streamOf(body) && !s.fits(p.ID, streamOnlyRefused(model), from)
@@ -5947,7 +5990,7 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, from provider.P
 		// or it turned the custom tools away just now: speak it translated,
 		// except a compaction or a sealed subagent task, which a
 		// translation would leave out
-		if customOff() || !s.fits(p.ID, streamOnlyRefused(model), from) && !streamOf(body) {
+		if customOff() || itemsOff() || !s.fits(p.ID, streamOnlyRefused(model), from) && !streamOf(body) {
 			if keep || sealed {
 				return writeError(w, from, status, msg), msg
 			}
@@ -7124,6 +7167,16 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			// and from then on
 			res.Body.Close()
 			s.markUnfit(p.ID, customToolRefused(model), proto)
+			return res.StatusCode, p.Name + ": " + provider.APIError(b, res.Status), false
+		}
+		if proto == provider.Responses && !inCompaction(r.Context()) && inputKindWords.Match(b) && hasOtherItem(body) {
+			// an input item it has no type for turned away (a local
+			// Qwen server's "Unsupported input item: agent_message",
+			// input_kinds.go): translated on the same API, and so from
+			// then on. A compaction's summary ask has its own way on, the
+			// conversation as text (inputKindRefused)
+			res.Body.Close()
+			s.markUnfit(p.ID, inputKindsRefused(model), proto)
 			return res.StatusCode, p.Name + ": " + provider.APIError(b, res.Status), false
 		}
 		if gather == nil && refusesWhole(proto, body, b) {

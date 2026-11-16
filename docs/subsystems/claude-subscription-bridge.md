@@ -135,6 +135,30 @@ handed over as `mcp__linear__…`. A deferred tool the run's model calls
 by the bare client name (`WebFetch`, `mcp__linear__…`) is the run's
 Claude Code's to answer and is not handed over.
 
+Claude Code's `/advisor` (`advisor_20260301`, sent with
+`CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL`, which the Claude Code
+advisor field writes) is a server tool: the run's Claude Code, offered
+magpie's tools only, can't pass it on, and Anthropic's server would not
+take magpie's id for its model anyway. Before #6804 the bridge read the
+request as a translation without one: the advisor was left out and its
+instructions turned into "The advisor tool is no longer available"
+(`advisorGoneIn`), so `/advisor` did nothing (recih on X, #6813).
+`bridgeRequest` now reads a Claude Code request whose advisor model
+magpie serves (`advisedInBridge`: `provider.Resolve` takes it, the client
+has no `advisor` tool of its own) as `readAdvised` does on a translation:
+`Request.Advisor` is set, the instructions and `tool_addition` stay as
+written, and the echoed `server_tool_use` and `advisor_tool_result` go
+back as the model's call and its result (`adviceApart`). The run is
+offered `advisorToolDef` beside magpie's tools, and `adviseOn` gives the
+run, for this request, `adviceRound`. A call of it is answered in
+`mcpCall`, as web search is: the advisor model is asked with what the
+reply said before the call (`adviceSaid`), within 55 seconds, and three
+calls a reply (`max_uses_exceeded` after). `toolStart` keeps the call
+from the client, which is told `KAdvice`'s `server_tool_use` and
+`advisor_tool_result` as on a translation. Claude Desktop, and an
+advisor model magpie doesn't serve, go as before.
+`TestBridgeRequestKeepsTheAdvisor`, `TestClaudeTUIAdvisorAnsweredHere`.
+
 A turn with `tool_choice` none is offered every tool the client sent, as
 any other turn is (bbfatx on X). Anthropic caches a prompt as tools, then
 system, then messages, so a turn offered fewer tools (a title or summary
@@ -1473,10 +1497,34 @@ else changed:
 - at least one image or file was taken out.
 
 `follows` checks it when the hash misses (`toldRuns`, logged "tool results
-go on in their run, the images before them taken out by the client"), and
-`looseTurn.rewrote` when `cut` doesn't match; the looseTurn key no longer
-has the message count, which `cut` compares itself. The run's Claude Code
+go on in their run, the images before them taken out or sent again by the
+client"), and `looseTurn.rewrote` when `cut` doesn't match (both through
+`mediaMoved`, below); the looseTurn key no longer has the message count,
+which `cut` compares itself. The run's Claude Code
 still holds the images; it is told only what came since.
+
+A client may also keep its history's images and take them out of some
+requests only, so a later request sends back images the one before had
+taken out, in any turn (Yqihotaru on X: the history's image count
+flipped between 2 and 4, and every turn was told to a new Claude Code,
+"no run here has had this conversation"). `mediaMoved` compares the
+conversation a role's run of messages at a time and takes each run as
+`lostMedia` would, either way: images taken out, or put back where
+nothing or a line of text stood. A tool result the run kept keeps the end
+of its words (`heardPart.tail`, 2 KB), so a result sent back without the
+line its client had added is told apart from one changed otherwise.
+`follows` uses it for tool results, with the request going on after the
+conversation the run heard. `looseTurn` keeps the whole conversation so
+(`all`) and its settings without it (`settings`), and `rewrote` takes a
+request with the same settings and the same number of runs whose images
+alone moved, in any turn, not only the last. A run whose agent never had
+an image the client sends back (it was started from a request without
+it) goes on all the same: it answers from the line or the gap it was
+told, as it did the turn before. `branch` and `whyNoRun` still compare
+exact hashes. `TestClaudeImagesComingAndGoingInEarlierTurnsGoOnInTheRun`
+sends a 90-message conversation five turns, the images of its earlier
+turns taken out and sent back in turn, both with a line in their place
+and with nothing.
 
 A client that drops the images' message without adding text to a result
 goes on only when that message held images alone, no text. A tool result of an image alone (pi-ai's "(see attached image)")
