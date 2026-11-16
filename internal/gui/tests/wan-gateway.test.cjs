@@ -82,14 +82,14 @@ function wanFixture(lang, events) {
             const id = "wan-" + ++serial;
             secret = "sk-magpie-wan-fixture-" + serial;
             secrets.set(id, secret);
-            state.keys.push({ id, scope: "wan", name: body.name, masked: "sk-magpie-wan-â€¦" + serial });
+            state.keys.push({ id, scope: "wan", name: body.name, masked: "sk-magpie-wan-Ã¢â‚¬Â¦" + serial });
             break;
           }
           case "rename-key": key.name = body.name; break;
           case "off-key": key.off = true; break;
           case "on-key": key.off = false; break;
           case "copy-key": secret = secrets.get(key.id); break;
-          case "rotate-key": secret = "sk-magpie-wan-rotated-" + ++serial; secrets.set(key.id, secret); key.masked = "sk-magpie-wan-â€¦rotated-" + serial; break;
+          case "rotate-key": secret = "sk-magpie-wan-rotated-" + ++serial; secrets.set(key.id, secret); key.masked = "sk-magpie-wan-Ã¢â‚¬Â¦rotated-" + serial; break;
           case "remove-key": state.keys = state.keys.filter((k) => k !== key); break;
           default: throw new Error("Unexpected WAN key action " + action);
         }
@@ -225,7 +225,7 @@ for (const engine of engines) for (const lang of ["en", "zh", "zh-TW", "ja", "de
     await click(page, page.locator("#modal").getByRole("button", { name: rotate, exact: true }));
     await page.locator("#modal").waitFor({ state: "hidden" });
     assert.match(await row.locator(".plan").textContent(), /rotated/);
-    assert.equal(await page.locator('#wanKeys [data-key="wan-2"] .plan').textContent(), "sk-magpie-wan-â€¦2");
+    assert.equal(await page.locator('#wanKeys [data-key="wan-2"] .plan').textContent(), "sk-magpie-wan-Ã¢â‚¬Â¦2");
     await click(page, row.locator(".wan-key-more"));
     await click(page, page.locator(".wan-key-menu").getByRole("menuitemradio", { name: remove, exact: true }));
     await click(page, page.locator("#modal").getByRole("button", { name: word("Cancel"), exact: true }));
@@ -281,7 +281,7 @@ for (const engine of engines) for (const lang of ["en", "zh", "zh-TW", "ja", "de
     await page.keyboard.press("Home");
     assert.equal(await page.locator("#wanMemory").isChecked(), true);
     await click(page, page.locator("#wanRemember"));
-    assert.equal(await page.locator("#wanStorage").textContent(), word("Restore sign-in after restarting magpie using this computer’s secure storage."));
+    assert.equal(await page.locator("#wanStorage").textContent(), word("Restore sign-in after restarting magpie using this computerâ€™s secure storage."));
     await page.evaluate(() => pollWAN());
     assert.equal(await page.locator("#wanRemember").isChecked(), true, "poll preserves the explicit preference");
     await click(page, page.locator("#wanLogin"));
@@ -419,7 +419,7 @@ for (const engine of engines) for (const lang of ["en", "zh", "zh-TW", "ja", "de
     assert.equal(await page.locator("#wanStart").isDisabled(), true);
     f.state.auth.renewal = { state: "refreshing" };
     await page.evaluate(() => pollWAN());
-    assert.equal(await page.locator("#wanRenewalState").textContent(), word("Renewing WAN credentials…"));
+    assert.equal(await page.locator("#wanRenewalState").textContent(), word("Renewing WAN credentialsâ€¦"));
     assert.equal(await page.locator("#wanRenewalNextRow").isVisible(), false);
     f.state.auth.state = "error"; f.state.auth.renewal = { state: "required" };
     await page.evaluate(() => pollWAN());
@@ -497,7 +497,7 @@ for (const engine of engines) test(`${engine}: held model reads do not block Sto
 
 for (const engine of engines) test(`${engine}: WAN key menus close on unknown keys and Escape preserves focus without scrolling`, async t => {
   const { page, f, events, errors } = await open(t, engine, "en");
-  f.state.keys = [{ id: "wan-menu", name: "Work laptop", masked: "sk-magpie-wan-••••menu" }];
+  f.state.keys = [{ id: "wan-menu", name: "Work laptop", masked: "sk-magpie-wan-â€¢â€¢â€¢â€¢menu" }];
   await page.evaluate(() => pollWAN());
   const more = page.locator("#wanKeys .wan-key-more");
   await click(page, more);
@@ -538,7 +538,7 @@ for (const engine of engines) test(`${engine}: WAN model read errors stay unknow
   const { page, f, errors } = await open(t, engine, "en");
   await page.waitForFunction(() => !document.querySelector("#wanPickModel").disabled);
   f.state.state = "running"; f.state.endpoint = endpoint;
-  f.state.keys = [{ id: "wan-lock", name: "Laptop", masked: "sk-magpie-wan-••••lock" }];
+  f.state.keys = [{ id: "wan-lock", name: "Laptop", masked: "sk-magpie-wan-â€¢â€¢â€¢â€¢lock" }];
   f.models({ gateway: { groups: [] }, providers: [{ id: "bad", models: null }] });
   await page.evaluate(() => pollWAN());
   await page.waitForFunction(() => document.querySelector("#wanModelHelp").textContent === "Unable to load WAN models. Other WAN controls remain available.");
@@ -1016,7 +1016,7 @@ for (const engine of engines) for (const lang of ["en", "zh", "zh-TW", "ja", "de
     assert(overflow <= 1, `narrow quota layout overflow ${overflow}`);
     f.state.usage.state = "stale"; f.state.usage.error = "usage check failed";
     await page.evaluate(() => pollWAN());
-    assert.equal(await page.locator("#wanQuotaState").textContent(), word("Last known usage · check failed"));
+    assert.equal(await page.locator("#wanQuotaState").textContent(), word("Last known usage Â· check failed"));
     assert.match(await page.locator("#wanQuotaValue").textContent(), /5[.,]002/);
     assert.equal(await page.locator("#wanStatusHelp").textContent(), word("WAN is offline. Review the error before starting again."));
     assert.equal(await page.locator("#wanStart").isDisabled(), false, "unknown current usage does not manufacture a current quota refusal");
@@ -1029,11 +1029,11 @@ for (const engine of engines) for (const lang of ["en", "zh", "zh-TW", "ja", "de
     await page.evaluate(() => pollWAN());
     assert.equal(await page.locator("#wanAccountName").textContent(), "second-user");
     assert.match(await page.locator("#wanQuotaValue").textContent(), /0[.,]000/);
-    assert.equal(await page.locator("#wanTunnelID").textContent(), "—");
+    assert.equal(await page.locator("#wanTunnelID").textContent(), "â€”");
     assert.equal(await page.locator("#wanNewTunnel").isDisabled(), true);
     f.state.auth.state = "signed_out";
     await page.evaluate(() => pollWAN());
-    assert.equal(await page.locator("#wanQuotaValue").textContent(), "—", "logout hides old account numbers");
+    assert.equal(await page.locator("#wanQuotaValue").textContent(), "â€”", "logout hides old account numbers");
     assert.equal(events.some(e=>e.action==="wan:start"), false);
     assert.deepEqual(errors, []);
   });
@@ -1075,6 +1075,8 @@ for (const engine of engines) for (const theme of ["light", "dark"]) {
     const {page,f,errors}=await open(t,engine,"en",false);
     await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
     const enabled=page.locator("#wanInstall, #wanLogin, #wanMicrosoftLogin");
+    // Theme colors transition independently; measure their settled contrast.
+    await enabled.evaluateAll(es=>Promise.all(es.flatMap(e=>e.getAnimations().map(a=>a.finished.catch(()=>{})))));
     const styles=await enabled.evaluateAll(es=>es.map(e=>{
       const c=getComputedStyle(e),r=e.getBoundingClientRect();
       const rgb=x=>x.match(/[\d.]+/g).slice(0,3).map(Number);
@@ -1128,7 +1130,7 @@ for (const engine of engines) for (const lang of ['en','zh','zh-TW','ja','de']) 
     f.state.state='reconnecting';f.state.endpoint=endpoint;
     f.state.recovery={attempts:4,retrying:false,serverTime:server.toISOString(),nextRetryAt:new Date(+server+20000).toISOString()};
     await page.evaluate(()=>pollWAN());
-    assert.equal(await page.locator('#wanState').textContent(),word('Reconnecting WAN…'));
+    assert.equal(await page.locator('#wanState').textContent(),word('Reconnecting WANâ€¦'));
     assert.equal(await page.locator('#wanRecoveryAttempts').textContent(),word('Attempts started: {count}').replace('{count}','4'));
     assert.equal(await page.locator('#wanRecoveryNext').textContent(),word('Next retry in {seconds}s').replace('{seconds}','20'));
     assert.equal(await page.locator('#wanStateDot').evaluate(e=>e.classList.contains('on')),false);
@@ -1139,10 +1141,10 @@ for (const engine of engines) for (const lang of ['en','zh','zh-TW','ja','de']) 
     assert.equal(events.filter(e=>e.action==='wan:read').length,reads,'countdown does not poll or start WAN');
     assert.equal(await page.locator('#wanRecoveryAttempts').textContent(),word('Attempts started: {count}').replace('{count}','4'));
     f.state.recovery={...f.state.recovery,attempts:5,retrying:true};await page.evaluate(()=>pollWAN());
-    assert.equal(await page.locator('#wanRecoveryNext').textContent(),word('Reconnecting now…'));
+    assert.equal(await page.locator('#wanRecoveryNext').textContent(),word('Reconnecting nowâ€¦'));
     assert.equal(await page.locator('#wanRecoveryAttempts').textContent(),word('Attempts started: {count}').replace('{count}','5'));
     f.state.recovery={...f.state.recovery,retrying:false,nextRetryAt:server.toISOString()};await page.evaluate(()=>pollWAN());
-    assert.equal(await page.locator('#wanRecoveryNext').textContent(),word('Waiting for retry status…'));
+    assert.equal(await page.locator('#wanRecoveryNext').textContent(),word('Waiting for retry statusâ€¦'));
     f.state.state='running';delete f.state.recovery;await page.evaluate(()=>pollWAN());
     assert.equal(await page.locator('#wanRecovery').isVisible(),false);
     assert.equal(await page.locator('#wanState').textContent(),word('WAN running'));
