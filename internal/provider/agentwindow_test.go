@@ -3,8 +3,93 @@ package provider
 import (
 	"testing"
 
+	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/settings"
 )
+
+func TestDesktopMaximumContexts(t *testing.T) {
+	isolate(t)
+	limitsHome(t)
+	models := []catalog.Model{
+		{ID: "sol", Context: 272000, MaxContext: 922000},
+		{ID: "terra", Context: 272000, MaxContext: 1000000},
+		{ID: "astra", Context: 272000, MaxContext: 1050000},
+		{ID: "luna", Context: 272000, MaxContext: 872000},
+	}
+	p := Provider{ID: "relay", Name: "Relay", Key: "k", Chat: "http://127.0.0.1:1/v1", Models: []string{"sol", "terra", "astra", "luna"}}
+	if err := Save(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.SaveLive(p.ID, p.Chat, models); err != nil {
+		t.Fatal(err)
+	}
+	s := settings.Load()
+	s.DesktopLongest = true
+	if err := settings.Save(s); err != nil {
+		t.Fatal(err)
+	}
+	check := func(agent string, wantMax bool) {
+		t.Helper()
+		entries, _ := CatalogFor(agent)
+		for _, m := range models {
+			found := false
+			for _, e := range entries {
+				if e.ID != "relay/"+m.ID {
+					continue
+				}
+				found = true
+				want := m.Context
+				if wantMax {
+					want = m.MaxContext
+				}
+				if e.Context != want {
+					t.Errorf("%s %s: %d, want %d", agent, m.ID, e.Context, want)
+				}
+			}
+			if !found {
+				t.Errorf("missing %s", m.ID)
+			}
+		}
+	}
+	check("claude-desktop", true)
+	check("claude", false)
+	s.DesktopLongest = false
+	if err := settings.Save(s); err != nil {
+		t.Fatal(err)
+	}
+	check("claude-desktop", false)
+	s.DesktopLongest = true
+	s.ContextCap = 500000
+	if err := settings.Save(s); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range CatalogOf("claude-desktop") {
+		if e.Provider.ID == p.ID && e.Context != 500000 {
+			t.Errorf("global cap lost: %s %d", e.ID, e.Context)
+		}
+	}
+	s.ContextCap = 0
+	if err := settings.Save(s); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetContext(p, "sol", 700000); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range CatalogOf("claude-desktop") {
+		if e.ID == "relay/sol" && e.Context != 700000 {
+			t.Errorf("provider override lost: %d", e.Context)
+		}
+	}
+	if err := SetAgentContexts("claude-desktop", map[string]int{"relay/sol": 650000}); err != nil {
+		t.Fatal(err)
+	}
+	shown, _ := CatalogFor("claude-desktop")
+	for _, e := range shown {
+		if e.ID == "relay/sol" && e.Context != 650000 {
+			t.Errorf("agent override lost: %d", e.Context)
+		}
+	}
+}
 
 // The window an agent is told for a model can be its own (ul3140773077392
 // on X: dsh compacts earlier than the other agents at the same window).

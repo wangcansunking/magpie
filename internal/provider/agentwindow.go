@@ -21,6 +21,23 @@ import (
 // agentKey is the id an agent's windows are kept under.
 func agentKey(agent string) string { return strings.ToLower(strings.TrimSpace(agent)) }
 
+// desktopWindows selects the vendor's long-context tier when Desktop's
+// largest-window setting is on. CatalogOf, discovery and Claude's budget
+// writer must use the same window. Typed provider and group windows stay
+// theirs; agent-specific windows are applied afterwards by CatalogFor.
+func desktopWindows(s settings.Settings, es []Entry) []Entry {
+	if !s.DesktopLongest {
+		return es
+	}
+	for i := range es {
+		e := &es[i]
+		if e.Group == "" && !e.WindowSet && e.MaxContext > e.Context {
+			e.Context = s.Capped(e.MaxContext)
+		}
+	}
+	return es
+}
+
 // agentWindow is the window agent was given for e, and whether it has one.
 // The most specific key wins: the model as the catalog has it, its
 // provider's "*", the bare model id, then "*" for all, which only shortens

@@ -100,8 +100,13 @@ func claudePlan(models []claudeBudget, base int, theirs map[string]string) (top 
 			assumed = claudeLong
 		}
 		want := assumed
-		if m.window > 0 && !m.long {
-			want = min(m.window, top)
+		// Desktop's [1m] shim can represent a smaller backend, such as
+		// GPT's 922K. It bypasses the host cap, never the backend's limit.
+		if m.window > 0 {
+			want = m.window
+			if !m.long {
+				want = min(want, top)
+			}
 		}
 		switch {
 		case m.compact > 0:

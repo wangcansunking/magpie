@@ -945,6 +945,9 @@ type Settings struct {
 	// gateway model whose max_input_tokens is 1M or more and whose id has no
 	// "[1m]", and adds none to one whose id has it. Off, as before, it shows
 	// both, the plain one compacting at Claude Code's 200K.
+	// It also selects the vendor's MaxContext tier for Desktop unless the
+	// user set a window, and marks non-Claude windows above 200K with the
+	// compatibility suffix. Per-model budgets retain the actual capacity.
 	DesktopLongest bool `json:"desktopLongest,omitempty"`
 	// DesktopIsolated runs Claude Desktop on magpie in a folder of its own
 	// (#5671): magpie's 3p mode goes into

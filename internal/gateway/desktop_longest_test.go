@@ -16,7 +16,8 @@ import (
 // by its "[1m]" id alone, so Desktop's menu has one entry per model, told
 // as the 1M one by the "1M context window" Desktop gives its own (a lone
 // "[1m]" row was shown as the plain model: 杰多夫 on Discord); one
-// under 1M (872K) keeps its own id and window, and a request on the plain id
+// under 1M (872K) gets the compatibility suffix but keeps its real window,
+// and a request on the plain id
 // a session was saved with is still served.
 func TestClaudeDesktopLongestOnly(t *testing.T) {
 	f := &fake{reply: sse(
@@ -92,7 +93,7 @@ func TestClaudeDesktopLongestOnly(t *testing.T) {
 	for id, want := range map[string]string{
 		"vend/deepseek-v4-pro": off["vend/deepseek-v4-pro"].ID + "[1m]",
 		"vend/claude-opus-4-8": off["vend/claude-opus-4-8"].ID + "[1m]",
-		"vend/exo-free":        off["vend/exo-free"].ID,
+		"vend/exo-free":        off["vend/exo-free"].ID + "[1m]",
 		"fake/m1":              off["fake/m1"].ID,
 	} {
 		if r := on[id]; r.ID != want {
@@ -104,7 +105,11 @@ func TestClaudeDesktopLongestOnly(t *testing.T) {
 	said := func(r row, oneM bool) string {
 		var s []string
 		if oneM {
-			s = append(s, "1M context window")
+			if r.MaxInput == 872000 {
+				s = append(s, "872K context window")
+			} else {
+				s = append(s, "1M context window")
+			}
 		}
 		if strings.Contains(r.ID, ".anthropic.") {
 			s = append(s, "Vend")
@@ -126,14 +131,20 @@ func TestClaudeDesktopLongestOnly(t *testing.T) {
 	}
 
 	// the 1M id and the plain id an older session holds both reach the model
-	for _, id := range []string{on["vend/deepseek-v4-pro"].ID, off["vend/deepseek-v4-pro"].ID} {
+	for _, tc := range []struct{ id, model string }{
+		{on["vend/deepseek-v4-pro"].ID, "deepseek-v4-pro"},
+		{off["vend/deepseek-v4-pro"].ID, "deepseek-v4-pro"},
+		{on["vend/exo-free"].ID, "exo-free"},
+		{off["vend/exo-free"].ID, "exo-free"},
+	} {
+		id := tc.id
 		f.calls = 0
 		req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"model":"`+id+`","max_tokens":10,"stream":true,"tools":[{"name":"t","input_schema":{"type":"object"}}],"messages":[{"role":"user","content":"hi"}]}`))
 		req.Header.Set("x-api-key", TokenFor("claude-desktop"))
 		rec := httptest.NewRecorder()
 		New().Handler().ServeHTTP(rec, req)
 		var sent struct{ Model string }
-		if rec.Code != 200 || f.calls != 1 || json.Unmarshal(f.got, &sent) != nil || sent.Model != "deepseek-v4-pro" {
+		if rec.Code != 200 || f.calls != 1 || json.Unmarshal(f.got, &sent) != nil || sent.Model != tc.model {
 			t.Fatalf("%s: %d %s, %d calls, sent %s", id, rec.Code, rec.Body, f.calls, f.got)
 		}
 	}

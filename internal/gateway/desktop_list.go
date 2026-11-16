@@ -123,7 +123,11 @@ func DesktopInferenceModels() (list []map[string]any, ok bool) {
 		// labels its row, a catalog-named Claude model too, whose
 		// provider the skipped description said (desktopSaidBy).
 		entry := map[string]any{"name": name, "labelOverride": m["display_name"]}
-		if long {
+		if long && e.Context < desktop1M {
+			// Keep the compatibility suffix without claiming a real 1M
+			// backend. Claude Code's per-model budget caps this alias.
+			entry["name"] = id
+		} else if long {
 			entry["supports1m"], entry["prefer1m"] = true, true
 		} else if e.Context >= desktop1M {
 			entry["supports1m"] = true

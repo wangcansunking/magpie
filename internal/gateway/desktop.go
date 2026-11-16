@@ -211,9 +211,9 @@ func DesktopNumber(e provider.Entry) string {
 // description after it, so none is given but a 1M entry's (desktop1M) and
 // the provider of a row Desktop names after its catalog (desktopSaidBy); it
 // folds rows of one name into one entry, so no two of one name read the
-// same (desktopNames). A model of 1M or more is listed by its "[1m]" id
-// under settings.DesktopLongest, described as Desktop's own 1M entry is
-// (desktop1M). A build that has no mythos word (desktopKnowsMythos) is
+// same (desktopNames). Under settings.DesktopLongest, desktopListed1M
+// lists a long-window model by its "[1m]" id, describing its real window.
+// A build that has no mythos word (desktopKnowsMythos) is
 // shown a reasoning-level model by its plain alias instead of the picker
 // one, which such a build would drop whole (#2426).
 func desktopModels(entries []provider.Entry, knowsMythos bool) []map[string]any {
@@ -241,7 +241,11 @@ func desktopModels(entries []provider.Entry, knowsMythos bool) []map[string]any 
 		var said []string
 		if desktopListed1M(e, longest) {
 			m["id"] = m["id"].(string) + "[1m]"
-			said = append(said, desktop1MSaid)
+			if e.Context < desktop1M {
+				said = append(said, fmt.Sprintf("%gK context window", float64(e.Context)/1000))
+			} else {
+				said = append(said, desktop1MSaid)
+			}
 		}
 		if by := desktopSaidBy(e, labels[i]); by != "" {
 			said = append(said, by)
@@ -276,12 +280,19 @@ func desktopModels(entries []provider.Entry, knowsMythos bool) []map[string]any 
 // that gives a session the 1M window.
 const desktop1M = 1_000_000
 
-// desktopListed1M says e is listed to Claude Desktop by its "[1m]" id,
-// longest being settings.DesktopLongest.
-func desktopListed1M(e provider.Entry, longest bool) bool { return longest && e.Context >= desktop1M }
+// desktopListed1M uses Desktop's long-window id to bypass its 200K managed
+// host cap (Desktop 5.11492, fln/uln in app.asar). This includes non-Claude
+// models between 200K and 1M, but leaves Claude's own sub-1M ids alone:
+// their discovery limit stays exact and claudePlan caps the shim at that
+// model's real window instead of the 1M assumed from the id.
+// longest is settings.DesktopLongest.
+func desktopListed1M(e provider.Entry, longest bool) bool {
+	return longest && (e.Context >= desktop1M || e.Context > 200_000 && claudeModel(e) == "")
+}
 
 // DesktopListed1M says Claude Desktop is shown e by its "[1m]" id, which
-// its Code tab hands Claude Code, so a session on it has the 1M window.
+// its Code tab hands Claude Code. The per-model budget caps the assumed
+// 1M window at the model's real capacity.
 func DesktopListed1M(e provider.Entry) bool {
 	return desktopListed1M(e, settings.Shared().DesktopLongest)
 }

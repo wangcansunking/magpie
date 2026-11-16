@@ -3534,7 +3534,11 @@ func Catalog() []Entry { return catalogKeeping(nil) }
 // an agent was listed (shaoyang. on Discord, 11-03).
 func catalogOf(agent string) []Entry {
 	if !strings.EqualFold(agent, "codex") {
-		return Catalog()
+		entries := Catalog()
+		if strings.EqualFold(agent, "claude-desktop") {
+			entries = desktopWindows(heldSettings(), entries)
+		}
+		return entries
 	}
 	return catalogKeeping(CodexOwn)
 }

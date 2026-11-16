@@ -535,3 +535,37 @@ func TestClaudeDesktopLongestRunsTo1M(t *testing.T) {
 		t.Fatalf("typed 400K: glm %q top %q: %s", budget("v/glm"), top, readFile(path))
 	}
 }
+
+// The complete Desktop connection writes a 922K model budget even when
+// Claude Code itself is not connected and Desktop supplies a 200K host cap.
+func TestClaudeDesktopSubmillionBudget(t *testing.T) {
+	home, path := desktopWindowSandbox(t)
+	if err := catalog.SaveLive("v", "http://127.0.0.1:1/v1", []catalog.Model{{ID: "gpt", Context: 272000, MaxContext: 922000}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.SetHiddenModels("claude-desktop", []string{"v/grok", "v/glm", "v/plain", "v/claude-opus-4-6"}); err != nil {
+		t.Fatal(err)
+	}
+	s := settings.Load()
+	s.DesktopLongest = true
+	if err := settings.Save(s); err != nil {
+		t.Fatal(err)
+	}
+	if err := claudeDesktop(home).Field("provider").Set("magpie"); err != nil {
+		t.Fatal(err)
+	}
+	if err := claude(home).Sync(); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range provider.Catalog() {
+		if e.ID != "v/gpt" {
+			continue
+		}
+		got, _ := edit.GetJSON(path, budgetPath(gateway.DesktopID(e)))
+		if got != "922000" {
+			t.Fatalf("Desktop GPT budget %q, want 922000", got)
+		}
+		return
+	}
+	t.Fatal("GPT model missing")
+}

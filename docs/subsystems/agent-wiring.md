@@ -448,3 +448,32 @@ are added), its model list came from the gateway, and a chat went through
 it, counted as Cherry Studio's. A link that arrives while its first-run
 welcome page is up shows no dialog; after "set up later" it does.
 `magpie cherrystudio add` opens the link; the TUI leaves the row out.
+
+### Desktop windows between 200K and 1M
+
+With Only each model's largest window enabled, `desktopWindows` in
+[`agentwindow.go`](../../internal/provider/agentwindow.go) selects each
+vendor-listed `MaxContext` for Desktop's catalog instead of its default
+`Context` (Copilot's 272K default can have a 922K maximum). Discovery,
+the model chooser and the budget writer share that catalog. Explicit
+provider, group and agent windows and the global context cap still apply;
+other agents and the setting off keep the default tier. Groups keep their
+existing routing window. Long tiers may have higher vendor prices.
+
+Claude Desktop 5.11492 gives provider-managed Claude Code a 200000-token
+host cap, overriding the top-level window in settings. With Only each
+model's largest window enabled, `desktopListed1M` in
+[`desktop.go`](../../internal/gateway/desktop.go) therefore gives every
+known non-Claude model above 200K the `[1m]` transport alias. Claude models
+below 1M keep their existing ids. Discovery still reports
+the real limit (for example 922000), and the description names that limit.
+`claudePlan` in [`claude_budget.go`](../../internal/agent/claude_budget.go)
+also limits marked models to their actual window through modelSettings;
+the alias does not grant a 1M backend limit. User-set budgets are preserved.
+When a tier pick requires a static `inferenceModels` list, that list keeps
+the literal compatibility alias without claiming `supports1m` for a
+sub-million backend.
+Windows at or below 200K and unknown windows keep their plain ids.
+The setting off preserves the existing listing. Restart Desktop and start
+a new session to take the new alias. `TestDesktopSubmillionWindow` and
+`TestClaudePlanSubmillionLongWindow` cover discovery and the per-model cap.

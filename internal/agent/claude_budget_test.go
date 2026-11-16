@@ -5,6 +5,30 @@ import (
 	"testing"
 )
 
+func TestClaudePlanSubmillionLongWindow(t *testing.T) {
+	for _, window := range []int{872000, 922000, 1000000, 1050000} {
+		top, entries := claudePlan([]claudeBudget{{id: "gpt[1m]", window: window, long: true, compact: -1}}, 0, nil)
+		got := 1000000
+		if n, ok := entries["gpt"]; ok {
+			got = n
+		}
+		if top != window || got != window {
+			t.Errorf("window %d: top %d effective budget %d", window, top, got)
+		}
+	}
+	top, entries := claudePlan([]claudeBudget{{id: "mythos-magpie-gpt[1m]", window: 922000, long: true, compact: -1}}, 0, nil)
+	if top != 922000 || entries["mythos-magpie-gpt"] != 922000 {
+		t.Fatalf("922K backend must escape Desktop's 200K cap without running to 1M: top=%d entries=%v", top, entries)
+	}
+	models := []claudeBudget{{id: "mythos-magpie-gpt[1m]", window: 922000, long: true, compact: 900000}}
+	if _, entries := claudePlan(models, 0, nil); entries["mythos-magpie-gpt"] != 900000 {
+		t.Fatalf("typed compaction threshold lost: %v", entries)
+	}
+	if _, entries := claudePlan(models, 0, map[string]string{"mythos-magpie-gpt": "800000"}); len(entries) != 0 {
+		t.Fatalf("user's per-model budget overwritten: %v", entries)
+	}
+}
+
 // TestClaudePlan (#2025): the largest window of the models is the one
 // Claude Code is told, and each model whose own differs from the one it
 // would run at without an entry gets one; a "[1m]" model counts as 1M, the
