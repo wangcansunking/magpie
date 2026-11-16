@@ -2,8 +2,9 @@ package provider
 
 import (
 	"net/url"
-	"regexp"
 	"strings"
+
+	"github.com/yetone/magpie/internal/lazyre"
 )
 
 // A custom provider can be given a Gemini API (#1346): Google's own at
@@ -13,11 +14,12 @@ import (
 
 // geminiMethod is a Gemini endpoint pasted whole, cut back to its base:
 // …/models/gemini-2.5-pro:streamGenerateContent?alt=sse, or …/models.
-var geminiMethod = regexp.MustCompile(`/models(?:/[^/?#]*)?(?:[?#].*)?$`)
+var geminiMethod = lazyre.New(`/models(?:/[^/?#]*)?(?:[?#].*)?$`)
 
 // GeminiBase is the base a Gemini URL is kept as: trimmed, an endpoint or
-// the model list pasted whole cut back to the base, and a bare host given
-// Google's version (/v1beta), as the Gemini API's SDKs add it.
+// the model list pasted whole cut back to the base. Only Google's own bare
+// host is given its version (/v1beta); any other URL stays as typed, so a
+// relay's root is not rewritten on the next open (JNDliuliuM on X).
 func GeminiBase(u string) string {
 	u = strings.TrimRight(strings.TrimSpace(u), "/")
 	if u == "" {
@@ -27,18 +29,109 @@ func GeminiBase(u string) string {
 		u = "https://" + u
 	}
 	u = strings.TrimRight(geminiMethod.ReplaceAllString(u, ""), "/")
+	if pu, err := url.Parse(u); err == nil && strings.EqualFold(pu.Hostname(), "generativelanguage.googleapis.com") && strings.Trim(pu.Path, "/") == "" {
+		return u + "/v1beta"
+	}
+	return u
+}
+
+// geminiVersioned is GeminiBase with the /v1beta a bare host of any vendor
+// is asked at, for a detection that proposes a base rather than keeping one
+// the user typed.
+func geminiVersioned(u string) string {
+	u = GeminiBase(u)
 	if pu, err := url.Parse(u); err == nil && pu.Host != "" && strings.Trim(pu.Path, "/") == "" {
 		return u + "/v1beta"
 	}
 	return u
 }
 
+// GeminiAsked is the base a Gemini API is asked at: the saved base, and a
+// bare host given /v1beta, as Google's SDKs add the version to a base_url
+// with no path. GeminiBase keeps a relay's root as typed (JNDliuliuM on X),
+// so the version is added here, where a request goes: WandAPI's
+// https://api.wandapi.ai was asked at /models/… and refused (equinox0253
+// on X). A base with a path of its own (/v1beta, a relay's /gemini) is
+// asked as typed.
+func GeminiAsked(u string) string {
+	if u == "" || geminiKept(u) {
+		return u
+	}
+	return geminiVersioned(u)
+}
+
+// geminiKept reports, without allocating, that geminiVersioned would give u
+// back as it is: a scheme, a path of its own with no trailing slash, query,
+// fragment or /models, and no space around it. Host asks Base(Gemini) on
+// every look (TestHostBuildsNoList), and a saved base is already this.
+func geminiKept(u string) bool {
+	if strings.TrimSpace(u) != u || strings.HasSuffix(u, "/") || strings.ContainsAny(u, "?#") || strings.Contains(u, "/models") {
+		return false
+	}
+	i := strings.Index(u, "://")
+	if i <= 0 {
+		return false
+	}
+	j := strings.IndexByte(u[i+3:], '/')
+	return j > 0
+}
+
+// GeminiModelPath is model as every Gemini and Vertex AI path names it
+// after models/: each slash-separated segment escaped and the slashes
+// kept, so a relay's namespaced id (example/model-demo) is asked at
+// /models/example/model-demo, the path the relay routes by, not
+// /models/example%2Fmodel-demo (#6695, LuoRuiyao on X). An id with an
+// empty, . or .. segment, which a server or proxy could clean into a
+// path outside models/, goes as one escaped segment instead.
+func GeminiModelPath(model string) string {
+	segs := strings.Split(model, "/")
+	for i, s := range segs {
+		if s == "" || s == "." || s == ".." {
+			return url.PathEscape(model)
+		}
+		segs[i] = url.PathEscape(s)
+	}
+	return strings.Join(segs, "/")
+}
+
 // GeminiPath is the path under a Gemini base model is asked at: streamed as
 // server-sent events (alt=sse) when stream, else one JSON reply.
 func GeminiPath(model string, stream bool) string {
-	m := url.PathEscape(strings.TrimPrefix(model, "models/"))
+	m := GeminiModelPath(strings.TrimPrefix(model, "models/"))
 	if stream {
 		return "/models/" + m + ":streamGenerateContent?alt=sse"
 	}
 	return "/models/" + m + ":generateContent"
+}
+
+// AIStudioChat is Google AI Studio's OpenAI-compatible base, the Google
+// Gemini preset's Chat URL.
+const AIStudioChat = "https://generativelanguage.googleapis.com/v1beta/openai"
+
+// AIStudioGemini is Google AI Studio's own Gemini API (generateContent),
+// beside its OpenAI-compatible one.
+const AIStudioGemini = "https://generativelanguage.googleapis.com/v1beta"
+
+// aiStudioNative gives a provider at AI Studio's OpenAI-compatible base,
+// the Google Gemini preset's or one typed in, the Gemini API at the same
+// place with the same key (cocoasoda on Discord): Gemini's own clients are
+// relayed there as they ask, and googleSearch, which the OpenAI-compatible
+// API has no tool for, is run there. Its other requests stay on chat
+// completions, which Speaks names first. It is filled in once
+// (GeminiFilled): a Gemini URL of the provider's own is kept, and one the
+// user cleared stays empty.
+func (p *Provider) aiStudioNative() {
+	if p.GeminiFilled || p.Account != nil || !strings.EqualFold(p.Chat, AIStudioChat) {
+		return
+	}
+	// one filled in before it was recorded is recorded as it is
+	if p.Gemini == "" || strings.EqualFold(p.Gemini, AIStudioGemini) {
+		p.Gemini, p.GeminiFilled = AIStudioGemini, true
+	}
+}
+
+// AIStudioPair is a provider at both of AI Studio's APIs: its models are
+// the OpenAI-compatible list's, which is the Gemini API's list again.
+func (p Provider) AIStudioPair() bool {
+	return strings.EqualFold(p.Chat, AIStudioChat) && strings.EqualFold(p.Gemini, AIStudioGemini)
 }

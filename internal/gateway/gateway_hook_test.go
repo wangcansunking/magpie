@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -288,6 +290,25 @@ func TestAsyncGatewayOrigin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// a key of the user's own value, made for a friend, is a named key too
+	friend, err := access.Update("add-key", access.Change{Name: "Friend", Secret: "a-friends-own-key-0042"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// the sharing key magpie makes and writes into this computer's agents
+	if err := access.ConfigureLAN(true, false); err != nil {
+		t.Fatal(err)
+	}
+	mine := access.LANSecret()
+	if mine == "" || mine == key {
+		t.Fatalf("no default sharing key: %q", mine)
+	}
+	// this computer's own network address, and a WSL distro's NAT network
+	oldOwn, oldNets := ownAddr, WSLNets
+	ownAddr = func(a netip.Addr) bool { return a == netip.MustParseAddr("192.168.50.7") }
+	_, wslNet, _ := net.ParseCIDR("172.28.80.1/20")
+	WSLNets = func() []*net.IPNet { return []*net.IPNet{wslNet} }
+	t.Cleanup(func() { ownAddr, WSLNets = oldOwn, oldNets })
 	abs := filepath.Join(t.TempDir(), "origin.hooks.mjs")
 	script := `export function onRequest(body,ctx){ctx.state.origin=ctx.origin;body.origin=ctx.origin;return body}
 export async function onResponse(reply,ctx){await fetch(ctx.options.url,{method:"POST",body:JSON.stringify({origin:ctx.origin,before:ctx.state.origin}),signal:ctx.signal})}`
@@ -314,6 +335,15 @@ export async function onResponse(reply,ctx){await fetch(ctx.options.url,{method:
 		{"named-loopback", "127.0.0.1:1234", "", key, "0", "gateway-key"},
 		{"remote", "10.0.0.1:1234", "", key, "0", "gateway-key"},
 		{"proxy", "127.0.0.1:1234", "X-Forwarded-For", key, "0", "gateway-key"},
+		{"friend-own-value", "10.0.0.1:1234", "", friend, "0", "gateway-key"},
+		{"magpie-key-loopback", "127.0.0.1:1234", "", mine, "0", "magpie-key"},
+		{"magpie-key-own-address", "192.168.50.7:1234", "", mine, "0", "magpie-key"},
+		{"magpie-key-wsl-nat", "172.28.80.9:1234", "", mine, "0", "magpie-key"},
+		// the same key copied to another computer (Gateway keys' Copy) or
+		// handed to a friend is not the owner's own agent
+		{"magpie-key-elsewhere", "10.0.0.1:1234", "", mine, "0", "gateway-key"},
+		{"magpie-key-proxied", "127.0.0.1:1234", "X-Forwarded-For", mine, "0", "gateway-key"},
+		{"magpie-key-trusted-proxy", "127.0.0.1:1234", "Forwarded", mine, "1", "gateway-key"},
 		{"trusted-proxy", "127.0.0.1:1234", "Forwarded", "", "1", "remote"},
 		{"trusted-tunnel", "127.0.0.1:1234", "Tailscale-User-Login", "", "1", "remote"},
 		{"unknown-peer", "malformed", "", "", "0", "remote"},
@@ -432,5 +462,158 @@ export async function onResponse(reply,ctx){await fetch(ctx.options.url,{method:
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("onResponse never ran after the client hung up on a whole reply")
+	}
+}
+
+// A hooks package with its own page saves its options from that page. The
+// host hands each hook the options it loaded with, so the save starts the
+// host again; one that didn't left the hook on the old options until magpie
+// restarted (magpie-community/plugins#117's PowerContext page).
+func TestGatewayHookSeesOptionsSavedFromItsPage(t *testing.T) {
+	t.Setenv("MAGPIE_BUN", testenv.Bun(t))
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Cleanup(plugin.Settle)
+	dir := filepath.Join(t.TempDir(), "paged-hook")
+	if err := os.MkdirAll(filepath.Join(dir, "page"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"package.json":    `{"name":"paged-hook","version":"0.0.1","magpie":{"hooks":"./paged.hooks.mjs","page":{"title":"Paged","file":"page/index.html"}}}`,
+		"paged.hooks.mjs": `export function onRequest(body,ctx){body.tag=ctx.options.tag;return body}`,
+		"page/index.html": `<!doctype html><title>Paged</title>`,
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := plugin.Add(t.Context(), dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := plugin.SetOptions(dir, map[string]any{"tag": "first"}); err != nil {
+		t.Fatal(err)
+	}
+	tag := func() any {
+		req := httptest.NewRequest("POST", "http://127.0.0.1/v1/chat/completions", nil)
+		req.RemoteAddr = "127.0.0.1:1234"
+		var got map[string]any
+		w := httptest.NewRecorder()
+		_, b, done := gatewayHooks(w, req, provider.Chat, []byte(`{"model":"fake/m1","messages":[{"role":"user","content":"hello"}]}`))
+		done()
+		json.Unmarshal(b, &got)
+		return got["tag"]
+	}
+	if got := tag(); got != "first" {
+		t.Fatalf("tag=%v before the page saved, want first", got)
+	}
+	if err := plugin.SetPageOptions(dir, map[string]any{"tag": "second"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := tag(); got != "second" {
+		t.Fatalf("tag=%v after the page saved, want second", got)
+	}
+}
+
+// An async hook is told, per request, which ones a subagent made, as the
+// client says it: Claude Code's x-claude-code-agent-id (real headers of
+// 2.1.312's subagent in #4655), Codex's x-openai-subagent: collab_spawn.
+// The main conversation after a subagent in the same session is not marked,
+// and neither is a request whose history merely mentions the Agent tool.
+func TestHookKindFromClientHeaders(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		agent string
+		h     http.Header
+		want  string
+	}{
+		{"claude subagent", "claude", http.Header{"X-Claude-Code-Agent-Id": {"a1b2"}, "X-Claude-Code-Session-Id": {"s"}}, "subagent"},
+		{"claude main, same session", "claude", http.Header{"X-Claude-Code-Session-Id": {"s"}}, ""},
+		{"codex subagent", "codex", http.Header{"X-Openai-Subagent": {"collab_spawn"}}, "subagent"},
+		{"codex review is not a subagent", "codex", http.Header{"X-Openai-Subagent": {"review"}}, ""},
+		{"codex main", "codex", http.Header{}, ""},
+		{"no client headers", "", http.Header{}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest("POST", "/v1/messages", nil)
+			r.Header = tc.h
+			if got := hookKind(r, tc.agent); got != tc.want {
+				t.Fatalf("kind %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The kind reaches the plugin host's onRequest and the same request's
+// onResponse, through the real gateway and Bun.
+func TestAsyncGatewayHookKindReachesPlugin(t *testing.T) {
+	t.Setenv("MAGPIE_BUN", testenv.Bun(t))
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Cleanup(plugin.Settle)
+	seen := make(chan string, 8)
+	observer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		seen <- string(b)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer observer.Close()
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"id":"c1","model":"m1","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}`)
+	}))
+	defer up.Close()
+	if err := provider.Save(provider.Provider{ID: "fake", Name: "Fake", Key: "synthetic", Models: []string{"m1"}, Chat: up.URL + "/v1"}); err != nil {
+		t.Fatal(err)
+	}
+	abs := filepath.Join(t.TempDir(), "kind.hooks.js")
+	script := `export async function onRequest(body,ctx){ctx.state.kind=ctx.kind;return body}
+export async function onResponse(body,ctx){await fetch(ctx.options.url,{method:"POST",body:JSON.stringify({request:ctx.state.kind,response:ctx.kind}),signal:ctx.signal})}`
+	if err := os.WriteFile(abs, []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plugin.Add(t.Context(), abs); err != nil {
+		t.Fatal(err)
+	}
+	if err := plugin.SetOptions(abs, map[string]any{"url": observer.URL, "gatewayTimeoutMs": 5000}); err != nil {
+		t.Fatal(err)
+	}
+	gw := httptest.NewServer(lanGuard(New().Handler()))
+	defer gw.Close()
+	ask := func(h map[string]string) string {
+		t.Helper()
+		req, _ := http.NewRequestWithContext(t.Context(), "POST", gw.URL+"/v1/chat/completions", strings.NewReader(`{"model":"fake/m1","messages":[{"role":"user","content":"question"}]}`))
+		req.Header.Set("Authorization", "Bearer magpie")
+		for k, v := range h {
+			req.Header.Set(k, v)
+		}
+		res, err := gw.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+		select {
+		case s := <-seen:
+			return s
+		case <-time.After(15 * time.Second):
+			t.Fatal("no completion notification")
+		}
+		return ""
+	}
+	sess := map[string]string{"x-claude-code-session-id": "parent", "User-Agent": "claude-cli/2.1.312 (external, sdk-cli)"}
+	sub := map[string]string{"x-claude-code-session-id": "parent", "x-claude-code-agent-id": "child-1", "User-Agent": "claude-cli/2.1.312 (external, sdk-cli)"}
+	for _, c := range []struct {
+		name string
+		h    map[string]string
+		want string
+	}{
+		{"main", sess, `{"request":"","response":""}`},
+		{"subagent", sub, `{"request":"subagent","response":"subagent"}`},
+		{"main again", sess, `{"request":"","response":""}`},
+	} {
+		if got := ask(c.h); got != c.want {
+			t.Errorf("%s: hook saw %s, want %s", c.name, got, c.want)
+		}
 	}
 }

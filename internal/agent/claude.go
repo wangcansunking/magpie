@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
@@ -19,6 +18,7 @@ import (
 	"github.com/yetone/magpie/internal/desktopdir"
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/gateway"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 )
@@ -81,6 +81,14 @@ var claudeOwnEnv = append([]string{
 // comes before it.
 const claudeAutoModeEnv = "CLAUDE_CODE_AUTO_MODE_MODEL"
 
+// claudeAdvisorEnv turns Claude Code's advisor (/advisor, settings.json's
+// advisorModel) on for any model (2.1.316): without it, Claude Code sends
+// the advisor only for Anthropic's own models by their public names, and
+// a model on magpie gets none. The advisor field writes it, and magpie's
+// gateway runs the advisor for a model whose upstream can't
+// (internal/gateway/advisor_serve.go).
+const claudeAdvisorEnv = "CLAUDE_CODE_ENABLE_EXPERIMENTAL_ADVISOR_TOOL"
+
 // claudeNoClassifier are the Claude models Claude Code 2.1.303 won't run
 // its classifier on from claudeAutoModeEnv ("the API's safeguards refuse
 // the classifier's escalated check on it"): it warns and takes its own
@@ -136,8 +144,8 @@ func claudeCloud(at place, path string) string {
 	}
 	dir := filepath.Dir(path)
 	global := filepath.Join(dir, ".claude.json")
-	if dir == filepath.Join(at.home, ".claude") {
-		global = filepath.Join(at.home, ".claude.json")
+	if dir == at.join(".claude") {
+		global = at.join(".claude.json")
 	}
 	for _, k := range agentenv.ClaudeProviders {
 		set := false
@@ -177,7 +185,7 @@ const claudeEffortEnv = "CLAUDE_CODE_EFFORT_LEVEL"
 // claudeNameRe finds the Claude model an id names, as Claude Code matches it
 // to its settings: claude-opus-5-5 in claude-opus-5-5[1m], in a dated id or
 // under a provider's prefix (anthropic/…).
-var claudeNameRe = regexp.MustCompile(`claude-(opus|sonnet|haiku|fable)-(\d+)(?:-(\d{1,2}))?(?:[^0-9]|$)`)
+var claudeNameRe = lazyre.New(`claude-(opus|sonnet|haiku|fable)-(\d+)(?:-(\d{1,2}))?(?:[^0-9]|$)`)
 
 // claudeName is the Claude model a model id names, "" for another vendor's,
 // an alias (opus) or none. A version written with a dot (claude-opus-4.6)
@@ -217,9 +225,10 @@ func claudeEffortsFor(model string) []string {
 
 // claudeTopEffort is the models the effortLevel at the top of the user's
 // settings.json applies to: Opus 5, Fable 5.1 and those before them. Opus
-// 5.5 and every Claude model after it (any Claude Code doesn't know) read
-// only modelSettings.<model>.effortLevel (2.1.251 on); another vendor's
-// reads the top one.
+// 5.5, Fable 5.2 and every Claude model after them (any Claude Code doesn't
+// know) read only modelSettings.<model>.effortLevel (2.1.251 on; 2.1.321's
+// list of models that read the top one ends at Fable 5.1 and Mythos 5.1);
+// another vendor's reads the top one.
 var claudeTopEffort = []string{
 	"claude-opus-4", "claude-sonnet-4", "claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5",
 	"claude-opus-4-6", "claude-sonnet-4-6", "claude-opus-4-7", "claude-opus-4-8",
@@ -300,66 +309,100 @@ const claudeCapsEnv = "CLAUDE_CODE_MODEL_CAPABILITIES"
 
 // claudeReviewEnv is whether Claude Code's auto mode asks the API to review
 // its actions (the dangerous-tool-use beta and `safeguards`), "0" for no.
-// Behind a gateway whose model doesn't answer, it classifies locally anyway
-// and names the gateway in a notice, "this session isn't eligible because
-// your requests go through 127.0.0.1:3425…" (1EFLOPS on X, Claude Code on
-// Codex). Anthropic's page on it says to set it to 0 for a gateway that
-// can't run the checks: magpie does while none of the models Claude Code
-// can reach through it is reviewed (claudeReviewed), and leaves it unset
-// while one is. One the user set is theirs.
+// Behind a gateway whose model doesn't answer, 2.1.316 and earlier
+// classified locally anyway and named the gateway in a notice ("this
+// session isn't eligible because your requests go through
+// 127.0.0.1:3425…", 1EFLOPS on X). 2.1.322, with its telemetry or
+// feature flags off, refuses every action the check would judge instead
+// ("Auto mode can't check actions in this session", JoyYoung2Lucky on X),
+// a Claude model's on a relay too, unless this is "0"
+// (gateway/automode.go). Anthropic's page on it says to set it to 0 for a
+// gateway that can't run the checks: magpie does unless every model Claude
+// Code can reach through it surely answers the review (claudeReviewed),
+// and leaves it unset while each does. One the user set is theirs.
 const claudeReviewEnv = "CLAUDE_CODE_AUTO_MODE_SERVER"
+
+// claudeSearchEnv turns Claude Code's tool search on: MCP tools are named
+// in a reminder and loaded by ToolSearch when the model needs them, not
+// sent whole on every request. Before 2.1.304 Claude Code kept it off
+// behind an ANTHROPIC_BASE_URL other than Anthropic's, so magpie's MCP
+// router sent its 245 tools' definitions, 124K tokens, on every request
+// (cybercaius on Discord). 2.1.304 and later turn it on there themselves;
+// "true" also keeps it on in a conversation begun without it, which
+// Claude Code otherwise holds off until it is compacted. The gateway
+// carries deferred tools to every upstream (#2660, anthropic_shapes.go).
+// One the user set is theirs.
+const claudeSearchEnv = "ENABLE_TOOL_SEARCH"
 
 // Claude Code 2.1.295's Explore inherit cap can replace Desktop's
 // mythos-magpie compatibility alias with Opus. Disable that cap while
 // Desktop is on magpie, without forcing other subagents onto a model.
 const claudeExploreEnv = "CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP"
 
-// claudeReviewed reports whether a model Claude Code can reach through
-// magpie has its actions reviewed by Anthropic (gateway.AutoModeReviewed):
-// one shown to the agents in catalogs (Claude Code, Claude Desktop whose
-// Code tab is Claude Code, T3 Code's instance of it), a routing group's
-// member, a provider's fallback, or one of models (those it is set to),
-// judged where it resolves to.
-// Any such keeps the review on, as /model can take a session there.
+// claudeReviewed reports whether every model Claude Code can reach
+// through magpie has its actions reviewed, the results coming back
+// (gateway.AutoModeAnswered: a Claude model on Anthropic's own API or the
+// Claude subscription): each one shown to the agents in catalogs (Claude
+// Code, Claude Desktop whose Code tab is Claude Code, T3 Code's instance of
+// it), each member of a routing group, each provider's fallback, and each
+// of models (those it is set to), judged where it resolves to. One that
+// isn't turns the review off, as /model can take a session there, and
+// 2.1.322 with its telemetry off then has no check at all.
 func claudeReviewed(catalogs []string, models ...string) bool {
 	var entries []provider.Entry
 	for _, c := range catalogs {
 		shown, _ := provider.CatalogFor(c)
 		entries = append(entries, shown...)
 	}
-	reviewed := func(p provider.Provider, model string) bool {
-		if gateway.AutoModeReviewed(p, model) {
-			return true
+	answered := func(p provider.Provider, model string) bool {
+		if !gateway.AutoModeAnswered(p, model) {
+			return false
 		}
-		return slices.ContainsFunc(p.Fallback, func(id string) bool {
-			fp, fm, ok := provider.Resolve(id)
-			return ok && gateway.AutoModeReviewed(fp, fm)
+		return !slices.ContainsFunc(provider.FallbackModels(p), func(m provider.Member) bool {
+			return !gateway.AutoModeAnswered(m.Provider, m.Model)
 		})
+	}
+	every := func(ms []provider.Member) bool {
+		return len(ms) > 0 && !slices.ContainsFunc(ms, func(m provider.Member) bool { return !answered(m.Provider, m.Model) })
 	}
 	find := provider.GroupFinder()
 	for _, e := range entries {
 		if e.Group == "" {
-			if reviewed(e.Provider, e.Model) {
-				return true
+			if !answered(*e.Provider, e.Model) {
+				return false
 			}
 			continue
 		}
-		_, ms, _ := find(e.ID)
-		if slices.ContainsFunc(ms, func(m provider.Member) bool { return reviewed(m.Provider, m.Model) }) {
-			return true
+		if _, ms, _ := find(e.ID); !every(ms) {
+			return false
 		}
 	}
-	return slices.ContainsFunc(models, func(id string) bool {
+	judged := 0
+	for _, id := range models {
+		if id == "" {
+			// a slot Claude Code isn't set to (no small model, say)
+			continue
+		}
+		judged++
 		if _, ms, ok := find(id); ok {
-			return slices.ContainsFunc(ms, func(m provider.Member) bool { return reviewed(m.Provider, m.Model) })
+			if !every(ms) {
+				return false
+			}
+			continue
 		}
 		if p, m, ok := provider.Resolve(id); ok {
-			return reviewed(p, m)
+			if !answered(p, m) {
+				return false
+			}
+			continue
 		}
 		// Not one magpie knows: judged by its name, as the gateway would
 		// judge a request for it.
-		return gateway.AutoModeReviewed(provider.Provider{}, id)
-	})
+		if !gateway.AutoModeReviewed(provider.Provider{}, id) {
+			return false
+		}
+	}
+	return len(entries)+judged > 0
 }
 
 // claudeCapsMax bounds claudeCapsEnv: the models Claude Code is set to go
@@ -417,10 +460,14 @@ func claudeCapabilities(first []string, own, desktop bool) string {
 	}
 	if desktop {
 		shown, _ := provider.CatalogFor("claude-desktop")
+		again := gateway.DesktopTierAliases()
 		for _, e := range shown {
-			// one named as a Claude model Claude Code knows on its own
-			if id := gateway.DesktopID(e); claudeName(id) == "" {
-				add(id, e.Efforts)
+			// one named as a Claude model Claude Code knows on its own;
+			// a model picked for two tiers is listed for the second too
+			for _, id := range append([]string{gateway.DesktopID(e)}, again[e.ID]...) {
+				if claudeName(id) == "" {
+					add(id, e.Efforts)
+				}
 			}
 		}
 	}
@@ -510,7 +557,7 @@ func claudeLight(main string) string {
 		return id
 	}
 	best := ""
-	for _, m := range magpieModels("claude") {
+	for _, m := range sharedModels("claude") {
 		if !strings.HasPrefix(m.ID, prefix) {
 			continue
 		}
@@ -529,6 +576,16 @@ var claudeModelEnv = []string{
 	"ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL", claudeAutoModeEnv,
 	"ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
 	"ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL",
+}
+
+// claudeMagpieModel says a model in Claude Code's env or its model, as
+// written there, is one of magpie's: a provider/model name only magpie's
+// gateway serves, at an effort or marked 1M or not. On Anthropic's own
+// endpoint it is a 404, "There's an issue with the selected model"
+// (roswellcsy on X).
+func claudeMagpieModel(v string) bool {
+	m, _ := tierAt(provider.ClaudeRead(v))
+	return isMagpie(strings.TrimSuffix(m, "[1m]"))
 }
 
 // claudeSameModel says two of a tier's models as written are one model,
@@ -581,7 +638,7 @@ func tierWith(model, effort string) string {
 // magpie knows the model has, else those Claude Code sends it.
 func tierEfforts(model string) []string {
 	id := strings.TrimSuffix(model, "[1m]")
-	for _, m := range magpieModels("claude") {
+	for _, m := range sharedModels("claude") {
 		if m.ID == id && len(m.Efforts) > 0 {
 			return slices.DeleteFunc(slices.Clone(m.Efforts), func(l string) bool { return !contains(provider.MemberEfforts, l) })
 		}
@@ -590,6 +647,15 @@ func tierEfforts(model string) []string {
 }
 
 func claude(home string) *Agent { return claudeIn(here(home)) }
+
+// claudeRouted says the Claude Code at a place, its settings.json at path,
+// sends its requests to magpie's gateway: its ANTHROPIC_BASE_URL is the
+// gateway, or a proxy to it where magpie has answered (#1985,
+// claudeProxied). Whatever its model and however it signs in to magpie.
+func claudeRouted(at place, path string) bool {
+	u, _ := edit.GetJSON(path, "env.ANTHROPIC_BASE_URL")
+	return u == at.gw() || claudeProxied(at, path, u)
+}
 
 // claudeIn is Claude Code as it lives at a place: this machine's home, or
 // a WSL distro's (see wsl.go), its settings.json naming the gateway as it
@@ -602,19 +668,27 @@ func claudeIn(at place) *Agent {
 	env := func(k string) string {
 		v := rawEnv(k)
 		if contains(claudeModelEnv, k) {
-			v = provider.ClaudeRead(v)
+			v = claudeReadOwn(v)
 		}
 		return v
 	}
 	// spell is a model of magpie's as Claude Code is given it: a dotted
 	// Claude version dashed, which it would read as Claude Opus 4
-	spell := provider.ClaudeSpelled
+	// and on this computer's own file a Claude model of Claude Code's own
+	// subscription is Anthropic's bare id (ClaudeBare), which Desktop's Code
+	// tab can send to Anthropic as it is
+	spell := func(ref string) string {
+		if at.id == "" {
+			ref = provider.ClaudeBare(ref)
+		}
+		return provider.ClaudeSpelled(ref)
+	}
 	model := jsonGet(path, "model")
 	// routed: on magpie's gateway, or on a proxy to it where magpie has
-	// answered (#1985), which a pick keeps (gwAt)
-	routed := func() bool { u := env("ANTHROPIC_BASE_URL"); return u == at.gw() || surelyMagpie(u, at.gw()) }
+	// answered (#1985, claudeProxied), which a pick keeps (gwAt)
+	routed := func() bool { return claudeRouted(at, path) }
 	gwAt := func() string {
-		if u := env("ANTHROPIC_BASE_URL"); u != at.gw() && surelyMagpie(u, at.gw()) {
+		if u := env("ANTHROPIC_BASE_URL"); claudeProxied(at, path, u) {
 			return u
 		}
 		return at.gw()
@@ -628,7 +702,7 @@ func claudeIn(at place) *Agent {
 	// own. A pick in /model moves the main model alone, and those following
 	// it go with it when magpie next looks (Follow).
 	mainKey := at.key("claude.main")
-	wroteMain := func() string { return cmp.Or(stashLoad()[mainKey], env("ANTHROPIC_MODEL")) }
+	wroteMain := func() string { return cmp.Or(stashShared()[mainKey], env("ANTHROPIC_MODEL")) }
 	// how Claude Code signs in to magpie (its sign-in field): with magpie's
 	// key, or ("claudeai") with its own claude.ai sign-in, which it keeps
 	// so: an empty ANTHROPIC_AUTH_TOKEN leaves it signed in, where a key
@@ -638,7 +712,7 @@ func claudeIn(at place) *Agent {
 	// where set("") and Unwire leave it for the next time it is routed.
 	loginKey := at.key("claude.login")
 	signInHere := func() bool { return at.gwKey() == gateway.Token }
-	keepSignIn := func() bool { return stashLoad()[loginKey] == "claudeai" && signInHere() }
+	keepSignIn := func() bool { return stashShared()[loginKey] == "claudeai" && signInHere() }
 	wiredKey := func() string {
 		if keepSignIn() {
 			return ""
@@ -664,14 +738,22 @@ func claudeIn(at place) *Agent {
 	// own, though it is the one it would follow: it stays when the main
 	// model changes
 	ownKey := func(t string) string { return at.key("claude.tier_own." + t) }
-	own := func(t string) bool { return stashLoad()[ownKey(t)] != "" }
+	own := func(t string) bool { return stashShared()[ownKey(t)] != "" }
 	// the auto mode classifier's model as magpie last wrote it (the auto
 	// mode field); autoOurs: the env's is that one or another of magpie's
 	// models, which goes when magpie steps out. Any other is the user's.
 	autoKey := at.key("claude.auto_mode_model")
 	autoOurs := func() bool {
 		v := rawEnv(claudeAutoModeEnv)
-		return v != "" && (v == stashLoad()[autoKey] || isMagpie(env(claudeAutoModeEnv)))
+		return v != "" && (v == stashShared()[autoKey] || isMagpie(env(claudeAutoModeEnv)))
+	}
+	// the advisor's switch as magpie wrote it (the advisor field), which
+	// goes when the advisor does or magpie steps out; one the user wrote
+	// is theirs
+	advisorKey := at.key("claude.advisor_env")
+	advisorOurs := func() bool {
+		v := rawEnv(claudeAdvisorEnv)
+		return v != "" && v == stashShared()[advisorKey]
 	}
 	// set once magpie has taken what the env said about each tier's model
 	// from before it routed Claude Code (claudeAbout): what is there after
@@ -684,7 +766,7 @@ func claudeIn(at place) *Agent {
 	// magpie routed Claude Code without taking it), else a tier's whose
 	// model changes
 	staleAbout := func(tiers map[string]string) []string {
-		before := stashLoad()[aboutKey] == ""
+		before := stashShared()[aboutKey] == ""
 		keep := map[string]string{}
 		var keys []string
 		for _, t := range claudeTiers {
@@ -697,7 +779,7 @@ func claudeIn(at place) *Agent {
 				if !has {
 					continue
 				}
-				if before && v != "" && stashLoad()[at.key("claude.env."+k)] == "" {
+				if before && v != "" && stashShared()[at.key("claude.env."+k)] == "" {
 					keep[at.key("claude.env."+k)] = v
 				}
 				keys = append(keys, "env."+k)
@@ -729,9 +811,21 @@ func claudeIn(at place) *Agent {
 		return m == "" || m == was || m == follow(t, was)
 	}
 
+	// wroteAlias says "model" is the alias magpie wrote for the main model
+	// it last wrote (mainWord), still on that model: a tier alias the user
+	// picked since stands for another model, or none of magpie's
+	wroteAlias := func() bool {
+		m, _ := edit.GetJSON(path, "model")
+		if at.id != "" || !contains(claudeTiers, strings.TrimSuffix(m, "[1m]")) {
+			return false
+		}
+		was := strings.TrimSuffix(stashShared()[mainKey], "[1m]")
+		return was != "" && isMagpie(was) && strings.TrimSuffix(mainModel(), "[1m]") == was
+	}
+
 	// the value shown: the catalog ref while routed, else Claude's own model.
 	get := func() string {
-		if routed() {
+		if routed() || wroteAlias() {
 			if m := mainModel(); m != "" {
 				return m
 			}
@@ -743,7 +837,7 @@ func claudeIn(at place) *Agent {
 	windowKey := at.key("claude.context_tokens")
 	windowOurs := func() bool {
 		cur := env(claudeContextEnv)
-		return cur != "" && cur == stashLoad()[windowKey]
+		return cur != "" && cur == stashShared()[windowKey]
 	}
 	// the modelSettings windows magpie last wrote while Claude Desktop is
 	// on magpie (claudePlan, #2025), as JSON {id: window}, and the
@@ -754,12 +848,12 @@ func claudeIn(at place) *Agent {
 	defaultKey := at.key("claude.compact_default")
 	budgetsOurs := func() map[string]int {
 		var m map[string]int
-		_ = json.Unmarshal([]byte(stashLoad()[budgetsKey]), &m)
+		_ = json.Unmarshal([]byte(stashShared()[budgetsKey]), &m)
 		return m
 	}
 	defaultOurs := func() bool {
 		cur, ok := edit.GetJSON(path, "autoCompactWindow")
-		return ok && cur != "" && cur == stashLoad()[defaultKey]
+		return ok && cur != "" && cur == stashShared()[defaultKey]
 	}
 	// writeBudgets puts in entries and the default (0 for none), and takes
 	// out what magpie wrote before that they no longer have
@@ -848,7 +942,7 @@ func claudeIn(at place) *Agent {
 	outputKey := at.key("claude.output_tokens")
 	outputOurs := func() bool {
 		cur := env(claudeOutputEnv)
-		return cur != "" && cur == stashLoad()[outputKey]
+		return cur != "" && cur == stashShared()[outputKey]
 	}
 	dropOutput := func() error {
 		defer forget(outputKey)
@@ -862,7 +956,7 @@ func claudeIn(at place) *Agent {
 	capsKey := at.key("claude.capabilities")
 	capsOurs := func() bool {
 		cur := env(claudeCapsEnv)
-		return cur != "" && cur == stashLoad()[capsKey]
+		return cur != "" && cur == stashShared()[capsKey]
 	}
 	dropCaps := func() error {
 		defer forget(capsKey)
@@ -876,10 +970,13 @@ func claudeIn(at place) *Agent {
 	compactKey := at.key("claude.compact_window")
 	compactOurs := func() bool {
 		cur := env(claudeCompactEnv)
-		return cur != "" && cur == stashLoad()[compactKey]
+		return cur != "" && cur == stashShared()[compactKey]
 	}
+	// set while the window magpie wrote is Long conversations' (not a
+	// provider's Compact at): tune's card reads it as that one value
+	compactLongKey := at.key("claude.compact_long")
 	dropCompact := func() error {
-		defer forget(compactKey)
+		defer forget(compactKey, compactLongKey)
 		if compactOurs() {
 			return edit.DelJSON(path, "env."+claudeCompactEnv)
 		}
@@ -908,8 +1005,9 @@ func claudeIn(at place) *Agent {
 		// model (settings.Compact), none under Full window
 		main := mainModel()
 		n := provider.CompactSet(main)
-		if s := settings.Load(); n == 0 && !claudeModel(main) && !provider.ClaudeGroup(main) {
-			n = s.Compact()
+		long := false
+		if s := settings.Load().ForAgent("claude"); n == 0 && !claudeModel(main) && !provider.ClaudeGroup(main) {
+			n, long = s.Compact(), true
 			// magpie's default gives way to an autoCompactWindow the user
 			// set in Claude Code (/autocompact, its settings), which the env
 			// would take precedence over; one typed in magpie doesn't (#876).
@@ -926,6 +1024,11 @@ func claudeIn(at place) *Agent {
 		}
 		w := strconv.Itoa(n)
 		stash(map[string]string{compactKey: w})
+		if long {
+			stash(map[string]string{compactLongKey: "1"})
+		} else {
+			forget(compactLongKey)
+		}
 		if env(claudeCompactEnv) == w {
 			return nil
 		}
@@ -942,7 +1045,7 @@ func claudeIn(at place) *Agent {
 	// Claude Code's /model kept a list without the models added since
 	// (#2046, cjyrainbow).
 	pickerKey := at.key("claude.model_picker")
-	pickerOurs := func() bool { return stashLoad()[pickerKey] != "" || magpiesPicker(path) }
+	pickerOurs := func() bool { return stashShared()[pickerKey] != "" || magpiesPicker(path) }
 	dropPicker := func() error {
 		defer forget(pickerKey)
 		if _, has := edit.GetJSON(path, "modelPicker"); has && pickerOurs() {
@@ -960,8 +1063,31 @@ func claudeIn(at place) *Agent {
 		// ids whole, so a tier fixed at an effort (codex/gpt-6-luna:max)
 		// kept its model's row as a second entry (#1616, iTanX). That row
 		// is left out here; a tier at no effort Claude Code matches itself.
+		// With the own-models switch on, replaceBuiltInOptions takes the
+		// tier rows out of /model with the built-in lineup (Claude Code
+		// keeps only the Default row and the picker's own), so a tier's
+		// model keeps its row then, or it would be in /model nowhere.
+		//
+		// A list narrowed in magpie (only the picked models, or some taken
+		// out) asks the same: the built-in lineup's rows go to magpie too
+		// while Claude Code runs on it, and the one no tier names (Fable,
+		// left unset for a main of no Fable) listed a model the user had
+		// not picked beside the routing groups they had (yyhhyyyyyy on
+		// Discord). A custom option of the user's own
+		// (ANTHROPIC_CUSTOM_MODEL_OPTION), which the flag hides too, keeps
+		// the lineup.
+		// ownOption: the user's custom row, in settings.json's env or, for
+		// this computer's Claude Code, the login shell's (a distro's
+		// environment magpie can't read)
+		ownOption := func() bool {
+			return env(claudeCustomOptionEnv) != "" || at.spell == nil && claudeShellEnv(claudeCustomOptionEnv) != ""
+		}
+		replace := provider.OwnModelsHidden("claude") || claudeNarrowed() && !ownOption()
 		var onTier []string
 		for _, t := range claudeTiers {
+			if replace {
+				break
+			}
 			if v := env(tierEnv(t)); v != "" {
 				if _, e := tierAt(v); e != "" {
 					onTier = append(onTier, v)
@@ -975,7 +1101,7 @@ func claudeIn(at place) *Agent {
 		// provider the label already says is left "via magpie".
 		labels := listLabels("claude")
 		rows := []any{}
-		for _, o := range viaMagpie("claude", "") {
+		for _, o := range viaMagpieShared("claude", "") {
 			if slices.ContainsFunc(onTier, func(v string) bool { return claudeSameModel(v, o.Value) }) {
 				continue
 			}
@@ -997,35 +1123,76 @@ func claudeIn(at place) *Agent {
 		if len(rows) == 0 {
 			return dropPicker()
 		}
+		// the switch that leaves a picker's own models out (#1642) reaches
+		// here too (#4548, raclen): /model is fed by magpie all the same, so
+		// with the switch off it says replaceBuiltInOptions, which takes
+		// Claude Code's built-in lineup rows back out of /model — the Default
+		// row stays, Claude Code keeping it as its own fallback. The flag
+		// goes again with the switch on, the whole picker written either way.
+		picker := map[string]any{"options": rows}
+		if replace {
+			picker["replaceBuiltInOptions"] = true
+		}
 		stash(map[string]string{pickerKey: "1"})
-		return edit.SetJSON(path, edit.KV{Path: "modelPicker", Value: map[string]any{"options": rows}})
+		return edit.SetJSON(path, edit.KV{Path: "modelPicker", Value: picker})
+	}
+	// pickerRefs are the models writePicker lists in /model, as it lists
+	// them ("[1m]" on a 1M one), none while the picker is the user's.
+	// Claude Code runs a model picked there on the window it was told, and
+	// beside a Claude main it was told none: a routing group of a 500K GPT
+	// and a 1M Claude picked in /model ran at Claude Code's own 200K
+	// (young02036 on Discord)
+	pickerRefs := func() []string {
+		if _, has := edit.GetJSON(path, "modelPicker"); has && !pickerOurs() {
+			return nil
+		}
+		mark1M := claude1M()
+		var refs []string
+		for _, o := range viaMagpieShared("claude", "") {
+			refs = append(refs, mark1M(o.Value))
+		}
+		return refs
 	}
 	// writeCaps says what magpie's models can do, the ones in models first;
 	// Claude Desktop's ids too while it runs on magpie, its Code tab being
 	// Claude Code on this settings.json
 	desktopOn := func() bool {
-		return at.id == "" && at.sys == nil && desktopWiredAny(desktopSets(desktopdir.OS, at.home, os.Getenv))
+		// a distro's: Claude Desktop on Windows runs a Code tab session
+		// whose host is WSL on the distro's Claude Code, which reads
+		// ${CLAUDE_CONFIG_DIR:-$HOME/.claude} there (4.29.0's remote
+		// probe), not Windows' settings.json, and is handed the same
+		// mythos-magpie id and no window; only Windows' Desktop wired
+		// tells (young02036 on Discord: 500K group at "/ 200k" in WSL)
+		if at.sys != nil {
+			return desktopWiredAny(desktopSetsHere())
+		}
+		// the isolated Desktop's Code tab on a folder of its own (#6459):
+		// that folder's Claude Code, and ~/.claude's no more
+		if d := desktopCodeDir(at.home); d != "" {
+			return at.dir != "" && filepath.Clean(at.dir) == filepath.Clean(d) && desktopWiredAny(desktopSets(desktopdir.OS, at.home, os.Getenv))
+		}
+		return at.id == "" && desktopWiredAny(desktopSets(desktopdir.OS, at.home, os.Getenv))
 	}
 	// Desktop's Explore compatibility flag has its own ownership: taking
 	// Claude Code off magpie must leave it while Desktop still needs it.
 	exploreKey := at.key("claude.explore_inherit_cap")
 	writeExplore := func() error {
 		cur, has := edit.GetJSON(path, "env."+claudeExploreEnv)
-		ours := has && cur == "1" && stashLoad()[exploreKey] == "1"
+		ours := has && cur == "1" && stashShared()[exploreKey] == "1"
 		if !desktopOn() {
 			if ours {
 				if err := edit.DelJSON(path, "env."+claudeExploreEnv); err != nil {
 					return err
 				}
 			}
-			if stashLoad()[exploreKey] != "" {
+			if stashShared()[exploreKey] != "" {
 				forget(exploreKey)
 			}
 			return nil
 		}
 		// Presence matters: an explicit empty value is the user's too.
 		if has {
-			if !ours && stashLoad()[exploreKey] != "" {
+			if !ours && stashShared()[exploreKey] != "" {
 				forget(exploreKey)
 			}
 			return nil
@@ -1059,7 +1226,7 @@ func claudeIn(at place) *Agent {
 	reviewKey := at.key("claude.auto_mode_server")
 	reviewOurs := func() bool {
 		cur := rawEnv(claudeReviewEnv)
-		return cur != "" && cur == stashLoad()[reviewKey]
+		return cur != "" && cur == stashShared()[reviewKey]
 	}
 	dropReview := func() error {
 		defer forget(reviewKey)
@@ -1068,8 +1235,8 @@ func claudeIn(at place) *Agent {
 		}
 		return nil
 	}
-	// writeReview turns the review off while no model Claude Code can reach
-	// through magpie runs it, and back on (unset) once one does
+	// writeReview turns the review off while a model Claude Code can reach
+	// through magpie doesn't answer it, and back on (unset) once each does
 	writeReview := func(models ...string) error {
 		if rawEnv(claudeReviewEnv) != "" && !reviewOurs() {
 			forget(reviewKey)
@@ -1088,13 +1255,39 @@ func claudeIn(at place) *Agent {
 		}
 		return edit.SetJSON(path, edit.KV{Path: "env." + claudeReviewEnv, Value: "0"})
 	}
+	// tool search magpie turned on (claudeSearchEnv) while Claude Code is
+	// on magpie, kept apart from the user's own as the review is: a value
+	// there that isn't the one magpie wrote, an empty one too, is theirs
+	searchKey := at.key("claude.tool_search")
+	searchOurs := func() bool {
+		cur, has := edit.GetJSON(path, "env."+claudeSearchEnv)
+		return has && cur != "" && cur == stashShared()[searchKey]
+	}
+	dropSearch := func() error {
+		defer forget(searchKey)
+		if searchOurs() {
+			return edit.DelJSON(path, "env."+claudeSearchEnv)
+		}
+		return nil
+	}
+	writeSearch := func() error {
+		if _, has := edit.GetJSON(path, "env."+claudeSearchEnv); has && !searchOurs() {
+			forget(searchKey)
+			return nil
+		}
+		stash(map[string]string{searchKey: "true"})
+		if rawEnv(claudeSearchEnv) == "true" {
+			return nil
+		}
+		return edit.SetJSON(path, edit.KV{Path: "env." + claudeSearchEnv, Value: "true"})
+	}
 	// desktopPlan is what writeWindow writes while Claude Desktop is on
 	// magpie (claudePlan, #2025): the models its Code tab runs Claude Code
 	// on, and while Claude Code itself is on magpie (main set) its main
-	// model and tiers', each with its own window under the
-	// largest. A model Claude Code knows as Claude's has its own window.
+	// model's, tiers' and those /model offers (pickerRefs), each with its
+	// own window under the largest. A model Claude Code knows as Claude's has its own window.
 	desktopPlan := func(main string, tiers map[string]string) (top, def int, entries map[string]int) {
-		s := settings.Load()
+		s := settings.Load().ForAgent("claude")
 		// the user's own top-level autoCompactWindow
 		cur, userTop := edit.GetJSON(path, "autoCompactWindow")
 		userTop = userTop && !defaultOurs()
@@ -1107,7 +1300,7 @@ func claudeIn(at place) *Agent {
 		// unless Full window. It is the model's own entry, so Desktop's
 		// models have it with Claude Code itself off magpie too, where
 		// Claude's own models compact as they did
-		work := func(ref string) int {
+		work := func(ref string, listed1M bool) int {
 			if n := provider.CompactSet(ref); n > 0 {
 				return n
 			}
@@ -1120,20 +1313,31 @@ func claudeIn(at place) *Agent {
 			if s.CompactAt == 0 && provider.WindowTyped(ref) {
 				return -1
 			}
+			// a model Desktop lists by its 1M id alone, which the user asked
+			// for with Only each model's largest window, runs to that 1M:
+			// held to the working window, Desktop's 1M entry compacted at
+			// 272K (henglu486729 on X). A threshold they typed still wins
+			if s.CompactAt == 0 && listed1M {
+				return -1
+			}
 			return cmp.Or(s.Compact(), -1)
 		}
 		var models []claudeBudget
 		if desktopOn() {
 			shown, _ := provider.CatalogFor("claude-desktop")
+			behaves, _ := gateway.DesktopBehavesAs()
+			again := gateway.DesktopTierAliases()
 			for _, e := range shown {
-				if id := gateway.DesktopID(e); claudeName(id) == "" {
-					models = append(models, claudeBudget{id: id, window: e.Context, long: gateway.DesktopListed1M(e), compact: work(e.ID)})
+				for _, id := range append([]string{gateway.DesktopID(e)}, again[e.ID]...) {
+					if claudeName(id) == "" {
+						models = append(models, claudeBudget{id: id, window: e.Context, long: gateway.DesktopListed1M(e), compact: work(e.ID, gateway.DesktopListed1M(e)), behaves: behaves[id] != ""})
+					}
 				}
 			}
 		}
 		if main != "" {
 			window := map[string]int{}
-			for _, m := range magpieModels("claude") {
+			for _, m := range sharedModels("claude") {
 				window[m.ID] = m.Context
 			}
 			// a tier fixed at an effort is handed Claude Code with it, and
@@ -1142,13 +1346,15 @@ func claudeIn(at place) *Agent {
 			for _, t := range claudeTiers {
 				refs = append(refs, tiers[t])
 			}
+			// and the models /model offers, each of which it may run on
+			refs = append(refs, pickerRefs()...)
 			for _, v := range refs {
 				m, _ := tierAt(v)
 				bare := strings.TrimSuffix(m, "[1m]")
 				if v == "" || claudeModel(bare) || provider.ClaudeGroup(bare) {
 					continue
 				}
-				models = append(models, claudeBudget{id: spell(v), window: window[bare], long: strings.HasSuffix(v, "[1m]"), compact: work(bare)})
+				models = append(models, claudeBudget{id: spell(v), window: window[bare], long: strings.HasSuffix(v, "[1m]"), compact: work(bare, false)})
 			}
 			// the one for every model else, as the variable gave it: none
 			// on a Claude main model, which Anthropic runs to its own
@@ -1176,6 +1382,36 @@ func claudeIn(at place) *Agent {
 		top, entries = claudePlan(models, base, theirs)
 		return top, def, entries
 	}
+	// pickerApart says the main is one of Claude's own models (or a group
+	// of them), which Anthropic runs to its own window, magpie tells
+	// Claude Code no window for the rest (claudeWindow 0), and /model
+	// offers a model of magpie's whose window is known: picked there, it
+	// would run at Claude Code's own 200K, so each gets its own through
+	// desktopPlan. A model Claude Code takes for 1M by its "[1m]", or
+	// knows as Claude's, has its own already. Any other main is as
+	// before: one whose window is told serves a /model pick too, and one
+	// of no known window keeps the last.
+	pickerApart := func(main string, tiers map[string]string) bool {
+		m, _ := tierAt(main)
+		bare := strings.TrimSuffix(m, "[1m]")
+		if main == "" || !claudeModel(bare) && !provider.ClaudeGroup(bare) || claudeWindow(main, tiers) > 0 {
+			return false
+		}
+		window := map[string]int{}
+		for _, m := range sharedModels("claude") {
+			window[m.ID] = m.Context
+		}
+		for _, v := range pickerRefs() {
+			m, _ := tierAt(v)
+			if strings.HasSuffix(m, "[1m]") || claudeModel(m) || provider.ClaudeGroup(m) {
+				continue
+			}
+			if window[m] > 0 {
+				return true
+			}
+		}
+		return false
+	}
 	// writeWindow tells Claude Code the window of the models it runs on
 	// (claudeWindow). While Claude Desktop runs on magpie too, it is the
 	// largest of theirs and each model below it gets its own
@@ -1194,7 +1430,7 @@ func claudeIn(at place) *Agent {
 			forget(windowKey)
 			return dropBudgets()
 		}
-		if (desktopOn() || claudeLongMain(main) && claudeWindow(main, tiers) > 0) && (env(claudeCompactEnv) == "" || compactOurs()) {
+		if (desktopOn() || claudeLongMain(main) && claudeWindow(main, tiers) > 0 || pickerApart(main, tiers)) && (env(claudeCompactEnv) == "" || compactOurs()) {
 			top, def, entries := desktopPlan(main, tiers)
 			if top <= 0 {
 				return dropWindow()
@@ -1229,6 +1465,31 @@ func claudeIn(at place) *Agent {
 		}
 		return edit.SetJSON(path, edit.KV{Path: "env." + claudeContextEnv, Value: v})
 	}
+	// dropStray takes magpie's model names out of a Claude Code on
+	// Anthropic's own endpoint, where each is a 404 ("There's an issue
+	// with the selected model (claude/claude-opus-5-5)", roswellcsy on X):
+	// left in its env, ANTHROPIC_MODEL over settings.json's model, by an
+	// older magpie that gave one back from the stash as the user's own on
+	// every Disconnect. The user's own models, and any at an endpoint of
+	// theirs, which may name its models so, are left as they are.
+	dropStray := func() error {
+		if env("ANTHROPIC_BASE_URL") != "" {
+			return nil
+		}
+		var keys []string
+		for _, k := range claudeModelEnv {
+			if claudeMagpieModel(rawEnv(k)) {
+				keys = append(keys, "env."+k)
+			}
+		}
+		if claudeMagpieModel(model()) {
+			keys = append(keys, "model")
+		}
+		if len(keys) == 0 {
+			return nil
+		}
+		return edit.DelJSON(path, keys...)
+	}
 	// desktopOnly is what is written while Claude Code itself isn't on
 	// magpie: Claude Desktop's Code tab still runs Claude Code on this
 	// settings.json while Desktop is, so the window and capabilities of
@@ -1242,6 +1503,9 @@ func claudeIn(at place) *Agent {
 		// the review is turned off only for Claude Code's own requests to
 		// magpie
 		if err := dropReview(); err != nil {
+			return err
+		}
+		if err := dropSearch(); err != nil {
 			return err
 		}
 		if !desktopOn() {
@@ -1263,19 +1527,38 @@ func claudeIn(at place) *Agent {
 	// takes the Agent call's model, then the agent's frontmatter, then
 	// CLAUDE_CODE_SUBAGENT_MODEL, then the session's (2.1.287). Empty
 	// while it follows the main model, as magpie writes it by itself.
+	// An effort with no model of their own is never written: the main
+	// model at that effort in CLAUDE_CODE_SUBAGENT_MODEL pins every
+	// subagent to the main model (KorenKrita on Discord).
 	subagentOwn := func() string {
 		w := env("CLAUDE_CODE_SUBAGENT_MODEL")
-		if m, e := tierAt(w); routed() && isMagpie(m) && (own("subagent") || w != wroteMain() && (e != "" || m != wroteMain())) {
+		if m, _ := tierAt(w); routed() && isMagpie(m) && (own("subagent") || m != wroteMain()) {
 			return w
 		}
 		return ""
 	}
+	// the effort an older magpie wrote for subagents that follow the main
+	// model, as the main model at that effort: "" for none
+	subagentFollowing := func() string {
+		m, e := tierAt(env("CLAUDE_CODE_SUBAGENT_MODEL"))
+		if routed() && e != "" && m == wroteMain() && !own("subagent") {
+			return e
+		}
+		return ""
+	}
+	// the subagents' effort the user gave with no model of their own: kept
+	// in the stash, not written, and applied once they have a model
+	subEffortKey := at.key("claude.subagent_effort")
+	subagentSaved := func() string { return cmp.Or(stashShared()[subEffortKey], subagentFollowing()) }
 	// the subagents' model as written, its effort apart: "" for each while
-	// it follows the main model
+	// it follows the main model, which takes no effort of theirs
 	subagentAt := func() (string, string) {
 		m, e := tierAt(subagentOwn())
 		if m == wroteMain() && !own("subagent") {
 			m = ""
+		}
+		if m == "" {
+			e = ""
 		}
 		return m, e
 	}
@@ -1320,8 +1603,16 @@ func claudeIn(at place) *Agent {
 	}
 	putClouds := func() error {
 		var back []edit.KV
+		// the originals are read and stay stashed until the write that puts
+		// them back has gone through: one that fails leaves them for the
+		// next try (#4258)
+		keys := make([]string, 0, len(agentenv.ClaudeProviders))
 		for _, k := range agentenv.ClaudeProviders {
-			raw := unstash(cloudKey(k))
+			keys = append(keys, cloudKey(k))
+		}
+		peeked := peek(keys...)
+		for _, k := range agentenv.ClaudeProviders {
+			raw := peeked[cloudKey(k)]
 			if raw == "" || !json.Valid([]byte(raw)) {
 				continue
 			}
@@ -1332,9 +1623,16 @@ func claudeIn(at place) *Agent {
 			back = append(back, edit.KV{Path: "env." + k, Value: json.RawMessage(raw)})
 		}
 		if len(back) == 0 {
+			// nothing of theirs to put back: what was peeked is given up,
+			// as it was when it was taken out up front
+			forgetValues(peeked)
 			return nil
 		}
-		return edit.SetJSON(path, back...)
+		if err := edit.SetJSON(path, back...); err != nil {
+			return err
+		}
+		forgetValues(peeked)
+		return nil
 	}
 	// unroute takes magpie's endpoint and models out of Claude Code's env
 	// and puts back the endpoint and token the stash kept from before magpie
@@ -1359,14 +1657,33 @@ func claudeIn(at place) *Agent {
 			return "", err
 		}
 		if !routed() {
-			return "", nil
+			// magpie's, left at a gateway address since changed: its
+			// endpoint, key and models all go, as set("") takes them
+			if keyOurs() {
+				keys := make([]string, len(claudeEnv))
+				for i, k := range claudeEnv {
+					keys[i] = "env." + k
+				}
+				if err := edit.DelJSON(path, keys...); err != nil {
+					return "", err
+				}
+			}
+			return "", dropStray()
 		}
+		// the alias magpie wrote for its main model (mainWord) means a tier
+		// of Anthropic's again once the tiers go, so it goes with them
+		aliased := wroteAlias()
 		keys := make([]string, len(claudeEnv))
 		for i, k := range claudeEnv {
 			keys[i] = "env." + k
 		}
 		if err := edit.DelJSON(path, keys...); err != nil {
 			return "", err
+		}
+		if aliased {
+			if err := edit.DelJSON(path, "model"); err != nil {
+				return "", err
+			}
 		}
 		forget(aboutKey)
 		// the auto mode classifier's model goes only where it is magpie's
@@ -1376,18 +1693,43 @@ func claudeIn(at place) *Agent {
 			}
 		}
 		forget(autoKey)
-		was := unstash(at.key("claude.model"))
+		// the advisor goes where it is on magpie's model, and its switch
+		// where magpie wrote it
+		if isMagpie(strings.TrimSuffix(claudeReadOwn(jsonGet(path, "advisorModel")()), "[1m]")) {
+			if err := edit.DelJSON(path, "advisorModel"); err != nil {
+				return "", err
+			}
+		}
+		if advisorOurs() {
+			if err := edit.DelJSON(path, "env."+claudeAdvisorEnv); err != nil {
+				return "", err
+			}
+		}
+		forget(advisorKey)
+		// the originals are read and stay stashed until the write that puts
+		// them back has gone through: one that fails leaves them stashed
+		// for the next try (#4258). The model is the caller's to take out:
+		// its write, where there is one, comes after unroute.
+		stashKeys := make([]string, 0, len(claudeOwnEnv)+3)
+		stashKeys = append(stashKeys, at.key("claude.model"), at.key("claude.base_url"), at.key("claude.auth_token"))
+		for _, k := range claudeOwnEnv {
+			stashKeys = append(stashKeys, at.key("claude.env."+k))
+		}
+		peeked := peek(stashKeys...)
+		was := peeked[at.key("claude.model")]
 		var back []edit.KV
 		for _, k := range claudeOwnEnv {
 			// one the user set again since is theirs as it is
-			if v := unstash(at.key("claude.env." + k)); v != "" && rawEnv(k) == "" {
+			// one of magpie's kept by an older magpie as the user's is no
+			// model of their endpoint's (roswellcsy on X)
+			if v := peeked[at.key("claude.env."+k)]; v != "" && rawEnv(k) == "" && !(contains(claudeModelEnv, k) && claudeMagpieModel(v)) {
 				back = append(back, edit.KV{Path: "env." + k, Value: v})
 			}
 		}
-		if u := unstash(at.key("claude.base_url")); u != "" {
+		if u := peeked[at.key("claude.base_url")]; u != "" {
 			back = append(back, edit.KV{Path: "env.ANTHROPIC_BASE_URL", Value: u})
 		}
-		if t := unstash(at.key("claude.auth_token")); t != "" {
+		if t := peeked[at.key("claude.auth_token")]; t != "" {
 			back = append(back, edit.KV{Path: "env.ANTHROPIC_AUTH_TOKEN", Value: t})
 		}
 		if len(back) > 0 {
@@ -1395,6 +1737,15 @@ func claudeIn(at place) *Agent {
 				return "", err
 			}
 		}
+		// what was put back is taken out of the stash; the model stays for
+		// the caller's write
+		taken := make(map[string]string, len(peeked))
+		for k, v := range peeked {
+			if k != at.key("claude.model") {
+				taken[k] = v
+			}
+		}
+		forgetValues(taken)
 		return was, nil
 	}
 	var writeTiers func(main string, tiers map[string]string) error
@@ -1417,11 +1768,18 @@ func claudeIn(at place) *Agent {
 					keys = append(keys, "env."+k)
 				}
 			}
+			if err := edit.DelJSON(path, keys...); err != nil {
+				return err
+			}
+			// the stashed values go once the write that takes magpie's out
+			// has gone through (#4258): the model the user had is given up
+			// for Claude Code's own default here, and the endpoint and token
+			// unroute put back are already out of the stash
 			forget(at.key("claude.model"), at.key("claude.base_url"), at.key("claude.auth_token"), mainKey, wroteAt, aboutKey)
 			for _, k := range claudeOwnEnv {
 				forget(at.key("claude.env." + k))
 			}
-			return edit.DelJSON(path, keys...)
+			return nil
 		}
 		if isMagpie(v) {
 			if !routed() {
@@ -1437,8 +1795,15 @@ func claudeIn(at place) *Agent {
 						at.key("claude.auth_token"): env("ANTHROPIC_AUTH_TOKEN"),
 					}
 					for _, k := range claudeOwnEnv {
-						// as the user wrote it, never respelled
-						kept[at.key("claude.env."+k)] = rawEnv(k)
+						// as the user wrote it, never respelled; one of
+						// magpie's own left there is not theirs to get back
+						// (roswellcsy on X: it came back as their
+						// ANTHROPIC_MODEL with every Disconnect)
+						v := rawEnv(k)
+						if contains(claudeModelEnv, k) && claudeMagpieModel(v) {
+							v = ""
+						}
+						kept[at.key("claude.env."+k)] = v
 					}
 					// the auto mode classifier's model of their own
 					// endpoint waits in the stash, out of the env, as
@@ -1493,12 +1858,6 @@ func claudeIn(at place) *Agent {
 					}
 				}
 			}
-			// so do subagents that follow it at an effort of their own
-			if m, e := subagentAt(); routed() && m == "" && e != "" {
-				if err := edit.SetJSON(path, edit.KV{Path: "env.CLAUDE_CODE_SUBAGENT_MODEL", Value: spell(tierWith(v, e))}); err != nil {
-					return err
-				}
-			}
 			return writeTiers(v, tiers)
 		}
 		// a word that is no model: an effort level the model doesn't take,
@@ -1512,7 +1871,40 @@ func claudeIn(at place) *Agent {
 		if _, err := unroute(); err != nil {
 			return err
 		}
-		return edit.SetJSON(path, edit.KV{Path: "model", Value: v})
+		if err := edit.SetJSON(path, edit.KV{Path: "model", Value: v}); err != nil {
+			return err
+		}
+		// the user's pick replaces the model the stash kept: given up once
+		// the write has gone through (#4258)
+		forget(at.key("claude.model"))
+		return nil
+	}
+
+	// mainWord is the main model as settings.json's "model" says it. A
+	// Claude Code that doesn't go through magpie but reads this file
+	// anyway — Claude Desktop's Code tab on the user's own subscription
+	// drops the env, the gateway's address and the tiers with it, and still
+	// takes "model" — would send a provider-prefixed id to Anthropic, which
+	// refuses it (iryan_sun on X: WebFetch failed everywhere). So on this
+	// computer's own file the model is said as the alias of a tier that
+	// carries it: magpie's env gives the alias magpie's model, and
+	// Anthropic's own tier is what it means anywhere else. A model on no
+	// tier, another machine's Claude Code (a distro's file, which Desktop
+	// doesn't read) and the claude-magpie launch file keep the id.
+	mainWord := func(main string, tiers map[string]string) string {
+		id := spell(main)
+		if at.id != "" {
+			return id
+		}
+		for _, t := range []string{"sonnet", "opus", "haiku", "fable"} {
+			if tiers[t] != "" && spell(tiers[t]) == id {
+				if strings.HasSuffix(id, "[1m]") {
+					return t + "[1m]"
+				}
+				return t
+			}
+		}
+		return id
 	}
 
 	// writeTiers routes Claude Code through the gateway with main as its
@@ -1534,7 +1926,11 @@ func claudeIn(at place) *Agent {
 			return err
 		}
 		// subagents given a model of their own keep it; the others run on
-		// the session's, whatever /model picked, or on the tier they ask for
+		// the session's, whatever /model picked, or on the tier they ask for.
+		// An older magpie's effort on the main model goes out, kept unwritten.
+		if e := subagentFollowing(); e != "" && stashShared()[subEffortKey] == "" {
+			stash(map[string]string{subEffortKey: e})
+		}
 		sub := subagentOwn()
 		// the main model is settings.json's alone: ANTHROPIC_MODEL would
 		// outrank a pick in /model
@@ -1558,7 +1954,7 @@ func claudeIn(at place) *Agent {
 			{Path: "env.ANTHROPIC_BASE_URL", Value: gw},
 			{Path: "env.ANTHROPIC_AUTH_TOKEN", Value: tok},
 			{Path: "env.ANTHROPIC_SMALL_FAST_MODEL", Value: spell(tiers["haiku"])},
-			{Path: "model", Value: spell(main)},
+			{Path: "model", Value: mainWord(main, tiers)},
 		}
 		// a tier on no model is left out, for Claude Code's own (fable on
 		// a Claude model, follow)
@@ -1620,6 +2016,9 @@ func claudeIn(at place) *Agent {
 		if err := writeReview(models...); err != nil {
 			return err
 		}
+		if err := writeSearch(); err != nil {
+			return err
+		}
 		if err := writeExplore(); err != nil {
 			return err
 		}
@@ -1644,7 +2043,7 @@ func claudeIn(at place) *Agent {
 				}
 				return env(tierEnv(t))
 			}
-			own := claudeOwn(cur["model"], tier)
+			own := claudeOwn(cur["model"], tier, provider.ClaudeCodeModels())
 			for i := range own {
 				own[i].Direct = direct
 			}
@@ -1653,7 +2052,11 @@ func claudeIn(at place) *Agent {
 			// time, folded in the picker (#496). Only this machine's: a
 			// distro's Claude Code has a sign-in of its own, which magpie
 			// doesn't read
-			return append(group(name, own), claudeViaMagpie(name == "Claude Code" && at.id == "")...)
+			fold, key := name == "Claude Code" && at.id == "", "\x00claude-via"
+			if fold {
+				key += "-folded"
+			}
+			return joinedVia(group(name, own), claudeViaShared(fold), [2]string{key, at.id})
 		},
 	}, {
 		// the effort Claude Code starts with, as its /effort saves it: under
@@ -1815,15 +2218,24 @@ func claudeIn(at place) *Agent {
 	// subagents: the model one runs on when it names none (general-purpose,
 	// an agent of the user's without a model:). Unset, the session's, as
 	// before; an agent that names a tier (Explore's haiku) takes the tier's.
-	// setSubagent writes the subagents' model and effort, the main model's
-	// at none taking the variable away
+	// setSubagent writes the subagents' model and effort. With no model,
+	// the variable goes and the effort is kept unwritten (subagentSaved):
+	// the main model at an effort would pin every subagent to it.
 	setSubagent := func(model, effort string) error {
-		if model == "" && effort == "" {
+		if model == "" {
+			if effort != "" {
+				stash(map[string]string{subEffortKey: effort})
+			} else {
+				forget(subEffortKey)
+			}
 			if err := edit.DelJSON(path, "env.CLAUDE_CODE_SUBAGENT_MODEL"); err != nil {
 				return err
 			}
-		} else if err := edit.SetJSON(path, edit.KV{Path: "env.CLAUDE_CODE_SUBAGENT_MODEL", Value: spell(tierWith(cmp.Or(model, mainModel()), effort))}); err != nil {
-			return err
+		} else {
+			forget(subEffortKey)
+			if err := edit.SetJSON(path, edit.KV{Path: "env.CLAUDE_CODE_SUBAGENT_MODEL", Value: spell(tierWith(model, effort))}); err != nil {
+				return err
+			}
 		}
 		return writeTiers(curTiers())
 	}
@@ -1840,7 +2252,10 @@ func claudeIn(at place) *Agent {
 			if v != "" && !isMagpie(v) {
 				return fmt.Errorf("subagents: %q is not a model magpie serves", v)
 			}
-			_, e := subagentAt()
+			m, e := subagentAt()
+			if m == "" {
+				e = subagentSaved()
+			}
 			// a model picked is the user's own, the main model too
 			// (#2654: given the main model, the subagents' was left out
 			// and they followed the main model's next move); only "Same
@@ -1958,6 +2373,56 @@ func claudeIn(at place) *Agent {
 			})
 		},
 	})
+	// advisor: the model Claude Code's advisor runs on (settings.json's
+	// advisorModel, as /advisor writes it), turned on for magpie's models
+	// (claudeAdvisorEnv). Unset, no advisor. The gateway runs it for a
+	// model whose upstream can't. Claude Code reads both as it starts.
+	fields = append(fields, Field{
+		Key: "advisor", Label: "advisor model", Quiet: true,
+		Get: func() string {
+			if !routed() {
+				return ""
+			}
+			return claudeReadOwn(jsonGet(path, "advisorModel")())
+		},
+		Set: func(v string) error {
+			v = strings.TrimSpace(v)
+			if !routed() {
+				if v == "" {
+					return nil
+				}
+				return fmt.Errorf("pick a model through magpie for Claude Code first; its advisor can then have a model")
+			}
+			if v != "" && !isMagpie(strings.TrimSuffix(v, "[1m]")) {
+				return fmt.Errorf("advisor: %q is not a model magpie serves", v)
+			}
+			if v == "" {
+				keys := []string{"advisorModel"}
+				if advisorOurs() {
+					keys = append(keys, "env."+claudeAdvisorEnv)
+				}
+				forget(advisorKey)
+				return edit.DelJSON(path, keys...)
+			}
+			kv := []edit.KV{{Path: "advisorModel", Value: spell(v)}}
+			if rawEnv(claudeAdvisorEnv) == "" || advisorOurs() {
+				stash(map[string]string{advisorKey: "1"})
+				kv = append(kv, edit.KV{Path: "env." + claudeAdvisorEnv, Value: "1"})
+			}
+			return edit.SetJSON(path, kv...)
+		},
+		Options: func(map[string]string) []Option {
+			if !routed() {
+				return nil
+			}
+			return claudeViaMagpie(false)
+		},
+	})
+	// permission mode: the mode a new session starts in, Claude Code's own
+	// permissions.defaultMode (EricChenChannel on X). The user's setting,
+	// not magpie's wiring (Own): written only when picked here, and
+	// nothing magpie does takes it out or puts it back.
+	fields = append(fields, claudePermissionField(path))
 	// its sign-in while it runs through magpie: magpie's key, or its own
 	// claude.ai sign-in kept (loginKey), where the gateway takes any key
 	fields = append(fields, Field{
@@ -1980,7 +2445,7 @@ func claudeIn(at place) *Agent {
 				return fmt.Errorf("pick a model through magpie for Claude Code first; it can then keep its claude.ai sign-in")
 			}
 			// one kept before stays so, taking effect where it can again
-			if v != "" && !signInHere() && stashLoad()[loginKey] != v {
+			if v != "" && !signInHere() && stashShared()[loginKey] != v {
 				return fmt.Errorf("Claude Code reaches magpie from another machine (%s), where magpie, shared, takes only its sharing key, so it can't keep its claude.ai sign-in there", at.gw())
 			}
 			stash(map[string]string{loginKey: v, wroteAt: at.gw()})
@@ -1993,25 +2458,45 @@ func claudeIn(at place) *Agent {
 			return claudeSignIns()
 		},
 	})
+	// magpie's status line, offered where the user has none (claude_statusline.go)
+	statusField := claudeStatusField(at, path, func() { stale = "" })
+	fields = append(fields, statusField)
+	// a write asks a proxy in front of magpie first (claudeAsk): each
+	// field's Set, Sync and Unwire. Follow writes only once routed, so a
+	// first look there leaves it for the next one, as reads do.
+	ask := func() { claudeAsk(at, path, env("ANTHROPIC_BASE_URL")) }
+	for i := range fields {
+		s := fields[i].Set
+		fields[i].Set = func(v string) error { ask(); return s(v) }
+	}
 
 	var self *Agent
 	self = &Agent{
 		ID: "claude", Name: "Claude Code", Icon: "claudecode-color", Aliases: []string{"cc", "claude-code"},
 		UA:  []string{"claude-cli", "claude-code"},
-		Bin: "claude", Dir: filepath.Dir(path), Path: path,
+		Bin: "claude", Dir: filepath.Dir(path), Path: path, signIn: ".credentials.json",
 		Fields:       fields,
 		ModelAliases: claudeAliases,
+		Telemetry:    claudeTelemetry(at, path),
 		// Claude Code as it was before magpie: its default puts it back as
 		// installed, on Anthropic's endpoint, where this brings back the
 		// endpoint, token and model the user had
 		Unwire: func() error {
+			ask()
 			was, err := unroute()
 			if err != nil {
 				return err
 			}
-			forget(at.key("claude.model"), at.key("claude.base_url"), at.key("claude.auth_token"), mainKey, wroteAt, aboutKey)
+			// the model stays stashed until the write below has put it back
+			// or given it up (#4258); the endpoint and token unroute put
+			// back are already out of the stash
+			forget(at.key("claude.base_url"), at.key("claude.auth_token"), mainKey, wroteAt, aboutKey)
 			for _, k := range claudeOwnEnv {
 				forget(at.key("claude.env." + k))
+			}
+			// magpie's status line goes with it; one of the user's own stays
+			if err := statusField.Set(""); err != nil {
+				return err
 			}
 			// magpie's level in the env goes alone: the effortLevel under
 			// it is the user's own, which Claude Code is back on
@@ -2023,16 +2508,27 @@ func claudeIn(at place) *Agent {
 			// the model left alone where magpie had none to take over
 			switch {
 			case was != "" && !isMagpie(was):
-				return edit.SetJSON(path, edit.KV{Path: "model", Value: was})
+				if err := edit.SetJSON(path, edit.KV{Path: "model", Value: was}); err != nil {
+					return err
+				}
 			case isMagpie(get()):
-				return edit.DelJSON(path, "model")
+				if err := edit.DelJSON(path, "model"); err != nil {
+					return err
+				}
 			}
+			// put back, given up, or none to take over: the stash keeps no
+			// model past a Disconnect that went through
+			forget(at.key("claude.model"))
 			return nil
 		},
 		// the catalog's models, with their levels, as Claude Code is told
 		// them, while magpie's are the ones it has
 		Sync: func() error {
+			ask()
 			if !routed() {
+				if err := dropStray(); err != nil {
+					return err
+				}
 				return desktopOnly()
 			}
 			// a switch turned on since, or left by an older magpie
@@ -2041,10 +2537,15 @@ func claudeIn(at place) *Agent {
 			}
 			// routed by an older magpie: what was said about the models
 			// before it is taken out as it is now when magpie is wired in
-			if stashLoad()[aboutKey] == "" {
+			if stashShared()[aboutKey] == "" {
 				if err := dropAbout(nil); err != nil {
 					return err
 				}
+			}
+			// subagents an older magpie pinned to the main model at an
+			// effort of theirs follow it again, the effort kept unwritten
+			if subagentFollowing() != "" {
+				return writeTiers(curTiers())
 			}
 			// a model of magpie's an older magpie wrote with a dotted Claude
 			// version goes in as Claude Code is given it now (spell)
@@ -2053,10 +2554,20 @@ func claudeIn(at place) *Agent {
 				raw = append(raw, rawEnv(k))
 			}
 			if slices.ContainsFunc(raw, func(v string) bool {
-				m, _ := tierAt(provider.ClaudeRead(v))
-				return v != "" && isMagpie(m) && spell(provider.ClaudeRead(v)) != v
+				m, _ := tierAt(claudeReadOwn(v))
+				return v != "" && isMagpie(m) && spell(claudeReadOwn(v)) != v
 			}) {
 				return writeTiers(curTiers())
+			}
+			// the model an older magpie wrote as an id of magpie's goes in
+			// as the alias of its tier (mainWord)
+			if m, ts := curTiers(); m != "" {
+				word, cur := mainWord(m, ts), jsonGet(path, "model")()
+				if cur != word && word != spell(m) {
+					if r, _ := tierAt(claudeReadOwn(cur)); isMagpie(strings.TrimSuffix(r, "[1m]")) {
+						return writeTiers(m, ts)
+					}
+				}
 			}
 			models := []string{mainModel()}
 			tiers := map[string]string{}
@@ -2076,6 +2587,9 @@ func claudeIn(at place) *Agent {
 				return err
 			}
 			if err := writeReview(models...); err != nil {
+				return err
+			}
+			if err := writeSearch(); err != nil {
 				return err
 			}
 			if err := writeExplore(); err != nil {
@@ -2102,7 +2616,7 @@ func claudeIn(at place) *Agent {
 			// follows on none (follow), unless at an effort of its own
 			fm, fe := tierAt(env(tierEnv("fable")))
 			stays = stays && (follow("fable", bare) != "" || fm == "" || fe != "" || !follows("fable", fm))
-			if _, has := edit.GetJSON(path, "env.ANTHROPIC_MODEL"); !has && main == stashLoad()[mainKey] && stays {
+			if _, has := edit.GetJSON(path, "env.ANTHROPIC_MODEL"); !has && main == stashShared()[mainKey] && stays {
 				return nil
 			}
 			return set(bare)
@@ -2111,17 +2625,26 @@ func claudeIn(at place) *Agent {
 			if !isMagpie(get()) {
 				return ""
 			}
+			getEnv := func(k string) (string, bool) { return edit.GetJSON(path, "env."+k) }
+			// an address that isn't the gateway's is asked whether it is
+			// magpie behind a proxy (#1985) only while what Claude Code
+			// sends is for magpie (claudeKeyed): with a key of the user's
+			// own it is their endpoint, told as it is, never asked (#3480)
+			keyed := claudeKeyed(at, path)
 			// an administrator's settings win over the user's
 			managed := claudeManaged()
 			if at.sys != nil {
 				managed = at.sys("/etc/claude-code/managed-settings.json")
 			}
-			if u, _ := edit.GetJSON(managed, "env.ANTHROPIC_BASE_URL"); u != "" && u != at.gw() && !reachesMagpie(u, at.gw()) {
+			if u, _ := edit.GetJSON(managed, "env.ANTHROPIC_BASE_URL"); u != "" && u != at.gw() && !(keyed && reachesMagpie(u, at.gw())) {
 				return "Claude Code's managed settings (" + at.native(managed) + ") set ANTHROPIC_BASE_URL to " + u + ", which wins over magpie's"
 			}
-			getEnv := func(k string) (string, bool) { return edit.GetJSON(path, "env."+k) }
-			if off := wiringOff("Claude Code", path, getEnv, "ANTHROPIC_BASE_URL", at.gw()); off != "" {
-				return off
+			if keyed {
+				if off := wiringOff("Claude Code", path, getEnv, "ANTHROPIC_BASE_URL", at.gw()); off != "" {
+					return off
+				}
+			} else if u, _ := getEnv("ANTHROPIC_BASE_URL"); u != at.gw() {
+				return whatsOff("Claude Code", path, "ANTHROPIC_BASE_URL", u, at.gw())
 			}
 			if why := claudeCloud(at, path); why != "" {
 				return why
@@ -2145,9 +2668,11 @@ func claudeIn(at place) *Agent {
 			}
 			return wiringOff("Claude Code", path, getEnv, "ANTHROPIC_AUTH_TOKEN", at.gwKey())
 		},
-		// every prompt typed into Claude Code goes into history.jsonl
+		// every prompt typed into Claude Code goes into history.jsonl, and
+		// so does every one magpie's bridge gives it in magpie's own work
+		// folder, which went through magpie (ifccod7391564 on X)
 		LastUsed: func() time.Time {
-			return lastJSONLTime(filepath.Join(filepath.Dir(path), "history.jsonl"), "timestamp", "display")
+			return lastJSONLTime(filepath.Join(filepath.Dir(path), "history.jsonl"), "timestamp", "display", inMagpieWork)
 		},
 		// a session takes a new CLAUDE_CODE_EFFORT_LEVEL on its next
 		// request, but settings.json's effort and ultracode, and the env's
@@ -2233,14 +2758,15 @@ func claudeDropModelEffort(path, n string) error {
 	return nil
 }
 
-// claudeOwn is Anthropic's models as Claude Code takes them: only the
-// catalog's; Claude Code's own short aliases are not something any API
-// lists, and a compiled-in copy would just go stale. One the user's
+// claudeOwn is Anthropic's models as Claude Code takes them, ms: the
+// catalog's, and on this computer the ones Anthropic told Claude Code
+// its account has beyond them (provider.ClaudeCodeModels: Claude Mythos
+// 5.1); Claude Code's own short aliases are not something any API lists,
+// and a compiled-in copy would just go stale. One the user's
 // settings.json names (cur: "model": "sonnet") comes first, said as the
 // model it stands for, so the row doesn't show a bare word; tier is the
 // model the user's env gives a tier, "" for none.
-func claudeOwn(cur string, tier func(string) string) []Option {
-	ms := catalog.Provider("anthropic")
+func claudeOwn(cur string, tier func(string) string, ms []catalog.Model) []Option {
 	var own []Option
 	if o, ok := claudeAliasOption(cur, ms, tier); ok {
 		own = append(own, o)
@@ -2345,10 +2871,30 @@ func claudeAliasOption(v string, ms []catalog.Model, tier func(string) string) (
 // of 1M or more marked [1m]: Claude Code takes any other for 200K, and
 // compacts long before a 1M model needs it. It drops the mark before asking.
 // fold marks Same those on the account Claude Code is signed in to, for a
-// picker that lists Claude Code's own models above them.
+// picker that lists Claude Code's own models above them. Each caller has
+// a copy of its own of the list built last (builtOptions): its model and
+// tier fields asked it each poll, for the picker and again for Drift, a
+// list built anew each time, 30 MB of forty polls with real accounts.
 func claudeViaMagpie(fold bool) []Option {
+	return slices.Clone(claudeViaShared(fold))
+}
+
+// claudeViaShared is claudeViaMagpie without the caller's own copy, the
+// list kept, read only: for a caller appending it to a list of its own,
+// which copies it anyway (Claude Code's model field, 5 MB of forty polls
+// copied twice).
+func claudeViaShared(fold bool) []Option {
+	key := "\x00claude-via"
+	if fold {
+		key += "-folded"
+	}
+	return builtOptions.shared(key, func() []Option { return buildClaudeVia(fold) })
+}
+
+// buildClaudeVia is claudeViaMagpie built afresh.
+func buildClaudeVia(fold bool) []Option {
 	big := map[string]bool{}
-	for _, m := range magpieModels("claude") {
+	for _, m := range sharedModels("claude") {
 		big[m.ID] = m.Context >= 1_000_000
 	}
 	opts := viaMagpie("claude", "")
@@ -2374,7 +2920,7 @@ func claude1M() func(ref string) string { return claude1MFor("claude") }
 func claude1MFor(agent string) func(ref string) string {
 	const mark = "[1m]"
 	window := map[string]int{}
-	for _, m := range magpieModels(agent) {
+	for _, m := range sharedModels(agent) {
 		window[m.ID] = m.Context
 	}
 	return func(ref string) string {
@@ -2442,7 +2988,7 @@ func claudeLongMain(main string) bool {
 func claudeWindow(main string, tiers map[string]string) int {
 	const mark = "[1m]"
 	window := map[string]int{}
-	for _, m := range magpieModels("claude") {
+	for _, m := range sharedModels("claude") {
 		window[m.ID] = m.Context
 	}
 	if !strings.HasSuffix(main, mark) {
@@ -2496,7 +3042,7 @@ func claudeOutput(models ...string) int {
 		return 0
 	}
 	output := map[string]int{}
-	for _, m := range magpieModels("claude") {
+	for _, m := range sharedModels("claude") {
 		output[m.ID] = m.Output
 	}
 	n := 0
@@ -2534,7 +3080,8 @@ var claudeManaged = func() string {
 // StandIn is the model Claude Code is set to use in place of one it named
 // that magpie doesn't serve: claude-haiku-4-5-… for a title or a small
 // task goes to its haiku tier's model, and a name of no tier to its main
-// model. For Codex, the model it is set to (codexStandIn). "" when the
+// model. For Codex, the model it is set to (codexStandIn), in a WSL
+// distro the distro's config names (wslCodexStandIn). "" when the
 // agent isn't routed through magpie or is neither. For gateway.StandIn.
 func StandIn(agent, model string) string {
 	if agent != "claude" && agent != "codex" {
@@ -2545,22 +3092,89 @@ func StandIn(agent, model string) string {
 		return ""
 	}
 	if agent == "codex" {
-		return codexStandIn(filepath.Join(here(home).codexHome(), "config.toml"))
+		if m := codexStandIn(filepath.Join(here(home).codexHome(), "config.toml")); m != "" || runtime.GOOS != "windows" {
+			return m
+		}
+		// a Codex in a WSL distro is known by the same client
+		return wslCodexStandIn()
 	}
-	if m := claudeStandIn(filepath.Join(here(home).claudeDir(), "settings.json"), model); m != "" || runtime.GOOS != "windows" {
+	if m := claudeStandIn(filepath.Join(here(home).claudeDir(), "settings.json"), model); m != "" {
+		return m
+	}
+	// a claude-magpie session, its settings.json not on magpie, is on
+	// the launch file's models (claude_launch.go)
+	if m := claudeLaunchStandIn(model); m != "" || runtime.GOOS != "windows" {
 		return m
 	}
 	// a Claude Code in WSL is known by the same User-Agent
 	return wslClaudeStandIn(model)
 }
 
-func claudeStandIn(path, model string) string { return claudeStandInAt(path, model, gateway.URL()) }
+// ClassifierStandIn is the model Claude Code's auto mode classifier goes
+// to in place of the one it named, while the sonnet tier it named follows
+// a main model that /model has moved since magpie last wrote the tiers.
+// Claude Code 2.1.310 runs the classifier, with CLAUDE_CODE_AUTO_MODE_MODEL
+// unset, on ANTHROPIC_DEFAULT_SONNET_MODEL ($Xe, BB in its bundle), not on
+// the session's model. A pick in /model saves the main model alone, and
+// the tiers following it move only when magpie next looks (Follow), so
+// the first classifier request after a switch named the model before it
+// (CyberCaius on Discord). "" leaves the model as asked. For
+// gateway.ClassifierStandIn.
+func ClassifierStandIn(agent, model string) string {
+	if agent != "claude" {
+		return ""
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	if m := claudeClassifierIn(here(home), model); m != "" || runtime.GOOS != "windows" {
+		return m
+	}
+	return wslClaudeClassifier(model)
+}
 
-// claudeStandInAt is claudeStandIn for a Claude Code that reaches the
-// gateway at gw.
-func claudeStandInAt(path, model, gw string) string {
-	env := func(k string) string { v, _ := edit.GetJSON(path, "env."+k); return provider.ClaudeRead(v) }
-	if u := env("ANTHROPIC_BASE_URL"); u != gw && !surelyMagpie(u, gw) {
+// claudeClassifierIn is ClassifierStandIn for the Claude Code at a place:
+// the main model the sonnet tier follows, at the tier's effort, when the
+// classifier named that tier as magpie last wrote it and the main model
+// has moved on. A tier the user put on a model of its own, or an auto
+// mode model set for the classifier, is left as it is.
+func claudeClassifierIn(at place, model string) string {
+	path := filepath.Join(at.claudeDir(), "settings.json")
+	env := func(k string) string { v, _ := edit.GetJSON(path, "env."+k); return claudeReadOwn(v) }
+	if u := env("ANTHROPIC_BASE_URL"); u != at.gw() && !claudeProxied(at, path, u) {
+		return ""
+	}
+	if env(claudeAutoModeEnv) != "" {
+		return ""
+	}
+	st := stashLoad()
+	if st[at.key("claude.tier_own.sonnet")] != "" {
+		return ""
+	}
+	bare := func(v string) string { m, _ := tierAt(v); return strings.TrimSuffix(m, "[1m]") }
+	tier, effort := tierAt(env(tierEnv("sonnet")))
+	if tier == "" || bare(claudeReadOwn(model)) != bare(tier) {
+		return ""
+	}
+	was := bare(cmp.Or(st[at.key("claude.main")], env("ANTHROPIC_MODEL")))
+	if was == "" || bare(tier) != bare(follow("sonnet", was)) {
+		return "" // the tier is on a model of its own
+	}
+	main := claudeMain(path)
+	if main == "" || bare(main) == was || !isMagpie(bare(main)) {
+		return ""
+	}
+	return followAt("sonnet", bare(main), effort)
+}
+
+func claudeStandIn(path, model string) string { return claudeStandInAt(here(""), path, model) }
+
+// claudeStandInAt is claudeStandIn for the Claude Code at a place, which
+// reaches the gateway at its own address.
+func claudeStandInAt(at place, path, model string) string {
+	env := func(k string) string { v, _ := edit.GetJSON(path, "env."+k); return claudeReadOwn(v) }
+	if u := env("ANTHROPIC_BASE_URL"); u != at.gw() && !claudeProxied(at, path, u) {
 		return ""
 	}
 	// the model Claude Code is set to itself, by that id, is its own pick
@@ -2587,6 +3201,55 @@ func claudeStandInAt(path, model, gw string) string {
 	return main
 }
 
+// claudeKeyed says what the Claude Code at a place (its settings at path)
+// sends is for magpie: a key the gateway takes (keyHolds, as Check asks of
+// it), or none where it keeps its claude.ai sign-in through magpie, which
+// magpie set (claude.login) on a Claude Code it wired (wired_at, which
+// Disconnect forgets) where the gateway takes any key (signInHere).
+func claudeKeyed(at place, path string) bool {
+	if tok, _ := edit.GetJSON(path, "env.ANTHROPIC_AUTH_TOKEN"); tok != "" {
+		return keyHolds(tok, at.gwKey())
+	}
+	st := stashLoad()
+	return at.gwKey() == gateway.Token && st[at.key("claude.login")] == "claudeai" && st[at.key("claude"+wiredAt)] != ""
+}
+
+// claudeProxied says u, the base URL the Claude Code at a place (its
+// settings at path) has in place of the gateway's, is a proxy to it where
+// magpie has answered (#1985, surelyMagpie). It is asked only where it can
+// be another way to magpie (proxyBase), and only while Claude Code sends
+// it what is for magpie (claudeKeyed): with a key of the user's own, u is
+// their endpoint. zhangt2333 (#3480) never connected Claude Code, and the
+// Agents page's reads of it sent GET / about every 30s to the endpoint in
+// its settings.
+func claudeProxied(at place, path, u string) bool {
+	_, ok := claudeProxyBase(at, path, u)
+	return ok && surelyMagpie(u, at.gw())
+}
+
+// claudeProxyBase is where claudeProxied asks whether magpie answers: u's
+// proxyBase, while Claude Code sends it what is for magpie (claudeKeyed).
+func claudeProxyBase(at place, path, u string) (string, bool) {
+	base, ok := proxyBase(u, at.gw())
+	if !ok || u == at.gw() {
+		return "", false
+	}
+	return base, claudeKeyed(at, path)
+}
+
+// claudeAsk is what each write to the Claude Code at a place does first:
+// the proxy claudeProxied would ask about is asked now where magpie hasn't
+// answered there yet (magpieAsked). Every write reads routed, and the first
+// one in a magpie just started, the CLI's, read a proxy not asked yet as
+// no: a pick wrote 127.0.0.1 over it, the sync a provider added runs
+// turned the auto mode review back on, Disconnect left magpie in and
+// forgot the endpoint the user had (#1985).
+func claudeAsk(at place, path, u string) {
+	if base, ok := claudeProxyBase(at, path, u); ok {
+		magpieAsked(base)
+	}
+}
+
 // claudeMain is the model a Claude Code routed through magpie runs on, as
 // settings.json names it: its model, which /model saves, an alias there
 // resolved through its tier. With none, the ANTHROPIC_MODEL an older
@@ -2604,9 +3267,16 @@ func claudeMain(path string) string {
 	if m == "" {
 		m = env(tierEnv("sonnet"))
 	}
-	m, _ = tierAt(provider.ClaudeRead(m))
+	m, _ = tierAt(claudeReadOwn(m))
 	return m
 }
+
+// claudeReadOwn is a model as settings.json says it, read as magpie serves
+// it: a dashed spelling taken back (ClaudeRead), a Claude model by its bare
+// id taken to Claude Code's own subscription (ClaudeBare). Only where
+// Claude Code goes through magpie: on Anthropic's own endpoint a bare id is
+// Anthropic's, not magpie's (claudeMagpieModel).
+func claudeReadOwn(v string) string { return provider.ClaudeRead(provider.ClaudeUnbare(v)) }
 
 // what an open Claude Code session keeps (notice.go)
 var (
@@ -2643,4 +3313,69 @@ func magpiesPicker(path string) bool {
 		}
 	}
 	return true
+}
+
+// claudeCustomOptionEnv is the one row a user adds to Claude Code's /model
+// themselves, beside its built-in lineup; replaceBuiltInOptions hides it
+// with the lineup.
+const claudeCustomOptionEnv = "ANTHROPIC_CUSTOM_MODEL_OPTION"
+
+// claudeNarrowed says whether Claude Code's list leaves out some of
+// magpie's catalog: only the models picked for it, some taken out one by
+// one, or a visibility of families (provider.CatalogFor's kept list).
+func claudeNarrowed() bool {
+	_, hidden := provider.CatalogFor("claude")
+	return len(hidden) > 0
+}
+
+// inMagpieWork: a line of Claude Code's history.jsonl is a prompt magpie's
+// bridge gave it, in magpie's own work folder (os.TempDir()'s
+// magpie-claude-work, magpie-claude-work-<uid> off Windows), whatever the
+// path to it (/private/var/… on a Mac, C:/… or a WSL mount on Windows).
+func inMagpieWork(m map[string]json.RawMessage) bool {
+	var project string
+	if json.Unmarshal(m["project"], &project) != nil {
+		return false
+	}
+	base := strings.TrimRight(project, `/\`)
+	base = base[strings.LastIndexAny(base, `/\`)+1:]
+	return base == "magpie-claude-work" || strings.HasPrefix(base, "magpie-claude-work-")
+}
+
+// claudePermissionModes are the modes Claude Code's permissions.defaultMode
+// takes (2.1.316), each with the name its own /permissions gives it.
+var claudePermissionModes = []Option{
+	{Value: "default", Label: "Default", Note: "asks before each edit and command"},
+	{Value: "acceptEdits", Label: "Accept edits", Note: "edits files without asking"},
+	{Value: "plan", Label: "Plan mode", Note: "reads and plans, changes nothing"},
+	{Value: "auto", Label: "Auto", Note: "a classifier lets safe actions through"},
+	{Value: "dontAsk", Label: "Don't ask", Note: "refuses what isn't allowed, never asks"},
+	{Value: "bypassPermissions", Label: "Bypass permissions", Note: "runs everything without asking"},
+}
+
+// claudePermissionField is the permission mode Claude Code at path starts
+// a new session in. Bypass permissions also records the consent Claude
+// Code otherwise asks for (skipDangerousModePermissionPrompt), without
+// which it ignores the mode at launch; empty takes the mode out, back to
+// Claude Code's own default, and leaves a consent given before.
+func claudePermissionField(path string) Field {
+	return Field{
+		Key: "permission_mode", Label: "permission mode", Quiet: true, Own: true,
+		Get: jsonGet(path, "permissions.defaultMode"),
+		Set: func(v string) error {
+			v = strings.TrimSpace(v)
+			if v == "" {
+				return edit.DelJSON(path, "permissions.defaultMode")
+			}
+			if !slices.ContainsFunc(claudePermissionModes, func(o Option) bool { return o.Value == v }) {
+				return fmt.Errorf("permission mode: Claude Code has no mode %q", v)
+			}
+			kv := []edit.KV{{Path: "permissions.defaultMode", Value: v}}
+			if v == "bypassPermissions" {
+				kv = append(kv, edit.KV{Path: "skipDangerousModePermissionPrompt", Value: true})
+			}
+			return edit.SetJSON(path, kv...)
+		},
+		Options: func(map[string]string) []Option { return slices.Clone(claudePermissionModes) },
+	}
 }

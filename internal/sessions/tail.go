@@ -17,9 +17,9 @@ type tail struct {
 	Off      int64  `json:"off"`
 	Skip     int64  `json:"skip,omitempty"`
 	Size     int64  `json:"size"`
-	Head     string `json:"head"`
+	Head     digest `json:"head"`
 	HeadSize int    `json:"head_size"`
-	Hash     string `json:"hash"`
+	Hash     digest `json:"hash"`
 }
 
 // markTail is the tail of a file read up to off, its first size bytes the
@@ -30,10 +30,10 @@ func markTail(path string, off, skip, size int64) *tail {
 		head = head[:size]
 	}
 	h := prefixHash(path, size)
-	if h == "" && size > 0 {
+	if h == (digest{}) && size > 0 {
 		return nil
 	}
-	return &tail{Off: off, Skip: skip, Size: size, Head: hashHead(head), HeadSize: len(head), Hash: h}
+	return &tail{Off: off, Skip: skip, Size: size, Head: headDigest(head), HeadSize: len(head), Hash: h}
 }
 
 // holds says whether the file at path is still the one t was read from,
@@ -57,21 +57,15 @@ func (s *state) dropUse(date, model string, t Tokens) {
 		return
 	}
 	s.unuse(date, model, t)
-	if m, ok := s.Models[model]; ok && m.zero() {
-		delete(s.Models, model)
-		if len(s.Models) == 0 {
-			s.Models = nil
-		}
+	if m, ok := s.Models.get(model); ok && m.zero() {
+		s.Models.del(model)
 	}
-	if d := s.Days[date]; d != nil {
-		if m, ok := d.Models[model]; ok && m.zero() {
-			delete(d.Models, model)
-			if len(d.Models) == 0 {
-				d.Models = nil
-			}
+	if d := s.Days.of(date); d != nil {
+		if m, ok := d.Models.get(model); ok && m.zero() {
+			d.Models.del(model)
 		}
 		if len(d.Models) == 0 && d.Active == 0 && d.Hours == nil && d.Prompts == 0 && d.Replies == 0 && d.Tools == nil && d.Skills == nil {
-			delete(s.Days, date)
+			s.Days.del(date)
 		}
 	}
 }

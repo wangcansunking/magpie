@@ -1,6 +1,7 @@
 package sessions
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,7 +20,25 @@ func TestQoderUsageAfterWindowLoss(t *testing.T) {
 				writeLines(t, path, string(claudeUsageLine(at, "a", "r", "m", Tokens{Input: 100, Output: 1}, "", true)))
 				List(0)
 				if restart {
+					// A sessions.json from before the window was kept (#3493).
 					Saved()
+					b, err := os.ReadFile(CachePath())
+					if err != nil {
+						t.Fatal(err)
+					}
+					files, ok := decodeCache(b, zone())
+					if !ok || files[path] == nil {
+						t.Fatalf("cache file: %q", b)
+					}
+					files[path].Claude = nil
+					var w bytes.Buffer
+					if err := encodeCache(&w, cacheFile{Version: cacheVersion, Zone: zone(), Parsers: parseVersions, Files: files}); err != nil {
+						t.Fatal(err)
+					}
+					b = w.Bytes()
+					if err := os.WriteFile(CachePath(), b, 0o644); err != nil {
+						t.Fatal(err)
+					}
 					Reset()
 					List(0)
 				} else {
@@ -34,7 +53,7 @@ func TestQoderUsageAfterWindowLoss(t *testing.T) {
 				}
 				appendText(t, path, string(claudeUsageLine(at.Add(time.Second), "a", "r", "m", Tokens{Input: 100, Output: 50}, "", true))+"\n")
 				List(0)
-				if got := cache[path].Models["m"]; got != (Tokens{Input: 100, Output: 50}) {
+				if got := cache[path].Models.of("m"); got != (Tokens{Input: 100, Output: 50}) {
 					t.Fatalf("after window loss: %+v, want input=100 output=50", got)
 				}
 			})
@@ -69,7 +88,7 @@ func TestClaudeLargeWindowSurvivesIdleAndSmallFiles(t *testing.T) {
 				t.Fatal(err)
 			}
 			snapshot := cache[path]
-			snapshot.Named = "must resume this summary"
+			snapshot.own().Named = "must resume this summary"
 			// Cross the old hard cutoff without sleeping. The cutoff used source
 			// mtime, so advancing only the eviction clock reproduces idle expiry.
 			later := time.Now().Add(2 * revisionIdle)
@@ -100,10 +119,10 @@ func TestClaudeLargeWindowSurvivesIdleAndSmallFiles(t *testing.T) {
 			}
 			appendText(t, path, string(claudeUsageLine(at.Add(time.Hour), "new", "", "m", Tokens{Input: 1, Output: 2}, "", true))+"\n")
 			read()
-			if cache[path].Named != "must resume this summary" {
+			if cache[path].more().Named != "must resume this summary" {
 				t.Fatal("summary reparsed the large prefix")
 			}
-			if got := cache[path].Models["m"]; got != (Tokens{Input: 4001, Output: 8002}) {
+			if got := cache[path].Models.of("m"); got != (Tokens{Input: 4001, Output: 8002}) {
 				t.Fatal(got)
 			}
 			after, err := os.Stat(callCachePath(path))
@@ -162,7 +181,7 @@ func TestClaudeWindowReservationsAndRemoval(t *testing.T) {
 	cache[path] = cache[path].withoutRevisions()
 	// An additional Claude-compatible source uses the same default dispatch;
 	// retention must not carry a second hard-coded list of agent names.
-	windows := summaryRevisionWindows([]file{{path: path, agent: "claude-compatible", size: 1024, mod: now}}, now)
+	windows := summaryRevisionWindows([]file{{path: path, agent: "claude-compatible", size: 1024, mod: modOf(now)}}, now)
 	if !windows[path] || len(windows) != 1 {
 		t.Fatal("disk-only summaries reserved phantom slots", windows)
 	}

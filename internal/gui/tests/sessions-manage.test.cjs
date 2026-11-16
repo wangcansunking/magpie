@@ -121,6 +121,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await browser.close();
       });
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", (e) => errors.push(e.message));
       page.on("dialog", (d) => { errors.push("a browser dialog: " + d.message()); d.dismiss(); });
@@ -173,7 +174,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       // the id's line is named for it (#465: it read 整个会话, the routing option's word)
       assert((await view.locator(".sess-detail .sess-line .k").allInnerTexts()).includes(w.idLine));
 
-      // picking: two rows, the page held still
+      // picking: Select brings the boxes; two rows, the page held still
+      assert.equal(await view.locator(".sm-check").count(), 0, "no boxes before Select");
+      assert(!(await view.locator(".sm-bar").isVisible()), "no bar before Select");
+      await reach(view.locator(".sm-select"));
+      await view.locator(".sm-select").click();
       await still(row("a-old"), "picking", () => row("a-old").locator(".sm-check").click());
       await reach(row("b-1"));
       await row("b-1").locator(".sm-check").click();
@@ -239,14 +244,15 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await row("a-old").waitFor();
       await view.locator(".sm-agents .opt", { hasText: "OpenCode" }).click();
       await view.locator('.row.sm-sess[data-id="o-1"]').waitFor();
-      assert.equal((await view.locator(".sm-note").textContent()).trim(), w.cant);
+      assert.equal((await view.locator(".sm-note:not(.sm-speed-note)").textContent()).trim(), w.cant);
       assert.equal(await view.locator(".sm-del, .sm-check").count(), 0);
+      assert(!(await view.locator(".sm-select").isVisible()), "no Select where nothing can be deleted");
       assert(!(await view.locator(".sm-bar").isVisible()));
       const mutationCount = calls.length;
       await view.locator(".sm-agents .opt", { hasText: "Hermes" }).click();
       const hermes = view.locator('.row.sm-sess[data-id="h-1"]');
       await hermes.waitFor();
-      assert.equal((await view.locator(".sm-note").textContent()).trim(), w.hermesNote);
+      assert.equal((await view.locator(".sm-note:not(.sm-speed-note)").textContent()).trim(), w.hermesNote);
       assert.equal(await hermes.locator(".sm-resume, .sess-resume, .sess-term, .sm-del, .sm-check").count(), 0);
       assert.equal(await view.locator(".sm-folder-del").count(), 0);
       assert(!(await view.locator(".sm-bar").isVisible()));

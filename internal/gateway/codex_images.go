@@ -41,7 +41,7 @@ import (
 // refuses "low" itself, and it is left as sent. WebP, which Go's standard
 // library doesn't decode, is left as sent too.
 func codexImagesFit(p provider.Provider, to provider.Protocol, body []byte) []byte {
-	if p.Account == nil || p.Account.Agent != "codex" || to != provider.Responses || !bytes.Contains(body, []byte(`input_image`)) {
+	if p.Account == nil || p.Account.Agent != "codex" || to != provider.Responses || !bodyHas(body, `input_image`) {
 		return body
 	}
 	// One walk of the body: each input item, and the parts of the items
@@ -50,7 +50,7 @@ func codexImagesFit(p provider.Provider, to provider.Protocol, body []byte) []by
 	// every image: in a Computer Use turn of 160 screenshots, gigabytes of
 	// JSON read for one request (fflake33, Discord).
 	var jobs []fitJob
-	gjson.GetBytes(body, "input").ForEach(func(_, item gjson.Result) bool {
+	getIn(body, "input").ForEach(func(_, item gjson.Result) bool {
 		if !strings.Contains(item.Raw, "input_image") {
 			return true
 		}

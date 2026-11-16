@@ -21,6 +21,9 @@ import (
 	"context"
 	"log"
 	"time"
+
+	"github.com/yetone/magpie/internal/beat"
+	"github.com/yetone/magpie/internal/filememo"
 )
 
 // Grace is how long after the last request ended sleep is still held off.
@@ -68,10 +71,11 @@ func Keep(ctx context.Context, level func() Level, state func() State) {
 	}
 	defer let()
 	failed := false
-	t := time.NewTicker(tick)
-	defer t.Stop()
 	for {
-		if l := level(); l != Off && want(state(), time.Now()) {
+		// taken before the look, so a write made during it isn't missed
+		written := filememo.Written()
+		l := level()
+		if l != Off && want(state(), time.Now()) {
 			if release != nil && held != l {
 				release()
 				release = nil
@@ -95,10 +99,33 @@ func Keep(ctx context.Context, level func() Level, state func() State) {
 			let()
 			failed = false
 		}
+		// turned off (as it is unless the user turns it on), only a change
+		// to settings can turn it on: waited for, not looked for each few
+		// seconds (#3185: these looks woke an idle magpie)
+		every, changed := tick, (<-chan struct{})(nil)
+		if l == Off {
+			every, changed = filememo.OthersEvery(), written
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
+		case <-changed:
+		case <-beat.Next(every):
 		}
 	}
+}
+
+// NoNap keeps macOS from App Napping the magpie serving the gateway until
+// the release it returns is called (#6261, ChasLui). The menu-bar app
+// serves it in its own process, and with the screen locked macOS naps the
+// app as one in the background: its priority falls to 4 and its timers
+// wait, so the first request after a quiet while spent its 30 seconds
+// before routing and got a 504. An agent waiting on the gateway is the
+// user's work, so the activity says it is user initiated, as Apple's App
+// Nap opt-out does. It lets the system sleep when idle, as it did: holding
+// that off is Keep's, and only while the user asked for it. Nor does it
+// ask for NSActivityLatencyCritical's timer precision, which is for audio
+// and video; a request needs the process run, not run to the millisecond.
+func NoNap() func() {
+	return napOff("magpie serves the gateway agents send their requests to")
 }

@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"strings"
 	"sync/atomic"
+	"unicode"
+
+	"github.com/yetone/magpie/internal/lazyre"
 )
 
 // A model deep into a long conversation may write its tool calls into its
@@ -26,7 +28,13 @@ import (
 
 // textCallMarks are what a call written into the text opens with, beside
 // DeepSeek's DSML tags, which dsmlMark reads.
-var textCallMarks = []string{"<tool_call>"}
+// The plain invoke (packinggoodsllc_07668 on Discord: a model of a
+// routing group, in Claude Code, wrote <invoke name="ToolSearch">
+// <parameter name="query">…</parameter></invoke>, then a "*Result: …*" of
+// its own making and the next invoke) is the shape of Claude's own calls
+// and of MiniMax's, which wraps it in <minimax:tool_call>; Claude's wraps
+// it in <function_calls>.
+var textCallMarks = []string{"<tool_call>", "<invoke name=", "<function_calls>", "<minimax:tool_call>"}
 
 // dsmlMark tells whether s begins with a DSML tag's mark, read as the
 // parse regexes read one (dsmlTag): <, spaces, / and spaces for a close
@@ -102,14 +110,19 @@ type writtenCall struct {
 }
 
 var (
-	dsmlTag    = `<\s*/?\s*[|｜][\s|｜]*DSML[\s|｜]*`
-	dsmlInvoke = regexp.MustCompile(`<\s*[|｜][\s|｜]*DSML[\s|｜]*invoke\s+name\s*=\s*"([^"]+)"\s*>`)
-	dsmlParam  = regexp.MustCompile(`(?s)<\s*[|｜][\s|｜]*DSML[\s|｜]*parameter\s+name\s*=\s*"([^"]+)"((?:\s+\w+\s*=\s*"[^"]*")*)\s*>(.*?)` + dsmlTag + `parameter\s*>`)
-	dsmlClose  = regexp.MustCompile(`<\s*/\s*[|｜][\s|｜]*DSML[\s|｜]*invoke\s*>`)
-	dsmlString = regexp.MustCompile(`string\s*=\s*"true"`)
+	dsmlTag = `<\s*/?\s*[|｜][\s|｜]*DSML[\s|｜]*`
+	// invokePre is what an invoke's or a parameter's tag name follows:
+	// DeepSeek's DSML pipes, a namespace (minimax:), or nothing, the plain
+	// invoke
+	invokePre  = `(?:[|｜][\s|｜]*DSML[\s|｜]*|[A-Za-z_][\w-]*:)?`
+	dsmlInvoke = lazyre.New(`<\s*` + invokePre + `invoke\s+name\s*=\s*"([^"]+)"\s*>`)
+	dsmlParam  = lazyre.New(`(?s)<\s*` + invokePre + `parameter\s+name\s*=\s*"([^"]+)"((?:\s+\w+\s*=\s*"[^"]*")*)\s*>(.*?)<\s*/?\s*` + invokePre + `parameter\s*>`)
+	dsmlClose  = lazyre.New(`<\s*/\s*` + invokePre + `invoke\s*>`)
+	dsmlString = lazyre.New(`string\s*=\s*"true"`)
 	// what is left of the tags once the calls are read out, and the
-	// braces, quotes or > GLM leaves before a close (#1945)
-	textCallJunk = regexp.MustCompile(dsmlTag + `[^<>]*>?|[}\]"'>]*\s*</tool_calls?>|<tool_calls?>`)
+	// braces, quotes or > GLM leaves before a close (#1945); and the
+	// plain invoke's, with its wrappers
+	textCallJunk = lazyre.New(dsmlTag + `[^<>]*>?|[}\]"'>]*\s*</tool_calls?>|<tool_calls?>|<\s*/?\s*(?:[A-Za-z_][\w-]*:)?(?:invoke|parameter|function_calls|tool_calls?)\b[^<>]*>`)
 )
 
 // textCallNames are the tools a request offers, by name.
@@ -124,6 +137,148 @@ func textCallNames(tools []Tool) map[string]bool {
 		}
 	}
 	return m
+}
+
+// dropPseudoCalls is a history's model turns with the call one of them
+// wrote out in its text gone, the answer after it staying (#5091).
+func dropPseudoCalls(msgs []Message, tools []Tool) []Message {
+	names := textCallNames(tools)
+	if names == nil {
+		return msgs
+	}
+	var out []Message
+	for i, m := range msgs {
+		kept, ok := withoutPseudoCall(m, names)
+		if ok && out == nil {
+			out = append(make([]Message, 0, len(msgs)), msgs[:i]...)
+		}
+		if out != nil {
+			out = append(out, kept)
+		}
+	}
+	if out == nil {
+		return msgs
+	}
+	return out
+}
+
+// withoutPseudoCall is m with the completion call it wrote out in its text
+// gone, and whether it was. A turn is rewritten only when nothing
+// structured is in it, the whole call written out is there — of a tool the
+// request offers, its arguments readable, closed — and the text after it
+// says the call's result again, up to punctuation and spaces; anything
+// less, a bare tool name or a JSON fragment, stays as it is (#5091, as
+// gemini-4-argon deep in a long session wrote its completion call into the
+// text and the answer after it, and every later turn read its own wrapper
+// back and wrote the next one the same way). The text's signatures go with
+// the turn it was: history a client sends back carries none.
+func withoutPseudoCall(m Message, names map[string]bool) (Message, bool) {
+	if m.Role != "assistant" {
+		return m, false
+	}
+	for _, p := range m.Parts {
+		if p.Kind != Text && p.Kind != Thinking {
+			// a real call, its result, a picture: they stand
+			return m, false
+		}
+	}
+	joined := false
+	for _, p := range m.Parts {
+		if p.Kind == Text && strings.Contains(p.Text, "<") {
+			joined = true
+			break
+		}
+	}
+	if !joined {
+		return m, false
+	}
+	var b strings.Builder
+	for _, p := range m.Parts {
+		if p.Kind == Text {
+			b.WriteString(p.Text)
+		}
+	}
+	said := b.String()
+	at, _ := textCallAt(said)
+	if at < 0 {
+		return m, false
+	}
+	c, n, good := historyCall(said[at:], names)
+	if !good {
+		return m, false
+	}
+	if block := strings.TrimRight(said[at:at+n], " \t\r\n"); !strings.HasSuffix(block, ">") {
+		// no close the model wrote: not a whole wrapper
+		return m, false
+	}
+	res, ok := callResult(c.Args)
+	if !ok || !saysAgain(said[at+n:], res) {
+		// no result to compare, or the answer says something else
+		return m, false
+	}
+	kept := strings.TrimLeft(said[:at]+said[at+n:], " \t\r\n")
+	return Message{Role: m.Role, Parts: []Part{{Kind: Text, Text: kept}}}, true
+}
+
+// historyCall reads one call written out at the start of s, the way
+// parseTextCalls reads a reply's: a <tool_call> block, Hermes' JSON, GLM's
+// pairs, an invoke — of one of names, with arguments that can be read. n is
+// how much of s the block took, its close included where it wrote one.
+func historyCall(s string, names map[string]bool) (c writtenCall, n int, good bool) {
+	if strings.HasPrefix(s, "<tool_call>") {
+		s = s[len("<tool_call>"):]
+		if c, n, good = paramCall(s, names); !good {
+			if c, n, good = hermesCall(s, names); !good && !strings.HasPrefix(strings.TrimLeft(s, " \t\r\n"), "{") {
+				c, n, good = glmCall(s, names)
+			}
+		}
+		return c, n + len("<tool_call>"), good
+	}
+	if d := dsmlInvoke.FindStringSubmatchIndex(s); d != nil {
+		c, n, good = dsmlCall(s, s[d[2]:d[3]], d[1]-d[0], names)
+		return c, n, good
+	}
+	return writtenCall{}, 0, false
+}
+
+// callResult is a written-out call's result: its result member, a string as
+// it stands, any other JSON as it marshals. The completion call of #5091
+// carries the answer it went on to repeat there.
+func callResult(args json.RawMessage) (string, bool) {
+	var a map[string]json.RawMessage
+	if decodeJSON(args, &a) != nil {
+		return "", false
+	}
+	r, ok := a["result"]
+	if !ok {
+		return "", false
+	}
+	var s string
+	if decodeJSON(r, &s) == nil {
+		return s, true
+	}
+	return string(r), true
+}
+
+// saysAgain says whether t says s again, up to the punctuation, spaces and
+// case the answer and its result may differ by (#5091).
+func saysAgain(t, s string) bool {
+	if w := plainWords(s); w != "" {
+		return strings.Contains(plainWords(t), w)
+	}
+	return false
+}
+
+// plainWords is s with its letters and digits kept, lowercased: everything
+// the model's punctuation and spacing may differ by goes.
+func plainWords(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			b.WriteRune(unicode.ToLower(r))
+		}
+	}
+	return b.String()
 }
 
 // chatToolNames are the function tools of a Chat Completions request.
@@ -152,7 +307,10 @@ func chatToolNames(body []byte) map[string]bool {
 
 // textCallAt is where in s a call written into the text begins, -1 for
 // nowhere; and, when it doesn't, how much of s's end could be one's
-// beginning still being written.
+// beginning still being written. A DSML close begins one too: DeepSeek
+// writes its calls wrapper's close however it likes (</｜｜DSML｜｜ calls>,
+// 喜欢一个人 on Discord), and one left behind with nothing before it, after
+// calls an upstream made of the invokes, is held to be dropped, not shown.
 func textCallAt(s string) (at, tail int) {
 	at = -1
 	for _, m := range textCallMarks {
@@ -161,7 +319,7 @@ func textCallAt(s string) (at, tail int) {
 		}
 	}
 	for i := strings.IndexByte(s, '<'); i >= 0 && (at < 0 || i < at); {
-		n, more := dsmlMark(s[i:], false)
+		n, more := dsmlMark(s[i:], true)
 		if n > 0 {
 			at = i
 			break
@@ -192,14 +350,36 @@ func textCallAt(s string) (at, tail int) {
 // parseTextCalls reads the calls written in s, which begins with one.
 // ok is false unless every block in it is a call of one of names whose
 // arguments can be read; rest is the text in it that is no call or tag.
+//
+// Text after a call read out of it, other than tags, ends the calls, and
+// it and all after it go (packinggoodsllc_07668: "*Result: Tool loaded.*"
+// after an invoke, then the next invoke, then "已用 magpie 的浏览器打开了
+// 谷歌"): the model went on as if its call had run and wrote the result
+// itself, before anything ran. The call runs, and the model reads its
+// real result.
 func parseTextCalls(s string, names map[string]bool) (calls []writtenCall, rest string, ok bool) {
 	var left strings.Builder
+	// text is the text before a block, or after the last; after a call,
+	// other than tags, it ends the calls
+	text := func(t string) bool {
+		if len(calls) > 0 {
+			t = strings.TrimSpace(textCallJunk.ReplaceAllString(t, ""))
+			if strings.TrimSpace(strings.TrimSuffix(t, cutMark(t))) != "" {
+				return false
+			}
+		}
+		left.WriteString(t)
+		return true
+	}
 	for s != "" {
 		h := strings.Index(s, "<tool_call>")
 		d := dsmlInvoke.FindStringSubmatchIndex(s)
 		switch {
 		case h >= 0 && (d == nil || h < d[0]):
-			left.WriteString(s[:h])
+			if !text(s[:h]) {
+				s = ""
+				continue
+			}
 			if t := strings.TrimLeft(s[h+len("<tool_call>"):], " \t\r\n"); t == "" || strings.HasPrefix(t, "<") {
 				// no JSON after it: DeepSeek's own tags, an invoke or the
 				// closes of one (#823), or nothing; the opener is dropped
@@ -221,7 +401,10 @@ func parseTextCalls(s string, names map[string]bool) (calls []writtenCall, rest 
 			calls = append(calls, c)
 			s = s[h+len("<tool_call>")+n:]
 		case d != nil:
-			left.WriteString(s[:d[0]])
+			if !text(s[:d[0]]) {
+				s = ""
+				continue
+			}
 			c, n, good := dsmlCall(s[d[0]:], s[d[2]:d[3]], d[1]-d[0], names)
 			if !good {
 				return nil, "", false
@@ -229,7 +412,7 @@ func parseTextCalls(s string, names map[string]bool) (calls []writtenCall, rest 
 			calls = append(calls, c)
 			s = s[d[0]+n:]
 		default:
-			left.WriteString(s)
+			text(s)
 			s = ""
 		}
 	}
@@ -242,10 +425,43 @@ func parseTextCalls(s string, names map[string]bool) (calls []writtenCall, rest 
 	return calls, rest, len(calls) > 0 || rest == ""
 }
 
+// tagsOnly reports whether held text is the tags of calls and nothing
+// else: no call read out of it, and no text left once they go.
+func tagsOnly(s string) bool {
+	calls, rest, ok := parseTextCalls(s, nil)
+	return ok && len(calls) == 0 && rest == ""
+}
+
+// spaceBack keeps s, the text about to be handed on, back with what is
+// held or pending when it is only spaces after a call the reply made
+// itself (native).
+func spaceBack(native, holding bool, pending, held, s string) (string, string, string) {
+	if !native || s == "" || strings.TrimSpace(s) != "" {
+		return pending, held, s
+	}
+	if holding {
+		return pending, s + held, ""
+	}
+	return s + pending, held, ""
+}
+
+// settled is what is held and pending once the reply ends or makes a
+// call: held tags and nothing else go, and so does what is only spaces
+// after a call the reply made itself.
+func settled(native, holding bool, pending, held string) (string, string, bool) {
+	if holding && tagsOnly(held) {
+		held, holding = "", false
+	}
+	if native && strings.TrimSpace(pending+held) == "" {
+		pending, held, holding = "", "", false
+	}
+	return pending, held, holding
+}
+
 // cutMark is the end of s that is a mark's beginning cut short (</ of
 // </tool_call>), "" when there's none; a lone < may be text.
 func cutMark(s string) string {
-	for _, m := range append([]string{"</tool_call>", "</parameter>"}, textCallMarks...) {
+	for _, m := range append([]string{"</tool_call>", "</parameter>", "</invoke>", "</function_calls>", "</minimax:tool_call>"}, textCallMarks...) {
 		for n := len(m) - 1; n >= 2; n-- {
 			if strings.HasSuffix(s, m[:n]) {
 				return m[:n]
@@ -318,8 +534,8 @@ func hermesCall(s string, names map[string]bool) (writtenCall, int, bool) {
 }
 
 var (
-	paramHead = regexp.MustCompile(`^\s*\{\s*"name"\s*:\s*"([^"]+)"\s*\}?\s*>?`)
-	paramOpen = regexp.MustCompile(`^\s*<parameter(?:\s+name\s*=\s*"([^"]+)"|=([^\s>]+))\s*>`)
+	paramHead = lazyre.New(`^\s*\{\s*"name"\s*:\s*"([^"]+)"\s*\}?\s*>?`)
+	paramOpen = lazyre.New(`^\s*<parameter(?:\s+name\s*=\s*"([^"]+)"|=([^\s>]+))\s*>`)
 )
 
 // paramCall reads a call DeepSeek wrote half as Hermes' block and half as
@@ -382,8 +598,8 @@ func paramCall(s string, names map[string]bool) (writtenCall, int, bool) {
 }
 
 var (
-	glmPair = regexp.MustCompile(`(?s)^\s*<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>`)
-	glmName = regexp.MustCompile(`^\s*([^\s<>{}"]+)\s*`)
+	glmPair = lazyre.New(`(?s)^\s*<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>`)
+	glmName = lazyre.New(`^\s*([^\s<>{}"]+)\s*`)
 )
 
 // glmCall reads GLM's own call (#906, nullburn: GLM-5.3-Flash through
@@ -531,15 +747,15 @@ type textCallSee struct {
 	pending string // the text's end, which may be a mark begun
 	held    string
 	holding bool
-	native  bool // the reply made a call itself: nothing is read out of its text
+	// the reply made a call itself: no call is read out of its text, but
+	// tags left in it (an upstream that made calls of DeepSeek's invokes
+	// left the wrapper's </｜｜DSML｜｜ calls>) are still dropped
+	native bool
 }
 
 func (t *textCallSee) event(ev Event) {
 	switch ev.Kind {
 	case KText:
-		if t.native {
-			break
-		}
 		s := t.pending + ev.Text
 		t.pending = ""
 		if t.holding {
@@ -552,14 +768,18 @@ func (t *textCallSee) event(ev Event) {
 		} else {
 			t.pending, s = s[len(s)-tail:], s[:len(s)-tail]
 		}
+		s = t.keepSpace(s)
 		if s != "" {
 			t.see(Event{Kind: KText, Text: s})
 		}
 		return
 	case KToolStart:
-		t.release()
+		t.settle()
 		t.native = true
 	case KStop:
+		if t.native {
+			t.settle()
+		}
 		if t.holding && !t.native {
 			if calls, rest, ok := parseTextCalls(t.held, t.names); ok {
 				t.holding, t.held = false, ""
@@ -580,6 +800,21 @@ func (t *textCallSee) event(ev Event) {
 		t.release()
 	}
 	t.see(ev)
+}
+
+// keepSpace keeps back text that is only spaces after a call the reply
+// made itself: the line break before tags left after the calls goes with
+// them. What it gives is the text to hand on now.
+func (t *textCallSee) keepSpace(s string) string {
+	t.pending, t.held, s = spaceBack(t.native, t.holding, t.pending, t.held, s)
+	return s
+}
+
+// settle drops what is held when it is tags and nothing else, or after a
+// call the reply made only spaces, and hands it on as text when it isn't.
+func (t *textCallSee) settle() {
+	t.pending, t.held, t.holding = settled(t.native, t.holding, t.pending, t.held)
+	t.release()
 }
 
 // release hands on as text what is held.
@@ -637,6 +872,13 @@ func (t *textCallTidy) chunk(delta map[string]any, finish any) []byte {
 	return append(append([]byte("data: "), b...), '\n', '\n')
 }
 
+// settle is release, but what is held goes as textCallSee's settle has
+// it go.
+func (t *textCallTidy) settle() []byte {
+	t.pending, t.held, t.holding = settled(t.native, t.holding, t.pending, t.held)
+	return t.release()
+}
+
 func (t *textCallTidy) release() []byte {
 	s := t.pending + t.held
 	t.pending, t.held, t.holding = "", "", false
@@ -675,9 +917,9 @@ func (t *textCallTidy) line(line []byte) []byte {
 	var pre []byte
 	changed := false
 	if calls, _ := delta["tool_calls"].([]any); len(calls) > 0 && !t.native {
-		pre, t.native = t.release(), true
+		pre, t.native = t.settle(), true
 	}
-	if s, isStr := delta["content"].(string); isStr && s != "" && !t.native {
+	if s, isStr := delta["content"].(string); isStr && s != "" {
 		s = t.pending + s
 		t.pending = ""
 		if t.holding {
@@ -688,6 +930,7 @@ func (t *textCallTidy) line(line []byte) []byte {
 		} else {
 			t.pending, s = s[len(s)-tail:], s[:len(s)-tail]
 		}
+		t.pending, t.held, s = spaceBack(t.native, t.holding, t.pending, t.held, s)
 		if s == "" {
 			delete(delta, "content")
 		} else {
@@ -713,7 +956,7 @@ func (t *textCallTidy) line(line []byte) []byte {
 				changed = true
 			}
 		} else {
-			pre = append(pre, t.release()...)
+			pre = append(pre, t.settle()...)
 		}
 	}
 	if !changed {
@@ -733,7 +976,8 @@ func (t *textCallTidy) line(line []byte) []byte {
 // written into its text, for a request that offered names: one of
 // textCallMarks' words is in it, however its JSON escapes the brackets.
 func mayWriteCalls(b []byte, names map[string]bool) bool {
-	return names != nil && (bytes.Contains(b, []byte("tool_call")) || bytes.Contains(b, []byte("DSML")))
+	return names != nil && (bodyHas(b, "tool_call") || bodyHas(b, "DSML") ||
+		bodyHas(b, "invoke name=") || bodyHas(b, "function_calls"))
 }
 
 // wholeTextCalls reads the calls written into the content of a whole Chat
@@ -748,9 +992,7 @@ func wholeTextCalls(msg map[string]json.RawMessage, names map[string]bool) (wrot
 		return false, false
 	}
 	var native []json.RawMessage
-	if decodeJSON(msg["tool_calls"], &native) == nil && len(native) > 0 {
-		return false, false
-	}
+	made := decodeJSON(msg["tool_calls"], &native) == nil && len(native) > 0
 	var s string
 	if decodeJSON(msg["content"], &s) != nil {
 		return false, false
@@ -758,6 +1000,19 @@ func wholeTextCalls(msg map[string]json.RawMessage, names map[string]bool) (wrot
 	at, _ := textCallAt(s)
 	if at < 0 {
 		return false, false
+	}
+	if made {
+		// the upstream made the calls itself: only tags left in its
+		// text go (</｜｜DSML｜｜ calls>, 喜欢一个人 on Discord)
+		if !tagsOnly(s[at:]) {
+			return false, false
+		}
+		if text := strings.TrimRight(s[:at], " \t\r\n"); text != "" {
+			msg["content"], _ = marshalPlain(text)
+		} else {
+			msg["content"] = json.RawMessage("null")
+		}
+		return true, true
 	}
 	calls, rest, ok := parseTextCalls(s[at:], names)
 	if !ok {

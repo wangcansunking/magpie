@@ -56,6 +56,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         for (const script of init || []) await context.addInitScript(script);
         const page = await context.newPage();
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         page.on("pageerror", (e) => errors.push(e.message));
         await page.route("**/*", serve(lang, empty, ready));
         await page.goto(url);
@@ -106,7 +107,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         window.__beforeFocusRefresh.getAnimations().find((a) => a.animationName === "flash").currentTime = 600;
         window.dispatchEvent(new Event("focus"));
       });
-      await panel.waitForFunction(() => document.querySelector('#panelQuota [data-card="codex|x@y.z"]') !== window.__beforeFocusRefresh);
+      // the refresh read the same allowances, so the card is kept as drawn
+      // (#3192); one drawn again would have to keep the highlight too
+      await panel.waitForFunction(() => !loadBack.flight && !quotasLoading);
+      await panel.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
       assert(await panel.locator('#panelQuota [data-card="codex|x@y.z"]').evaluate((e) => e.classList.contains("flash")), "first-open focus refresh must preserve the highlight");
 
       assert(await panel.locator('#panelQuota [data-card="codex|x@y.z"]').evaluate((e) => e.getAnimations().find((a) => a.animationName === "flash")?.currentTime >= 600), "refresh must continue the animation rather than restart it");

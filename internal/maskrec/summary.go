@@ -13,6 +13,8 @@ type dayAgg struct {
 	size      int64
 	requests  int
 	n         int
+	warned    int // places a value went as written, the user told
+	blocked   int // requests held back
 	hours     [24]int
 	kinds     map[string]int // each place counted
 	vals      map[string]*valAgg
@@ -35,7 +37,14 @@ func (a *dayAgg) add(r Record) {
 	a.requests++
 	a.n += r.N
 	a.hours[r.Time.Local().Hour()] += r.N
+	if r.Blocked {
+		a.blocked++
+	}
 	for _, v := range r.Values {
+		if v.Action == "warn" { // not masked: told, not kept as one
+			a.warned += v.N
+			continue
+		}
 		a.kinds[v.Kind] += v.N
 		x := a.vals[v.Placeholder]
 		if x == nil {
@@ -115,13 +124,18 @@ type Summary struct {
 	Requests  int            `json:"requests"`
 	N         int            `json:"n"`
 	Distinct  int            `json:"distinct"`
-	Hours     [24]int        `json:"hours"` // places, by the hour of the day
+	Warned    int            `json:"warned,omitempty"`  // places a value went as written, the user told
+	Blocked   int            `json:"blocked,omitempty"` // requests held back
+	Hours     [24]int        `json:"hours"`             // places, by the hour of the day
 	Kinds     []Count        `json:"kinds"`
 	By        map[string]int `json:"by"` // different values by the finder that found each
 	Agents    []Count        `json:"agents"`
 	Providers []Count        `json:"providers"`
 	Values    []Seen         `json:"values"` // the most masked first, at most topValues
 	Since     string         `json:"since,omitempty"`
+	// Checked: each agent's turns masking looked over, or that went as
+	// written to a model set to go unmasked, nothing masked or not
+	Checked []Looked `json:"checked"`
 }
 
 const topValues = 60
@@ -139,6 +153,7 @@ func Sum(days int) Summary {
 	if fs := files(dir); len(fs) > 0 {
 		out.Since = fs[0].day
 	}
+	var dayNames []string
 	vals := map[string]*Seen{}
 	kinds := map[string]*Count{}
 	kindVals := map[string]map[string]bool{}
@@ -146,6 +161,7 @@ func Sum(days int) Summary {
 	whom := map[string]map[string]int{}
 	for i := days - 1; i >= 0; i-- {
 		d := now.AddDate(0, 0, -i).Format(dayForm)
+		dayNames = append(dayNames, d)
 		var a *dayAgg
 		if inTest() {
 			a = memDay(d)
@@ -155,6 +171,8 @@ func Sum(days int) Summary {
 		out.Days = append(out.Days, Day{Day: d, Requests: a.requests, N: a.n, Distinct: len(a.vals)})
 		out.Requests += a.requests
 		out.N += a.n
+		out.Warned += a.warned
+		out.Blocked += a.blocked
 		for h, n := range a.hours {
 			out.Hours[h] += n
 		}
@@ -205,6 +223,7 @@ func Sum(days int) Summary {
 	out.Kinds = ranked(out.Kinds)
 	out.Agents = counts(who)
 	out.Providers = counts(whom)
+	out.Checked = lookedOver(dayNames)
 	return out
 }
 

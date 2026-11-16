@@ -35,7 +35,9 @@ func init() {
 			}
 			return 0, nil
 		},
-		Parts: []pluginrt.Part{{Slot: "settings.section", Key: "otel"}},
+		SetAt:  "otel #otelList",
+		Parts:  []pluginrt.Part{{Slot: "settings.section", Key: "otel"}},
+		Client: []string{"i18n.js", "page.js"},
 		Apply: func(c *pluginrt.Ctx) error {
 			c.OnDispose(usage.Observe(otlp.New()))
 			return nil

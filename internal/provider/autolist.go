@@ -18,20 +18,22 @@ package provider
 //
 // Both are the user's own settings, kept by every save that doesn't set
 // them (the window's editor among them), and only a provider of the user's
-// own has them: an account's list is fetched for it (FetchNew), and a
-// plugin's by the plugin (KeepPluginsListed).
+// own has them: an account's list is fetched for it (FetchNew, then
+// KeepAccountsListed), and a plugin's by the plugin (KeepPluginsListed).
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"log"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/yetone/magpie/internal/beat"
+	"github.com/yetone/magpie/internal/catalog"
 )
 
 // MinRefreshEvery is the shortest RefreshEvery: a vendor's list changes
@@ -65,13 +67,39 @@ func ParseRefreshEvery(s string) (time.Duration, error) {
 	return d, nil
 }
 
+// RemoteMagpieEvery is how often, as RefreshEvery writes it, the gateway
+// fetches a Remote magpie's list when its user set no RefreshEvery. Its list is the other magpie's
+// models as they are now: a model that comes there later (a ZCode gift
+// plan's GLM-5.3-Trial, listed once its plugin read the gift; a provider,
+// plugin or routing group added there) reached this magpie only when
+// Fetch models was pressed in its editor, and a trial a day long could
+// pass unseen (6igsteven on Discord, 10-24). It is a list on the other
+// computer's magpie, read from its memory, so asking it often costs
+// nothing a vendor sees. "off" (magpie provider refresh-every <id> off)
+// asks it only when told, as before.
+const RemoteMagpieEvery = "10m"
+
+// RefreshSchedule is the schedule the provider's list is fetched on, as
+// written: its user's, or a Remote magpie's default (RemoteMagpieEvery)
+// when its user set none; "" for only when asked.
+func (p Provider) RefreshSchedule() string {
+	if !p.ownList() {
+		return ""
+	}
+	if strings.TrimSpace(p.RefreshEvery) == "" && p.IsRemoteMagpie() {
+		return RemoteMagpieEvery
+	}
+	return p.RefreshEvery
+}
+
 // RefreshInterval is how often the gateway fetches the provider's list by
 // itself: 0 for only when asked, and for one RefreshEvery can't be read.
+// A Remote magpie with none set is fetched every RemoteMagpieEvery.
 func (p Provider) RefreshInterval() time.Duration {
 	if !p.ownList() {
 		return 0
 	}
-	d, err := ParseRefreshEvery(p.RefreshEvery)
+	d, err := ParseRefreshEvery(p.RefreshSchedule())
 	if err != nil {
 		return 0
 	}
@@ -107,6 +135,9 @@ func SetRefreshEvery(id, every string) error {
 	p.RefreshEvery = ""
 	if d > 0 {
 		p.RefreshEvery = strings.ToLower(strings.TrimSpace(every))
+	} else if p.IsRemoteMagpie() {
+		// kept as said: none set is RemoteMagpieEvery for a Remote magpie
+		p.RefreshEvery = "off"
 	}
 	return Save(*p)
 }
@@ -169,7 +200,7 @@ func takeMatching(id string, isNew func(string) bool) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var res []*regexp.Regexp
+	var res []matcher
 	for _, r := range p.AutoInclude {
 		if x, err := compilePattern(r); err == nil {
 			res = append(res, x)
@@ -188,7 +219,7 @@ func takeMatching(id string, isNew func(string) bool) ([]string, error) {
 		if !isNew(m.ID) || slices.Contains(served, m.ID) || slices.Contains(taken, m.ID) {
 			continue
 		}
-		if slices.ContainsFunc(res, func(x *regexp.Regexp) bool { return x.MatchString(m.ID) }) {
+		if slices.ContainsFunc(res, func(x matcher) bool { return x.MatchString(m.ID) }) {
 			taken = append(taken, m.ID)
 		}
 	}
@@ -206,7 +237,7 @@ func takeMatching(id string, isNew func(string) bool) ([]string, error) {
 	q := &f.Providers[i]
 	// new ones first, as the vendor's list and withNewlyListed have them
 	q.Models = append(slices.Clone(taken), served...)
-	q.NoModels = false
+	q.NoModels, q.BestInFamily = false, false
 	// picked from the list as it is now: one it lists later and no rule
 	// matches stays out, unless the picks hold every model
 	q.PickedFrom = nil
@@ -239,14 +270,16 @@ var listsEvery = time.Minute
 func KeepListsFresh(ctx context.Context) {
 	t := time.NewTimer(30 * time.Second)
 	defer t.Stop()
+	var wait <-chan time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+		case <-wait:
 		}
 		refreshDueLists(ctx, time.Now())
-		t.Reset(listsEvery)
+		wait = beat.Next(listsEvery)
 	}
 }
 
@@ -254,19 +287,35 @@ func KeepListsFresh(ctx context.Context) {
 // answers the ids it asked.
 func refreshDueLists(ctx context.Context, now time.Time) []string {
 	var asked []string
-	for _, p := range All() {
+	// the user's own providers alone, as All lists them: only those keep a
+	// list on a schedule (ownList), and All asks every agent for its
+	// sign-in, the Claude keychain's `security` among them, each minute
+	// of an idle magpie (#3185)
+	f := load()
+	own, _ := ownOf(f)
+	for _, p := range ordered(own, f.Order) {
 		every := p.RefreshInterval()
+		// a list saved before lists kept the models made for other APIs
+		// (embeddings, rerank, speech, transcriptions) is fetched again
+		// once, schedule or none, so their routes and groups have them
+		// without the user's Refresh (#5339); tried once a run, so one
+		// that fails waits for its schedule, the next start or a Refresh
+		listsTried.Lock()
+		_, triedOnce := listsTried.m[p.ID]
+		listsTried.Unlock()
+		_, fetched := p.Fetched()
+		once := !triedOnce && fetched && !catalog.LiveKinded(p.ID)
 		// one that lists nothing (Preset.NoList) has no list to keep fresh
-		if every == 0 || p.Off || !p.lists() {
+		if every == 0 && !once || p.Off || !p.lists() {
 			continue
 		}
-		if at, ok := p.Fetched(); ok && now.Sub(at) < every {
+		if at, ok := p.Fetched(); ok && !once && now.Sub(at) < every {
 			continue
 		}
 		listsTried.Lock()
 		tried, ok := listsTried.m[p.ID]
 		retry := min(every, listRetry)
-		if ok && now.Sub(tried) < retry {
+		if !once && ok && now.Sub(tried) < retry {
 			listsTried.Unlock()
 			continue
 		}
@@ -281,7 +330,11 @@ func refreshDueLists(ctx context.Context, now time.Time) []string {
 		cancel()
 		switch {
 		case err != nil && !errors.Is(err, context.Canceled):
-			log.Printf("%s: its scheduled list fetch failed: %s (tried again in %s)", p.ID, err, retry)
+			again := "tried again in " + retry.String()
+			if every == 0 {
+				again = "tried again on the next start or Refresh"
+			}
+			log.Printf("%s: its scheduled list fetch failed: %s (%s)", p.ID, err, again)
 		case err == nil:
 			log.Printf("%s: fetched its list on schedule, %d models%s%s", p.ID, len(ms), listNote(" taken by rule: ", taken), listNote(" no longer listed: ", dropped))
 		}

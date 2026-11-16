@@ -184,7 +184,8 @@ func (p Provider) ClinePinnable() bool {
 // sdytman (#feedback, 10-20) found glm-5.3-flash among them, and
 // deepseek-v4.1-flash and deepseek-v4.1-flash-1017 going through Vercel.
 // An exact entry is a model name; the others match a name's start, the
-// first match winning.
+// first match winning. Only the OpenRouter entries are pinned now: Cline
+// refuses providerOptions since 2026-11-06 (ClinePin).
 var clineMakers = []struct {
 	name       string
 	exact      bool
@@ -197,12 +198,18 @@ var clineMakers = []struct {
 }
 
 // ClinePin is the upstream a request for model is pinned to on p
-// (PinUpstream), and whether Cline sends the model through OpenRouter
-// (pinned by provider.only) rather than Vercel's AI Gateway (pinned by
-// providerOptions.gateway.only): "deepseek" for a DeepSeek model of the
-// Cline API, "zai" for a GLM one, "z-ai" through OpenRouter for
-// glm-5.3-flash, "" for anything else. Cline's free models are served
-// where Cline puts them, so they never are.
+// (PinUpstream), and whether Cline sends the model through OpenRouter:
+// "z-ai" through OpenRouter for glm-5.3-flash, "" for anything else.
+// Since 2026-11-06 the Cline API answers a request carrying
+// providerOptions with 403 "client-supplied \"providerOptions\" model
+// routing is not supported" (#5442: the same request, the same key, 403
+// with the field and 200 without), so a model Cline sends through
+// Vercel's AI Gateway (DeepSeek's, GLM's but glm-5.3-flash), which only
+// providerOptions.gateway.only could pin, goes unpinned whatever the
+// tick says: the tick would fail every such request. OpenRouter's
+// top-level provider.only is still taken, so glm-5.3-flash keeps it.
+// Cline's free models are served where Cline puts them, so they never
+// are.
 func (p Provider) ClinePin(model string) (upstream string, openRouter bool) {
 	if !p.PinUpstream || !p.ClinePinnable() || strings.HasPrefix(model, clineFreePrefix) {
 		return "", false
@@ -210,8 +217,25 @@ func (p Provider) ClinePin(model string) (upstream string, openRouter bool) {
 	name := strings.ToLower(model[strings.LastIndex(model, "/")+1:])
 	for _, m := range clineMakers {
 		if m.exact && name == m.name || !m.exact && strings.HasPrefix(name, m.name) {
-			return m.upstream, m.openRouter
+			if !m.openRouter {
+				return "", false
+			}
+			return m.upstream, true
 		}
 	}
 	return "", false
+}
+
+// ClinePassAsked is the upstream a request for model asked the Cline
+// API to serve it from on p, "" when it asked for none: what magpie
+// wrote into it (ClinePin). The Routing page says it beside a reply that
+// names no provider, so a route ClinePass picked reads as asked for an
+// upstream or not (zRain on Discord, 10-24). The Cline plugin's own
+// pinUpstream option is not counted: 0.1.13 pins nothing without it,
+// and a pin it writes (0.1.12 by default, or the option on) is
+// providerOptions, which Cline refuses with a 403, so no reply is ever
+// served on it.
+func (p Provider) ClinePassAsked(model string) string {
+	up, _ := p.ClinePin(model)
+	return up
 }

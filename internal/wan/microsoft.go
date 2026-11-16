@@ -5,10 +5,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"github.com/yetone/magpie/internal/lazyre"
 	"io"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -129,7 +129,7 @@ func microsoftAuthorizationError(code string) error {
 	}
 }
 
-var microsoftGUID = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+var microsoftGUID = lazyre.New(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // Legacy version-3 vault migration only. New grants never inspect access tokens.
 // This function must not be used to choose an authentication provider.
@@ -193,7 +193,7 @@ func microsoftGrantAccount(g githubGrant) (Account, bool) {
 	return Account{ID: "microsoft:" + strings.ToLower(info.Tenant) + ":" + uid, Name: microsoftDisplayName(g.IDToken), Provider: "microsoft"}, true
 }
 
-var microsoftUID = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,113}$`)
+var microsoftUID = lazyre.New(`^[a-zA-Z0-9_-]{1,113}$`)
 
 func validMicrosoftAccount(a Account) bool {
 	parts := strings.Split(a.ID, ":")

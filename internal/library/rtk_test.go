@@ -210,6 +210,92 @@ func TestRTKRemove(t *testing.T) {
 	}
 }
 
+// TestRTKRemoveClaudeOtherEvents (#2879): rtk 1.0.1's installer writes its
+// hook under hooks.PostToolUse too, when the rtk pipeline has after_tool
+// rules (its src/hooks/init/claude.rs: "enabling rtk:posthook adds
+// PostToolUse"), and its uninstaller takes its entries out of PreToolUse,
+// PostToolUse and SessionStart alike. magpie says Claude Code has rtk by
+// the file whole, so an entry under another event kept the row on: turning
+// it off took only PreToolUse out, then said "rtk's hook is still in
+// Claude". The user's own hooks under those events stay.
+func TestRTKRemoveClaudeOtherEvents(t *testing.T) {
+	h := sandbox(t)
+	claude := filepath.Join(h, ".claude")
+	write(t, filepath.Join(claude, "settings.json"), `{
+  "model": "opus",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [{"type": "command", "command": "rtk hook claude"}]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write",
+        "hooks": [{"type": "command", "command": "lint"}]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [{"type": "command", "command": "rtk hook claude"}]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [{"type": "command", "command": " greet"}]
+      },
+      {
+        "matcher": "*",
+        "hooks": [{"type": "command", "command": "/opt/homebrew/bin/rtk hook claude"}]
+      }
+    ]
+  }
+}
+`)
+	if _, err := SetRTK("claude", false); err != nil {
+		t.Fatal(err)
+	}
+	var s struct {
+		Hooks map[string][]struct {
+			Matcher string `json:"matcher"`
+			Hooks   []struct {
+				Command string `json:"command"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal([]byte(read(t, filepath.Join(claude, "settings.json"))), &s); err != nil {
+		t.Fatal(err)
+	}
+	if s.Model != "opus" {
+		t.Errorf("model: %q", s.Model)
+	}
+	for event, entries := range s.Hooks {
+		for _, e := range entries {
+			for _, h := range e.Hooks {
+				if strings.Contains(h.Command, "rtk hook claude") {
+					t.Errorf("%s holds %q (matcher %q)", event, h.Command, e.Matcher)
+				}
+			}
+		}
+	}
+	if got := s.Hooks["PostToolUse"]; len(got) != 1 || got[0].Matcher != "Write" || len(got[0].Hooks) != 1 || got[0].Hooks[0].Command != "lint" {
+		t.Errorf("the user's PostToolUse hook didn't stay: %+v", got)
+	}
+	if got := s.Hooks["SessionStart"]; len(got) != 1 || got[0].Matcher != "startup" || len(got[0].Hooks) != 1 || got[0].Hooks[0].Command != " greet" {
+		t.Errorf("the user's SessionStart hook didn't stay: %+v", got)
+	}
+	if _, ok := s.Hooks["PreToolUse"]; ok {
+		t.Errorf("PreToolUse stayed: %+v", s.Hooks["PreToolUse"])
+	}
+	for _, a := range ReadRTK().Agents {
+		if a.ID == "claude" && a.On {
+			t.Error("claude still reads as on")
+		}
+	}
+}
+
 // openCodeRTK is an rtk on PATH that says it is version and, for
 // rtk init -g --opencode, writes the plugin that version writes: up to 0.51
 // one for OpenCode 1 only (hooks/opencode/rtk.ts at v0.51.0), from 0.52 one
@@ -654,5 +740,38 @@ func TestRTKNoHookGrokBuild(t *testing.T) {
 	}
 	if _, err := RTKTakes("grok"); err == nil || !strings.Contains(err.Error(), "no Grok agent") {
 		t.Fatalf("magpie library rtk on grok: %v", err)
+	}
+}
+
+// TestRTKGainRealDaily reads what rtk 1.0.1 itself printed for rtk gain
+// --daily --format json (testdata/rtk-gain-daily.json, made by real rtk from
+// its own history.db): every day comes through, oldest first, and the days
+// add up to the summary, so the Library chart's bars and its range total are
+// rtk's own numbers (jasonchia58 on X read the chart's scale as the total).
+func TestRTKGainRealDaily(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "rtk-gain-daily.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, days, why := parseGain(string(raw))
+	if g == nil || why != "" {
+		t.Fatalf("gain %+v, %q", g, why)
+	}
+	if g.Commands != 632 || g.Input != 3160000 || g.Saved != 865000 {
+		t.Fatalf("summary %+v", g)
+	}
+	if len(days) != 6 || days[0].Date != "2026-10-23" || days[5].Date != "2026-11-12" {
+		t.Fatalf("days %+v", days)
+	}
+	var c int
+	var in, saved int64
+	for _, d := range days {
+		c, in, saved = c+d.Commands, in+d.Input, saved+d.Saved
+	}
+	if c != g.Commands || in != g.Input || saved != g.Saved {
+		t.Fatalf("days add up to %d commands, %d in, %d saved; summary %+v", c, in, saved, g)
+	}
+	if days[1].Input != 1205000 || days[1].Saved != 361500 {
+		t.Fatalf("the day with most input: %+v", days[1])
 	}
 }

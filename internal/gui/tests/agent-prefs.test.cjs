@@ -1,12 +1,17 @@
 // Run with Node's test runner and Playwright on the module path; see README.md.
 // An agent's own settings are where the agent is (the owner, 10-20: Codex's
 // and Claude Code's rows sat in Settings › General, apart from the agents
-// they set). In the window, Codex's opened row holds its eight and Claude
-// Code's its one, Long conversations; Settings has none of them, but its
+// they set). In the window, Codex's opened row holds its nine and Claude
+// Code's and Grok Build's their one, Long conversations (its own row, which
+// stands in for every agent's, 11-12) (Grok Build's since
+// uk.jent on Discord: its context_window is where it compacts); Settings has none of them, but its
 // search still finds them, as a row saying where they are whose Open shows
 // the agent's sheet. In the panel a "Settings" line opens the sheet, and so
 // does the agent's menu; shut, the rows are back where they were. Gateway
-// mode writes no agent's files, so none of it shows. Five languages, wide
+// mode writes no agent's files, so none of it shows, but Long conversations:
+// it sets the windows the gateway serves, which agents elsewhere read, so
+// with no Codex or Claude Code here (a gateway, magpie in Docker) it stays
+// in Settings › General, on the size set before (Linka on Discord). Five languages, wide
 // and narrow, Chromium and WebKit; no backend, the API is faked here.
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
@@ -16,7 +21,11 @@ const { chromium, webkit } = require("playwright");
 const { watchSettingsReads, agentRow, openAgentSettings } = require("./reader.cjs");
 
 const assets = path.resolve(__dirname, "../assets");
-const CODEX = ["codexAgentsV1Row", "fullContextRow", "codexAsyncRow", "codexTitlesRow", "codexDescriptionsRow", "codexPredictionsRow", "codexAutoReviewRow", "codexMemoriesRow"];
+const CODEX = ["codexAgentsV1Row", "codexOpenRow", "codexServiceTierRow", "codexClientRow", "fullContextRow", "codexAsyncRow", "codexTitlesRow", "codexDescriptionsRow", "codexPredictionsRow", "codexAutoReviewRow", "codexMemoriesRow"];
+// shown in a sheet: every agent's Long conversations gives its place to the
+// agent's own row, one row for one thing (the owner, 11-12)
+const CODEX_SHOWN = CODEX.filter((id) => id !== "fullContextRow");
+const ownLong = (page, box) => page.locator(`${box} .row.agent-compact`).evaluate((r) => r.checkVisibility());
 
 function settingsPayload(over) {
   return {
@@ -32,8 +41,8 @@ function settingsPayload(over) {
   };
 }
 
-function server(lang, { gateway = false } = {}) {
-  const settings = settingsPayload({ lang, ...(gateway ? { web: true, gatewayMode: "", gatewayOn: true } : {}) });
+function server(lang, { gateway = false, none = false, posts = [] } = {}) {
+  let settings = settingsPayload({ lang, compactAt: 200000, ...(gateway ? { web: true, gatewayMode: "", gatewayOn: true } : {}) });
   // Codex with a memories field, so its memories row is there to show
   const codex = agentRow("codex", "Codex");
   codex.fields.push({ key: "memories", label: "memories", value: "", options: [{ value: "relay/m1", label: "m1", ref: "relay/m1" }] });
@@ -42,7 +51,13 @@ function server(lang, { gateway = false } = {}) {
     const json = (data) => route.fulfill({ json: data });
     if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: `window.bootPrefs = {lang:"${lang}",theme:"light",web:${gateway}${gateway ? ",gateway:true" : ""}};` });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
-    if (url.pathname === "/api/state") return json({ agents: [codex, agentRow("claude", "Claude Code"), agentRow("pi", "Pi")], profiles: [], settings: { lang, theme: "light" }, fx: settings.fx });
+    if (url.pathname === "/api/state") return json({ agents: none ? [agentRow("pi", "Pi")] : [codex, agentRow("claude", "Claude Code"), { ...agentRow("grok", "Grok Build"), icon: "xai" }, agentRow("pi", "Pi")], profiles: [], settings: { lang, theme: "light" }, fx: settings.fx });
+    if (url.pathname === "/api/settings/full-context") {
+      const body = route.request().postDataJSON();
+      posts.push(body);
+      settings = { ...settings, fullContext: body.on, ...(body.at !== undefined ? { compactAt: body.at } : {}) };
+      return json(settings);
+    }
     if (url.pathname === "/api/settings") return json(settings);
     if (url.pathname === "/api/plugins") return json({ plugins: [] });
     if (url.pathname === "/api/usage/quotas") return json([]);
@@ -76,6 +91,7 @@ async function newPage(engine, t, width, lang, opts) {
   t.after(() => browser.close());
   const page = await browser.newPage({ viewport: { width, height: 760 }, reducedMotion: "reduce" });
   page.setDefaultTimeout(8000);
+  page.setDefaultNavigationTimeout(60000);
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
   await page.route("**/*", server(lang, opts));
@@ -92,31 +108,73 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         await page.goto("http://magpie.test/?view=agents");
         await openAgentSettings(page, "codex");
         const codexBox = '.row.agent[data-id="codex"] .ag-prefs';
-        assert.deepEqual(await shownIn(page, codexBox), CODEX, `${lang} ${width}: Codex's eight`);
+        assert.deepEqual(await shownIn(page, codexBox), CODEX_SHOWN, `${lang} ${width}: Codex's ten`);
+        assert(await ownLong(page, codexBox), `${lang} ${width}: Codex's Long conversations`);
         assert(await page.locator(codexBox).evaluate((b) => b.scrollWidth <= b.clientWidth + 1), `${lang} ${width}: the rows fit the opened row`);
         await noSideScroll(page, `${lang} ${width} Codex`);
         await openAgentSettings(page, "claude");
-        assert.deepEqual(await shownIn(page, '.row.agent[data-id="claude"] .ag-prefs'), ["fullContextRow"], `${lang} ${width}: Claude Code's one`);
+        assert.deepEqual(await shownIn(page, '.row.agent[data-id="claude"] .ag-prefs'), [], `${lang} ${width}: Claude Code's one, its own`);
+        assert(await ownLong(page, '.row.agent[data-id="claude"] .ag-prefs'), `${lang} ${width}: Claude Code's Long conversations`);
+        // Grok Build's one, Long conversations, whose line names it
+        await openAgentSettings(page, "grok");
+        const grokBox = '.row.agent[data-id="grok"] .ag-prefs';
+        assert.deepEqual(await shownIn(page, grokBox), [], `${lang} ${width}: Grok Build's one, its own`);
+        assert(await ownLong(page, grokBox), `${lang} ${width}: Grok Build's Long conversations`);
+        assert.match(await page.locator(`${grokBox} .agent-compact .sub`).textContent(), /Grok Build/, `${lang}: the line names Grok Build`);
+        assert(await page.locator(grokBox).evaluate((b) => b.scrollWidth <= b.clientWidth + 1), `${lang} ${width}: Grok Build's row fits`);
+        await noSideScroll(page, `${lang} ${width} Grok Build`);
 
         // none in Settings; its search says where they are
         await page.goto("http://magpie.test/?view=settings");
         await page.locator("#setQ").waitFor();
+        // #setQ is in the page before Settings is drawn, and Long
+        // conversations with it: wait for the drawing to take it out
+        await page.waitForFunction(() => !document.querySelector("#view-settings #fullContextRow")).catch(() => {});
         for (const id of CODEX) assert.equal(await page.locator(`#view-settings #${id}`).count(), 0, `${lang}: ${id} not in Settings`);
-        assert.equal(await page.locator(".agent-pref-link").first().isVisible(), false, "no link rows till searching");
+        assert.equal(await page.locator("#agentPrefLinks .agent-pref-link").first().isVisible(), false, "no link rows till searching");
         await page.locator("#setQ").fill(w.titles);
-        const link = page.locator(".agent-pref-link").filter({ hasText: w.titles });
+        const link = page.locator("#agentPrefLinks .agent-pref-link").filter({ hasText: w.titles });
         await link.waitFor();
         await noSideScroll(page, `${lang} ${width} search`);
         await link.getByRole("button", { name: w.open, exact: true }).click();
         await sheet(page).waitFor();
         assert.equal(await sheet(page).locator(".ehead").textContent(), w.sheet);
-        assert.deepEqual(await shownIn(page, "#modal .editor.agent-prefs"), CODEX, `${lang} ${width}: the sheet has Codex's eight`);
+        assert.deepEqual(await shownIn(page, "#modal .editor.agent-prefs"), CODEX_SHOWN, `${lang} ${width}: the sheet has Codex's ten`);
+        assert(await ownLong(page, "#modal .editor.agent-prefs"), `${lang} ${width}: the sheet's Long conversations`);
         assert(await page.locator("#view-agents").isVisible(), "Open goes to the Agents page");
         await page.keyboard.press("Escape");
         await page.locator("#modal").waitFor({ state: "hidden" });
         // shut, every row is back in the page, none lost with the sheet
         for (const id of CODEX) assert.equal(await page.locator(`#${id}`).count(), 1, `${lang}: ${id} back`);
         assert.deepEqual(errors, []);
+      });
+    }
+
+    // ysm119 on Discord (v0.1.2519, WebKit): Codex's row opened and shut
+    // again, then Settings, threw "null is not an object (evaluating
+    // '$(row + ".who").title = t(en)')". Shut, the row was drawn again
+    // without its opened part, and Codex's settings rows went with that
+    // part, out of the page, where Settings and a language change look
+    // for them. Shut, they are back in it; Settings opens on its own
+    // button, with no reload, and says what each row does.
+    for (const width of [1100, 440]) {
+      test(`${engine} ${lang} ${width}: Settings opens after Codex's row was opened and shut`, async (t) => {
+        const { page, errors } = await newPage(engine, t, width, lang);
+        await page.goto("http://magpie.test/?view=agents");
+        await openAgentSettings(page, "codex");
+        await page.locator('.row.agent[data-id="codex"] .ag-link').click();
+        await page.locator('.row.agent[data-id="codex"] .ag-prefs').waitFor({ state: "detached" });
+        await page.locator('.row.agent[data-id="codex"] .ag-link[aria-expanded="false"]').waitFor();
+        for (const id of CODEX) assert(await page.evaluate((id) => document.getElementById(id)?.isConnected === true, id), `${lang} ${width}: ${id} in the page once shut`);
+        await page.locator("#prefs").click();
+        await page.locator("#view-settings").waitFor();
+        await page.waitForFunction(() => __settingsReads.asked > 0 && __settingsReads.asked === __settingsReads.drawn);
+        assert.deepEqual(errors, [], `${lang} ${width}: no error opening Settings`);
+        assert.equal(await page.locator("#status.err").textContent().catch(() => ""), "", `${lang} ${width}: no red error line`);
+        const tip = await page.evaluate(() => document.querySelector("#codexTitlesRow .who")?.title);
+        assert.equal(tip, await page.evaluate(() => t("Names each thread in a hidden request of its own; same as the session, it goes on the session’s model, as Codex sends it when that is one of Codex’s own")), `${lang}: the titles row says what it does`);
+        if (lang !== "en") assert(!/^Names each/.test(tip), `${lang}: in the language`);
+        await noSideScroll(page, `${lang} ${width} Settings`);
       });
     }
 
@@ -129,11 +187,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const line = page.locator('.row.agent[data-id="codex"] .agent-prefs-open');
       await line.waitFor();
       assert.equal(await line.getAttribute("aria-label"), w.sheet);
-      assert.equal(await page.locator('.row.agent[data-id="pi"] .agent-prefs-open').count(), 0, "Pi has none");
+      assert.equal(await page.locator('.row.agent[data-id="pi"] .agent-prefs-open').count(), 1, "Pi has one, for its own context window only");
       await noSideScroll(page, `${lang} panel`);
       await line.click();
       await sheet(page).waitFor();
-      assert.deepEqual(await shownIn(page, "#modal .editor.agent-prefs"), CODEX);
+      assert.deepEqual(await shownIn(page, "#modal .editor.agent-prefs"), CODEX_SHOWN);
+      assert(await ownLong(page, "#modal .editor.agent-prefs"), `${lang}: the sheet's Long conversations`);
       assert(await page.locator("#modal .dialog").evaluate((d) => d.scrollWidth <= d.clientWidth + 1), `${lang}: the sheet fits 360`);
       await page.keyboard.press("Escape");
       await page.locator("#modal").waitFor({ state: "hidden" });
@@ -141,7 +200,17 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.locator('.row.agent[data-id="claude"] .ag-handle').click();
       await page.getByRole("menuitem", { name: w.sheet.replace("Codex", "Claude Code") }).click();
       await sheet(page).waitFor();
-      assert.deepEqual(await shownIn(page, "#modal .editor.agent-prefs"), ["fullContextRow"]);
+      assert.deepEqual(await shownIn(page, "#modal .editor.agent-prefs"), []);
+      assert(await ownLong(page, "#modal .editor.agent-prefs"), `${lang}: Claude Code's sheet's Long conversations`);
+      await page.keyboard.press("Escape");
+      await page.locator("#modal").waitFor({ state: "hidden" });
+
+      await page.locator('.row.agent[data-id="grok"] .ag-handle').click();
+      await page.getByRole("menuitem", { name: w.sheet.replace("Codex", "Grok Build") }).click();
+      await sheet(page).waitFor();
+      assert.deepEqual(await shownIn(page, "#modal .editor.agent-prefs"), [], `${lang}: Grok Build's sheet`);
+      assert(await ownLong(page, "#modal .editor.agent-prefs"), `${lang}: Grok Build's sheet's Long conversations`);
+      assert(await page.locator("#modal .dialog").evaluate((d) => d.scrollWidth <= d.clientWidth + 1), `${lang}: Grok Build's sheet fits 360`);
       await page.keyboard.press("Escape");
       await page.locator("#modal").waitFor({ state: "hidden" });
       for (const id of CODEX) assert.equal(await page.locator(`#${id}`).count(), 1, `${lang}: ${id} back`);
@@ -158,7 +227,30 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     assert.equal(await page.locator(".ag-prefs, .agent-prefs-open").count(), 0, "no rows, no line");
     await page.goto("http://magpie.test/?view=settings");
     await page.locator("#setQ").fill("Codex");
-    assert.equal(await page.locator(".agent-pref-link").count(), 0, "no link rows");
+    assert.equal(await page.locator("#agentPrefLinks .agent-pref-link").count(), 0, "no link rows");
     assert.deepEqual(errors, []);
   });
+
+  // Long conversations with nothing here to hold it: in Settings › General,
+  // showing the size set before, and a new size is saved from there
+  for (const [what, opts] of [["gateway mode", { gateway: true }], ["no Codex or Claude Code", { none: true }]]) {
+    test(`${engine}: ${what} keeps Long conversations in Settings`, async (t) => {
+      const posts = [];
+      const { page, errors } = await newPage(engine, t, 1100, "en", { ...opts, posts });
+      await page.goto("http://magpie.test/?view=settings&tab=general");
+      const row = page.locator("#setPage-general #fullContextRow");
+      await row.waitFor();
+      for (const id of CODEX.filter((id) => id !== "fullContextRow")) assert.equal(await page.locator(`#view-settings #${id}`).count(), 0, `${id} not in Settings`);
+      const segs = row.locator("#fullContextSegs");
+      assert.match(await segs.locator(".opt.on").textContent(), /200K/i, "the size set before");
+      const num = segs.locator("input.compact-num");
+      assert.match(await num.inputValue(), /200k/i);
+      await num.fill("150k");
+      await num.press("Enter");
+      await num.blur();
+      await page.waitForFunction(() => document.querySelector("#fullContextSegs .opt.on")?.textContent.includes("150"));
+      assert.deepEqual(posts.at(-1), { on: false, at: 150000 });
+      assert.deepEqual(errors, []);
+    });
+  }
 }

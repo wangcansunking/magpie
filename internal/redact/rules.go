@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+
+	"github.com/yetone/magpie/internal/lazyre"
 )
 
 // Rule is one the user added (Settings → Privacy) for a secret magpie's own
@@ -56,6 +58,10 @@ func RuleKind(kind string) string {
 	}
 	return k
 }
+
+// KindName says k is written as a placeholder names a kind (API_KEY, a
+// rule's own), as a setting keyed by kind must name it.
+func KindName(k string) bool { return k != "" && RuleKind(k) == k }
 
 // CheckRules tidies the user's rules (the kind as a placeholder has it,
 // spaces trimmed, the empty and the repeated dropped) and says what is
@@ -130,7 +136,7 @@ func customRules(in []Rule) []rule {
 		if re == nil {
 			continue
 		}
-		c := rule{kind: RuleKind(r.Kind), yours: true, re: re, ok: func(v string) bool { return len(v) >= minCustomLen }}
+		c := rule{kind: RuleKind(r.Kind), yours: true, re: lazyre.Of(re), ok: func(v string) bool { return len(v) >= minCustomLen }}
 		if r.Prefix != "" {
 			c.markers = []string{r.Prefix}
 		}

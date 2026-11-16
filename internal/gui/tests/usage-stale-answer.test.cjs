@@ -40,6 +40,13 @@ const loadUsageSource = lift("async function loadUsage(asked) {");
 const gap = source.match(/^const QUOTAS_OPEN_GAP = [^;\n]+;$/m);
 assert.ok(gap, "app.js no longer has const QUOTAS_OPEN_GAP");
 const quotasOpenedSource = gap[0] + "\nlet quotasAskedAt = -Infinity;\n" + lift("function quotasOpened() {");
+// what the figures on the page were read for (a period and a zone): beside
+// loadUsage in page.js
+const usageForSource = ["let usageFor = ", "const usageKey = "].map((h) => {
+  const line = source.split("\n").find((l) => l.startsWith(h));
+  assert.ok(line, `page.js no longer has ${h}`);
+  return line;
+}).join("\n");
 
 // values cross the vm's realm boundary (its Array and Object are not the
 // test's), so what is handed to assert is copied into this one first
@@ -62,15 +69,20 @@ const resolvers = [];    // the answers, held until the test gives them
 function api(path) {
   return new Promise((res, rej) => { reads.push(path); resolvers.push({ path, res, rej }); });
 }
+function usageZoneQ() { return ""; } // the reader's zone: usage-viewer-zone.test.cjs
 function renderUsage() { drawn.push({ period, usage: usage && usage.tag }); }
 function renderUsageTab() {}
 function renderUsageEvery() {}
 function renderUsageLoading() {}
+// the skeleton is up: an asked read draws as a pick does (a page already
+// drawn read again quietly is usage-quiet-refresh.test.cjs's)
+function $() { return { classList: { contains: () => true } }; }
 function loadQuotas(asked) { quotaCalls.push(asked === true); if (asked) quotasAskedAt = performance.now(); }
 function loadSessions() { return Promise.resolve("sessions"); }
 function loadLedger() { return Promise.resolve("requests"); }
 `,
     quotasOpenedSource,
+    usageForSource,
     loadUsageSource,
     `
 globalThis.page = {
@@ -187,6 +199,7 @@ const resolvers = [];    // the answers, held until the test gives them
 function api(path) {
   return new Promise((res, rej) => { reads.push(path); resolvers.push({ path, res, rej }); });
 }
+function usageZoneQ() { return ""; } // the reader's zone: usage-viewer-zone.test.cjs
 // the page's own element: what the loading flag is read and written through
 function $(sel) {
   return {
@@ -202,11 +215,13 @@ function renderUsage() { loading = false; drawn.push({ period, usage: usage && u
 function renderUsageTab() {}
 function renderUsageEvery() {}
 function renderUsageLoading() { loading = true; }
+function usageReading() {} // the refresh turning: usage-quiet-refresh.test.cjs
 function loadQuotas(asked) { quotaCalls.push(asked === true); if (asked) quotasAskedAt = performance.now(); return Promise.resolve(); }
 function loadSessions() { return Promise.resolve("sessions"); }
 function loadLedger() { return Promise.resolve("requests"); }
 `,
     quotasOpenedSource,
+    usageForSource,
     loadUsageSource,
     refreshSource,
     `

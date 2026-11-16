@@ -95,6 +95,11 @@ func TestCodexProxyFor(t *testing.T) {
 		// the system says direct, and the environment isn't asked (codex-cli
 		// 0.162.1 with HTTP_PROXY set sent nothing to it)
 		{"respect: no system proxy, env not read", respect, map[string]string{"HTTP_PROXY": clash}, netproxy.Proxy{}, "darwin", ""},
+		// #4147: magpie reads GNOME's proxy on Linux, which Codex's reqwest
+		// never does; only the environment counts there
+		{"Linux desktop proxy not read", plain, nil, netproxy.Proxy{URL: clash, HTTP: clash}, "linux", ""},
+		{"Linux desktop proxy, HTTP_PROXY", plain, map[string]string{"HTTP_PROXY": socks}, netproxy.Proxy{URL: clash, HTTP: clash}, "linux", socks},
+		{"respect: Linux desktop proxy not read", respect, nil, netproxy.Proxy{URL: clash, HTTP: clash}, "linux", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -256,53 +261,6 @@ func socksOnly(t *testing.T) string {
 	return ln.Addr().String()
 }
 
-// Muma102kMichael on X: Codex 502 on every project and every new chat once
-// magpie took it over, its requests for 127.0.0.1 sent through a proxy that
-// didn't pass them on. Failover, which magpie writes uninvited, is never
-// written then, and one written before goes again; once the proxy passes
-// them on, it is.
-func TestCodexFailoverHeldWhileProxyDoesNotPassOn(t *testing.T) {
-	claims := func(m map[string]any) string {
-		b, _ := json.Marshal(m)
-		return "h." + base64.RawURLEncoding.EncodeToString(b) + ".s"
-	}
-	auth := func(email, acct string) map[string]any {
-		return map[string]any{"auth_mode": "chatgpt", "tokens": map[string]any{
-			"id_token":      claims(map[string]any{"email": email}),
-			"access_token":  claims(map[string]any{"exp": time.Now().Add(time.Hour).Unix()}),
-			"refresh_token": "r-" + acct, "account_id": acct}}
-	}
-	me, _ := json.Marshal(auth("me@example.com", "acct-1"))
-	home, read := codexHome(t, string(me), "model = \"gpt-5.5\"\n")
-	b, _ := json.Marshal([]map[string]any{{"agent": "codex", "user": "spare@example.com", "on": true,
-		"seen": time.Now(), "auth": auth("spare@example.com", "acct-2")}})
-	os.MkdirAll(filepath.Dir(provider.Path()), 0o755)
-	os.WriteFile(filepath.Join(filepath.Dir(provider.Path()), "logins.json"), b, 0o600)
-
-	works := false
-	proxyAs(t, nil, netproxy.Proxy{URL: "http://127.0.0.1:7890", HTTP: "http://127.0.0.1:7890", Bypass: []string{"localhost", "127.*"}}, "windows", &works)
-	cx := codex(home)
-	sync := func() string {
-		t.Helper()
-		reachForget()
-		if err := cx.Sync(); err != nil {
-			t.Fatal(err)
-		}
-		return read()
-	}
-	if cfg := sync(); strings.Contains(cfg, "openai_base_url") {
-		t.Fatalf("written while the proxy doesn't pass it on:\n%s", cfg)
-	}
-	works = true
-	if cfg := sync(); !strings.Contains(cfg, `openai_base_url = "`+gateway.URL()) {
-		t.Fatalf("not written once the proxy passes it on:\n%s", cfg)
-	}
-	works = false
-	if cfg := sync(); strings.Contains(cfg, "openai_base_url") || !strings.Contains(cfg, `model = "gpt-5.5"`) {
-		t.Fatalf("kept once the proxy stopped passing it on:\n%s", cfg)
-	}
-}
-
 // Connected to magpie, with the gateway up but Codex's way to it through a
 // proxy that answers 502: the row says so, which proxy and where it is set,
 // rather than connected (kind "proxied"); once the proxy passes it on, or
@@ -370,9 +328,10 @@ func TestCodexProxiedDriftShowsNoCredentials(t *testing.T) {
 }
 
 // Leon920717 on X: with magpie quit, Codex CLI kept retrying the gateway
-// till magpie was open again. The failover base URL magpie wrote goes as
-// the magpie serving the gateway quits (EndCodexFailover), and the next
-// start's Sync writes it again; a base URL the user wrote stays.
+// till magpie was open again. The failover base URL a magpie from before
+// wrote goes as the magpie serving the gateway quits (EndCodexFailover),
+// and the next start's Sync doesn't write it again (TylerBai_loveai on X);
+// a base URL the user wrote stays.
 func TestCodexFailoverEndsWithMagpie(t *testing.T) {
 	claims := func(m map[string]any) string {
 		b, _ := json.Marshal(m)
@@ -396,12 +355,10 @@ func TestCodexFailoverEndsWithMagpie(t *testing.T) {
 	}
 	logins(true)
 	cx := codex(home)
-	if err := cx.Sync(); err != nil {
+	if err := edit.SetTOMLTop(cx.Path, edit.KV{Path: "openai_base_url", Value: here(home).codexURL()}); err != nil {
 		t.Fatal(err)
 	}
-	if cfg := read(); !strings.Contains(cfg, "openai_base_url") {
-		t.Fatalf("failover not written:\n%s", cfg)
-	}
+	stash(map[string]string{"codex.failover": "1"})
 	wasKeep := keepCodexDaemon
 	t.Cleanup(func() { keepCodexDaemon = wasKeep })
 	var asked []string
@@ -409,8 +366,8 @@ func TestCodexFailoverEndsWithMagpie(t *testing.T) {
 		asked = append(asked, h)
 		return provider.CodexDaemonCheck{}
 	}
-	if err := EndCodexFailover(); err != nil {
-		t.Fatal(err)
+	if ended, err := EndCodexFailover(); err != nil || !ended {
+		t.Fatalf("failover not said ended (%v): the open threads get no relay", err)
 	}
 	if cfg := read(); strings.Contains(cfg, "openai_base_url") || !strings.Contains(cfg, `model = "gpt-5.5"`) {
 		t.Fatalf("magpie quit, Codex still pointed at it:\n%s", cfg)
@@ -423,8 +380,8 @@ func TestCodexFailoverEndsWithMagpie(t *testing.T) {
 	if err := cx.Sync(); err != nil {
 		t.Fatal(err)
 	}
-	if cfg := read(); !strings.Contains(cfg, "openai_base_url") {
-		t.Fatalf("not written again on the next start:\n%s", cfg)
+	if cfg := read(); strings.Contains(cfg, "openai_base_url") {
+		t.Fatalf("written again on the next start:\n%s", cfg)
 	}
 
 	// the user's own base URL, with no failover on, stays
@@ -436,8 +393,8 @@ func TestCodexFailoverEndsWithMagpie(t *testing.T) {
 	if err := edit.SetTOMLTop(cx.Path, edit.KV{Path: "openai_base_url", Value: base}); err != nil {
 		t.Fatal(err)
 	}
-	if err := EndCodexFailover(); err != nil {
-		t.Fatal(err)
+	if ended, err := EndCodexFailover(); err != nil || ended {
+		t.Fatalf("the user's own base URL said ended (%v): a relay would take the port for nothing", err)
 	}
 	if cfg := read(); !strings.Contains(cfg, `openai_base_url = "`+base+`"`) {
 		t.Fatalf("the user's base URL was taken:\n%s", cfg)
@@ -448,10 +405,10 @@ func TestCodexFailoverEndsWithMagpie(t *testing.T) {
 }
 
 // CC Switch with "unify Codex session history" on (xuxing0727 on X) runs
-// the official sign-in as its "custom" mirror, so failover goes on that
-// table's base_url rather than openai_base_url: it too waits for the proxy
-// to pass Codex on, and goes as the magpie serving the gateway quits.
-func TestCodexMirrorFailoverHeldAndEndsWithMagpie(t *testing.T) {
+// the official sign-in as its "custom" mirror, so failover went on that
+// table's base_url rather than openai_base_url: one a magpie from before
+// wrote goes as the magpie serving the gateway quits.
+func TestCodexMirrorFailoverEndsWithMagpie(t *testing.T) {
 	// CC Switch's own bytes (src-tauri services/provider/mod.rs)
 	const unified = "model_provider = \"custom\"\nmodel = \"gpt-5.5\"\n\n" +
 		"[model_providers.custom]\nname = \"OpenAI\"\nrequires_openai_auth = true\nsupports_websockets = true\nwire_api = \"responses\"\n"
@@ -477,28 +434,57 @@ func TestCodexMirrorFailoverHeldAndEndsWithMagpie(t *testing.T) {
 	t.Cleanup(func() { keepCodexDaemon = wasKeep })
 	keepCodexDaemon = func(context.Context, string, time.Time) provider.CodexDaemonCheck { return provider.CodexDaemonCheck{} }
 
-	works := false
-	proxyAs(t, map[string]string{"HTTP_PROXY": "http://127.0.0.1:7890"}, netproxy.Proxy{}, "darwin", &works)
 	cx := codex(home)
-	sync := func() string {
-		t.Helper()
-		reachForget()
-		if err := cx.Sync(); err != nil {
-			t.Fatal(err)
-		}
-		return read()
+	if err := edit.SetTOMLKey(cx.Path, "model_providers.custom", "base_url", here(home).codexURL()); err != nil {
+		t.Fatal(err)
 	}
-	if cfg := sync(); strings.Contains(cfg, "base_url") {
-		t.Fatalf("written while the proxy doesn't pass it on:\n%s", cfg)
-	}
-	works = true
-	if cfg := sync(); !strings.Contains(cfg, `base_url = "`+gateway.URL()) {
-		t.Fatalf("not written once the proxy passes it on:\n%s", cfg)
-	}
-	if err := EndCodexFailover(); err != nil {
+	stash(map[string]string{"codex.mirror_failover": "custom"})
+	if _, err := EndCodexFailover(); err != nil {
 		t.Fatal(err)
 	}
 	if cfg := read(); strings.Contains(cfg, "base_url") || !strings.Contains(cfg, `model_provider = "custom"`) || !strings.Contains(cfg, "supports_websockets = true") {
 		t.Fatalf("magpie quit, CC Switch's mirror still pointed at it:\n%s", cfg)
+	}
+}
+
+// At quit, a relay is left at the gateway's own address for the Codex
+// processes running then (idkatbro on X: an open thread got 503 until
+// magpie was opened again); none when no Codex runs, and none for a
+// gateway on another computer's address, which a relay here can't take.
+func TestRelayOpenCodexLeftForRunningCodex(t *testing.T) {
+	wasStart, wasPIDs := startRelay, codexPIDs
+	t.Cleanup(func() { startRelay, codexPIDs = wasStart, wasPIDs })
+	type call struct {
+		addr string
+		pids []int
+	}
+	var started []call
+	startRelay = func(addr string, pids []int) error {
+		started = append(started, call{addr, pids})
+		return nil
+	}
+	running := []int{41, 42}
+	codexPIDs = func(context.Context) []int { return running }
+
+	t.Setenv("MAGPIE_ADDR", "127.0.0.1:3499")
+	if err := RelayOpenCodex(); err != nil {
+		t.Fatal(err)
+	}
+	if len(started) != 1 || started[0].addr != "127.0.0.1:3499" || len(started[0].pids) != 2 {
+		t.Fatalf("no relay for the open Codex: %+v", started)
+	}
+	// a gateway on every interface is reached on loopback, and relayed
+	t.Setenv("MAGPIE_ADDR", "0.0.0.0:3498")
+	if err := RelayOpenCodex(); err != nil || len(started) != 2 || started[1].addr != "127.0.0.1:3498" {
+		t.Fatalf("%v %+v", err, started)
+	}
+	running = nil
+	if err := RelayOpenCodex(); err != nil || len(started) != 2 {
+		t.Fatalf("a relay with no Codex running: %v %+v", err, started)
+	}
+	running = []int{41}
+	t.Setenv("MAGPIE_ADDR", "192.0.2.7:3425")
+	if err := RelayOpenCodex(); err != nil || len(started) != 2 {
+		t.Fatalf("a relay for another computer's address: %v %+v", err, started)
 	}
 }

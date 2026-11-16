@@ -2,8 +2,10 @@ package gateway
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 )
@@ -30,6 +32,16 @@ type gPart struct {
 		MimeType string `json:"mimeType"`
 		FileURI  string `json:"fileUri"`
 	} `json:"fileData,omitempty"`
+	// ExecutableCode and CodeExecutionResult are the code the model ran
+	// with Google's codeExecution, and what it gave back
+	ExecutableCode *struct {
+		Language string `json:"language,omitempty"`
+		Code     string `json:"code"`
+	} `json:"executableCode,omitempty"`
+	CodeExecutionResult *struct {
+		Outcome string `json:"outcome,omitempty"`
+		Output  string `json:"output,omitempty"`
+	} `json:"codeExecutionResult,omitempty"`
 	FunctionCall *struct {
 		ID   string          `json:"id,omitempty"`
 		Name string          `json:"name"`
@@ -62,8 +74,6 @@ type gRequest struct {
 			Parameters           json.RawMessage `json:"parameters,omitempty"`
 			ParametersJSONSchema json.RawMessage `json:"parametersJsonSchema,omitempty"`
 		} `json:"functionDeclarations,omitempty"`
-		GoogleSearch json.RawMessage `json:"googleSearch,omitempty"`
-		GoogleSnake  json.RawMessage `json:"google_search,omitempty"`
 	} `json:"tools,omitempty"`
 	ToolConfig *struct {
 		FunctionCallingConfig *struct {
@@ -80,6 +90,7 @@ type gRequest struct {
 		ResponseSchema     json.RawMessage `json:"responseSchema,omitempty"`
 		ResponseJSONSchema json.RawMessage `json:"responseJsonSchema,omitempty"`
 		ThinkingConfig     *gThinking      `json:"thinkingConfig,omitempty"`
+		ImageConfig        json.RawMessage `json:"imageConfig,omitempty"`
 	} `json:"generationConfig,omitempty"`
 }
 
@@ -105,6 +116,22 @@ func (tc *gThinking) effort() string {
 	return ""
 }
 
+// geminiBodyEffort is the reasoning a Gemini request's generationConfig
+// asks for through its thinkingConfig, as parseGemini reads it (#4529):
+// the level it names, else its budget as the level it is nearest. ""
+// when it asks for none, or there is no thinkingConfig.
+func geminiBodyEffort(body []byte) string {
+	var g struct {
+		GenerationConfig *struct {
+			ThinkingConfig *gThinking `json:"thinkingConfig"`
+		} `json:"generationConfig"`
+	}
+	if decodeJSON(geminiCamel(body), &g) != nil || g.GenerationConfig == nil || g.GenerationConfig.ThinkingConfig == nil {
+		return ""
+	}
+	return g.GenerationConfig.ThinkingConfig.effort()
+}
+
 // buildGemini is a generateContent body for an upstream that speaks Gemini
 // itself (Factory's /api/llm/g). The contents are the ones Code Assist
 // sends inside its envelope. systemInstruction has no role: droid sends
@@ -116,7 +143,7 @@ func buildGemini(r *Request, model string) ([]byte, error) {
 		return nil, err
 	}
 	req["model"] = model
-	return json.Marshal(req)
+	return marshalBody(req, "")
 }
 
 // geminiRequest is the request inside the Code Assist envelope that
@@ -136,6 +163,23 @@ func geminiRequest(r *Request, model, agent string) (map[string]any, error) {
 		delete(si, "role")
 	}
 	delete(wrap.Request, "stream")
+	// the rest of what a Gemini client asked, as it sent it (#3937): the
+	// Gemini API and Vertex AI speak the request's own shape, so their
+	// generationConfig carries what magpie doesn't read beside what it
+	// rebuilt — magpie's word for a field it sets stands (a draw model's
+	// responseModalities).
+	if len(r.GenConfig) > 0 {
+		gen, ok := wrap.Request["generationConfig"].(map[string]any)
+		if !ok {
+			gen = map[string]any{}
+			wrap.Request["generationConfig"] = gen
+		}
+		for k, v := range r.GenConfig {
+			if _, set := gen[k]; !set {
+				gen[k] = json.RawMessage(v)
+			}
+		}
+	}
 	return wrap.Request, nil
 }
 
@@ -147,7 +191,7 @@ func geminiRequest(r *Request, model, agent string) (map[string]any, error) {
 // (#934). The values that are the caller's own — a call's args, a
 // result's response, the schemas — keep their keys as they are.
 func geminiCamel(body []byte) []byte {
-	if !bytes.Contains(body, []byte("_")) {
+	if !bodyHas(body, "_") {
 		return body
 	}
 	dec := json.NewDecoder(bytes.NewReader(body))
@@ -212,6 +256,18 @@ func snakeToCamel(s string) string {
 	return strings.Join(parts, "")
 }
 
+// genReadOrBuilt are generationConfig's keys magpie reads itself or writes
+// its own of: they are rebuilt from the request when it is sent on
+// (buildCodeAssistSent), not carried as they came (#3937). candidateCount
+// is one too: magpie reads a reply as one answer (codeAssistDecoder runs every
+// candidate's parts into it), so a second candidate would be mixed into
+// the first.
+var genReadOrBuilt = map[string]bool{
+	"maxOutputTokens": true, "temperature": true, "topP": true, "stopSequences": true,
+	"responseMimeType": true, "responseSchema": true, "responseJsonSchema": true,
+	"thinkingConfig": true, "imageConfig": true, "candidateCount": true,
+}
+
 func parseGemini(body []byte) (*Request, error) {
 	body = geminiCamel(body)
 	var g gRequest
@@ -220,11 +276,19 @@ func parseGemini(body []byte) (*Request, error) {
 	}
 	r := &Request{Model: g.Model, Stream: g.Stream}
 	r.System = geminiText(g.SystemInstruction)
+	if r.System != "" {
+		r.systemParts = []string{r.System}
+	}
 	if gc := g.GenerationConfig; gc != nil {
 		r.MaxTokens, r.Temp, r.TopP, r.Stop = gc.MaxOutputTokens, gc.Temperature, gc.TopP, gc.StopSequences
 		if tc := gc.ThinkingConfig; tc != nil {
 			r.Effort = tc.effort()
 			r.Thinking = r.Effort != ""
+		}
+		// the size and shape of the image asked for, which only an
+		// upstream that speaks Gemini takes (#3820)
+		if ic := gc.ImageConfig; len(ic) > 0 && string(ic) != "null" {
+			r.ImageConfig = ic
 		}
 		// structured output, asked for in the upstream's own field
 		// (Format) and in words as well: a Gemini client doesn't know
@@ -240,6 +304,22 @@ func parseGemini(body []byte) (*Request, error) {
 				r.System += "\n\n"
 			}
 			r.System += ask + "."
+		}
+		// the rest of what the client asked, carried for a Gemini upstream
+		// as it was sent (#3937). The body was spelled in camelCase on its
+		// way in (geminiCamel).
+		var raw struct {
+			GenerationConfig map[string]json.RawMessage `json:"generationConfig"`
+		}
+		if json.Unmarshal(body, &raw) == nil {
+			for k, v := range raw.GenerationConfig {
+				if !genReadOrBuilt[k] && len(v) > 0 && string(v) != "null" {
+					if r.GenConfig == nil {
+						r.GenConfig = make(map[string]json.RawMessage, len(raw.GenerationConfig))
+					}
+					r.GenConfig[k] = v
+				}
+			}
 		}
 	}
 	// function results carry the call's id when the client kept it; older
@@ -312,6 +392,12 @@ func parseGemini(body []byte) (*Request, error) {
 					// Other protocols cannot carry Gemini file references as image URLs.
 					msg.Parts = append(msg.Parts, Part{Kind: File, MediaType: p.FileData.MimeType, URL: p.FileData.FileURI})
 				}
+			case p.ExecutableCode != nil || p.CodeExecutionResult != nil:
+				// code Google's codeExecution ran, an earlier turn's,
+				// as the text a translated reply gave it (ranCode)
+				if t := ranCode(p); t != "" {
+					msg.Parts = append(msg.Parts, Part{Kind: Text, Text: t})
+				}
 			case p.Thought:
 				msg.Parts = append(msg.Parts, Part{Kind: Thinking, Text: p.Text, Signature: p.Signature})
 			case p.Text != "" || p.Signature != "":
@@ -334,10 +420,20 @@ func parseGemini(body []byte) (*Request, error) {
 			}
 		}
 	}
-	for _, t := range g.Tools {
-		if t.GoogleSearch != nil || t.GoogleSnake != nil {
-			r.WebSearch = true
+	// Google's own tools, beside the functions: googleSearch is
+	// WebSearch, the rest go on as sent (GoogleTools). The body was
+	// spelled in camelCase on its way in (geminiCamel).
+	var rawTools struct {
+		Tools []map[string]json.RawMessage `json:"tools"`
+	}
+	if json.Unmarshal(body, &rawTools) == nil {
+		for _, t := range rawTools.Tools {
+			search, kept := googleTools(t, false)
+			r.WebSearch = r.WebSearch || search
+			r.GoogleTools = append(r.GoogleTools, kept...)
 		}
+	}
+	for _, t := range g.Tools {
 		for _, f := range t.FunctionDeclarations {
 			if allowed != nil && !allowed[f.Name] {
 				continue
@@ -368,6 +464,45 @@ func parseGemini(body []byte) (*Request, error) {
 		}
 	}
 	return r, nil
+}
+
+// googleSearchTools are the names of Google's web search tool: today's
+// googleSearch, and Gemini 1.5's googleSearchRetrieval, which Gemini 2 and
+// later answer with googleSearch's 400 "use google_search instead".
+var googleSearchTools = map[string]bool{"googleSearch": true, "googleSearchRetrieval": true}
+
+// googleToolNames are Google's own tools beside googleSearch that a Gemini
+// upstream runs itself, as the Gemini API spells them.
+var googleToolNames = map[string]bool{"urlContext": true, "codeExecution": true, "googleMaps": true,
+	"fileSearch": true, "enterpriseWebSearch": true, "computerUse": true, "retrieval": true}
+
+// googleTools reads one tool object of a request: whether it offers
+// googleSearch, and the other Google tools in it, each as a tool object of
+// its own. A Gemini request's (known false) holds only Google's tools beside
+// its functionDeclarations, so every other key is one, known or not; in a
+// Chat request's tools only the names Google gives them count, spelled
+// either way.
+func googleTools(t map[string]json.RawMessage, known bool) (search bool, kept []json.RawMessage) {
+	// in the order of their names: a map's own order changes from one
+	// read to the next, and the request's bytes would with it
+	for _, name := range slices.Sorted(maps.Keys(t)) {
+		k, v := snakeToCamel(name), t[name]
+		switch {
+		case k == "functionDeclarations":
+		case googleSearchTools[k]:
+			search = true
+		case known && !googleToolNames[k]:
+		default:
+			if len(v) == 0 || string(v) == "null" {
+				v = json.RawMessage("{}")
+			}
+			b, err := json.Marshal(map[string]json.RawMessage{k: v})
+			if err == nil {
+				kept = append(kept, b)
+			}
+		}
+	}
+	return search, kept
 }
 
 // geminiText joins the text parts of a Content, which may also arrive as a
@@ -683,6 +818,13 @@ func (e *geminiEncoder) event(ev Event) {
 		if e.tool != nil {
 			e.args.WriteString(ev.Text)
 		}
+	case KSearch:
+		// what a search found, where Gemini's googleSearch tells it
+		e.flushTool()
+		if g := grounding([]Part{{Kind: Search, Text: ev.Text, Hits: ev.Hits}}); g != nil {
+			e.w.event("", map[string]any{"candidates": []map[string]any{{"content": map[string]any{"role": "model", "parts": []map[string]any{}},
+				"index": 0, "groundingMetadata": g}}, "modelVersion": e.model, "responseId": e.id})
+		}
 	case KError:
 		e.w.event("", map[string]any{"error": map[string]any{"code": 502, "message": ev.Text, "status": "UNAVAILABLE"}})
 	}
@@ -707,12 +849,54 @@ func renderGemini(res Result, model string) []byte {
 	if id == "" {
 		id = newID()
 	}
+	cand := map[string]any{"content": map[string]any{"role": "model", "parts": geminiParts(res.Parts)},
+		"finishReason": stopToGemini(res.Stop), "index": 0}
+	if g := grounding(res.Parts); g != nil {
+		cand["groundingMetadata"] = g
+	}
 	b, _ := json.Marshal(map[string]any{
-		"candidates": []map[string]any{{"content": map[string]any{"role": "model", "parts": geminiParts(res.Parts)},
-			"finishReason": stopToGemini(res.Stop), "index": 0}},
+		"candidates":    []map[string]any{cand},
 		"usageMetadata": res.Usage.gemini(), "modelVersion": model, "responseId": id,
 	})
 	return b
+}
+
+// grounding is the searches among parts as a Gemini candidate's
+// groundingMetadata: the queries, and the pages found as its web chunks,
+// which a Gemini client lists as the answer's sources. A translated
+// reply's searches — Code Assist's googleSearch, magpie's own — reached a
+// Gemini client as nothing at all. nil with no search.
+func grounding(parts []Part) map[string]any {
+	var queries []string
+	chunks := []map[string]any{}
+	seen := map[string]bool{}
+	searched := false
+	for _, p := range parts {
+		if p.Kind != Search {
+			continue
+		}
+		searched = true
+		for _, q := range strings.Split(p.Text, "; ") {
+			if q = strings.TrimSpace(q); q != "" && !slices.Contains(queries, q) {
+				queries = append(queries, q)
+			}
+		}
+		for _, h := range p.Hits {
+			if h.URL == "" || seen[h.URL] {
+				continue
+			}
+			seen[h.URL] = true
+			chunks = append(chunks, map[string]any{"web": map[string]any{"uri": h.URL, "title": cmp.Or(h.Title, h.URL)}})
+		}
+	}
+	if !searched {
+		return nil
+	}
+	g := map[string]any{"groundingChunks": chunks}
+	if len(queries) > 0 {
+		g["webSearchQueries"] = queries
+	}
+	return g
 }
 
 // geminiModels is GET /v1beta/models: the catalog in Google's shape.

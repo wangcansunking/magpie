@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -151,6 +152,43 @@ func TestCodexBodyAsCodexSendsIt(t *testing.T) {
 	}
 }
 
+// A Responses Lite turn, as Codex 0.165 sends it (its system prompt as
+// developer items, its tools in an additional_tools item, no instructions),
+// goes without instructions and without a reasoning summary it didn't ask
+// for, as Codex itself sends it to chatgpt.com.
+func TestCodexBodyLiteGetsNoInstructions(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CODEX_HOME", dir)
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	os.WriteFile(filepath.Join(dir, "models_cache.json"), []byte(`{"models":[{"slug":"gpt-6-astra","model_messages":{"instructions_template":"You are Codex, a coding agent.\n{{ personality }}"}}]}`), 0o644)
+	for name, body := range map[string]string{
+		"additional_tools": `{"model":"gpt-6-astra","reasoning":{"effort":"high"},"input":[
+		  {"type":"additional_tools","tools":[{"type":"function","name":"exec_command","parameters":{"type":"object"}}]},
+		  {"type":"message","role":"developer","content":[{"type":"input_text","text":"You are Codex, a coding agent."}]},
+		  {"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`,
+		"all_turns": `{"model":"gpt-6-astra","reasoning":{"effort":"high","context":"all_turns"},"input":[
+		  {"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`,
+	} {
+		var m map[string]any
+		out := codexBody([]byte(body))
+		if err := json.Unmarshal(out, &m); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := m["instructions"]; ok {
+			t.Errorf("%s: instructions added: %s", name, out)
+		}
+		if _, ok := m["reasoning"].(map[string]any)["summary"]; ok {
+			t.Errorf("%s: summary added: %s", name, out)
+		}
+	}
+	// a request that isn't Lite still gets Codex's
+	var m map[string]any
+	json.Unmarshal(codexBody([]byte(`{"model":"gpt-6-astra","reasoning":{"effort":"high"},"input":"hi"}`)), &m)
+	if m["instructions"] != "You are Codex, a coding agent.\n{{ personality }}" || m["reasoning"].(map[string]any)["summary"] != "auto" {
+		t.Fatalf("%v", m)
+	}
+}
+
 // A conversation whose client names none gets a key of its own, the same on
 // every turn; a client's own key stays.
 func TestCodexPromptCacheKey(t *testing.T) {
@@ -198,6 +236,11 @@ func TestCodexInstructionsSaved(t *testing.T) {
 	}
 	if got := codexInstructions("gpt-9"); got != codexcat.Prompt {
 		t.Fatalf("unknown model: %q", got)
+	}
+	// a model neither list has but Codex's bundled catalog does: that
+	// catalog's, as Codex CLI sends it, not its prompt for an unknown model
+	if got := codexInstructions("gpt-6-astra"); got != codexcat.Official("gpt-6-astra") || got == codexcat.Prompt {
+		t.Fatalf("bundled model: %.60q", got)
 	}
 	saveCodexPrompts([]byte(`{"models":[{"slug":"gpt-5.5","model_messages":{"instructions_template":"fetched"}},{"slug":"gpt-4","base_instructions":"base"}]}`))
 	if got := codexInstructions("gpt-5.5"); got != "fetched" {
@@ -373,5 +416,87 @@ func TestCodexBodyDropsPromptCacheOptions(t *testing.T) {
 	}
 	if m["prompt_cache_key"] != "k" {
 		t.Errorf("cache key lost: %v", m)
+	}
+}
+
+// A message's status goes with its id, and Codex's reasoning items carry
+// none, so both lose it with the id (Doby on Discord: Pi's assistant
+// message sent again with status "completed" was refused 400 "Unknown
+// parameter: 'input[8].status'"). A tool call keeps its status, as Codex
+// sends it.
+func TestCodexInputDropsStatusWithID(t *testing.T) {
+	in := []any{}
+	json.Unmarshal([]byte(`[
+	  {"role":"user","content":"hi","status":"completed"},
+	  {"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"e","status":"completed"},
+	  {"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok","annotations":[]}],"status":"completed","id":"msg_1"},
+	  {"type":"function_call","id":"fc_1","call_id":"c1","name":"ls","arguments":"{}","status":"completed"},
+	  {"type":"local_shell_call","id":"lsh_1","call_id":"c2","status":"completed","action":{"type":"exec","command":["ls"]}},
+	  {"type":"function_call_output","call_id":"c1","output":"a"},
+	  {"type":"local_shell_call_output","call_id":"c2","output":"b"}]`), &in)
+	out := codexInput(in)
+	want := []bool{false, false, false, true, true, false, false}
+	if len(out) != len(want) {
+		t.Fatalf("items: %v", out)
+	}
+	for i, item := range out {
+		_, has := item.(map[string]any)["status"]
+		if has != want[i] {
+			t.Errorf("input[%d] status kept %v, want %v: %v", i, has, want[i], item)
+		}
+	}
+}
+
+// The Codex client magpie presents is the user's choice (ouhthuo on X): Codex
+// CLI unless "desktop" is set, and then the Codex app's originator and
+// User-Agent on a model request and on the account calls alike (/wham, the
+// token refresh), and as a test is asked as Codex asks. Anything else is
+// refused, and read as Codex CLI from a file edited by hand.
+func TestCodexClientSetting(t *testing.T) {
+	signIn(t)
+	p, _ := find(All(), "codex")
+	sign := func() http.Header {
+		t.Helper()
+		req, _ := http.NewRequest("POST", p.Responses+"/responses", nil)
+		if err := p.Sign(context.Background(), req, Responses, []byte(`{"prompt_cache_key":"thread-1"}`)); err != nil {
+			t.Fatal(err)
+		}
+		return req.Header
+	}
+	cli := func(h http.Header) bool {
+		return h.Get("originator") == "codex_cli_rs" && strings.HasPrefix(h.Get("User-Agent"), "codex_cli_rs/0.")
+	}
+	if h := sign(); !cli(h) {
+		t.Fatalf("by default: %v", h)
+	}
+	for _, bad := range []string{"Codex Desktop", "codex_cli_rs", "evil", "desktop2"} {
+		if err := SetCodexClient(bad); err == nil {
+			t.Errorf("%q was accepted", bad)
+		}
+	}
+	if err := SetCodexClient("desktop"); err != nil {
+		t.Fatal(err)
+	}
+	h := sign()
+	if h.Get("originator") != "Codex Desktop" || !regexp.MustCompile(`^Codex Desktop/0\.\d+[^ ]* \([^;]+; [^)]+\) unknown \(Codex Desktop; \d+\.\d+\.\d+\)$`).MatchString(h.Get("User-Agent")) {
+		t.Fatalf("as the Codex app: %v", h)
+	}
+	if h.Get("version") == "" || h.Get("session-id") != "thread-1" || h.Get("chatgpt-account-id") != "acct-1" {
+		t.Fatalf("the rest of the headers: %v", h)
+	}
+	acct := codexAccountHeaders("acct-1")
+	if acct["Originator"] != "Codex Desktop" || !strings.HasPrefix(acct["User-Agent"], "Codex Desktop/") {
+		t.Fatalf("an account call: %v", acct)
+	}
+	asked := http.Header{}
+	clientHeaders(ClientCodex, asked)
+	if asked.Get("originator") != "Codex Desktop" || !strings.HasPrefix(asked.Get("User-Agent"), "Codex Desktop/") {
+		t.Fatalf("a test asked as Codex: %v", asked)
+	}
+	if err := SetCodexClient(""); err != nil {
+		t.Fatal(err)
+	}
+	if h := sign(); !cli(h) {
+		t.Fatalf("back to the default: %v", h)
 	}
 }

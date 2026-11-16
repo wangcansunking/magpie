@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -130,6 +131,7 @@ func turnOn(t *testing.T, s *Server, body string) (int, string) {
 // an hour for a request it refused, its usage isn't asked again, and the
 // next turn asks it first again — as the refusal it is, not a spent quota.
 func TestAntigravityTurnedAwayRestsNobody(t *testing.T) {
+	t.Cleanup(provider.AntigravityBuiltinForTest()) // the retired built-in route
 	s, askedUsage := antigravityTurnedAwayGroup(t, []string{"u@example.com"}, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
 		io.WriteString(w, turnedAway)
@@ -169,6 +171,7 @@ func TestAntigravityTurnedAwayRestsNobody(t *testing.T) {
 // as before), and once the last refusal is old, it is asked again, so a
 // block Google lifts is noticed.
 func TestAntigravityTurnedAwayIsForeseen(t *testing.T) {
+	t.Cleanup(provider.AntigravityBuiltinForTest()) // the retired built-in route
 	asked := 0
 	s, askedUsage := antigravityTurnedAwayGroup(t, []string{"u@example.com"}, func(w http.ResponseWriter, r *http.Request) {
 		asked++
@@ -224,6 +227,7 @@ func TestAntigravityTurnedAwayIsForeseen(t *testing.T) {
 // A 429 that really is the plan used up — no such system prompt asking —
 // still rests the account, as it did (#147, #530).
 func TestAntigravityQuotaStillRests(t *testing.T) {
+	t.Cleanup(provider.AntigravityBuiltinForTest()) // the retired built-in route
 	s, askedUsage := antigravityTurnedAwayGroup(t, []string{"u@example.com"}, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
 		io.WriteString(w, turnedAway)
@@ -251,6 +255,7 @@ func TestAntigravityQuotaStillRests(t *testing.T) {
 // no excuse for an account that really is broken, overloaded or denied: it
 // rests as it would on any other request (the maintenance review of #873).
 func TestAntigravityTurnedAwayIsOnlyTheRefusal(t *testing.T) {
+	t.Cleanup(provider.AntigravityBuiltinForTest()) // the retired built-in route
 	for _, tc := range []struct {
 		name   string
 		status int
@@ -285,6 +290,7 @@ func TestAntigravityTurnedAwayIsOnlyTheRefusal(t *testing.T) {
 // ledger keeps it: a Claude Code turn's 429 is as visible as any other
 // failed call (the maintenance review of #873).
 func TestAntigravityTurnedAwayStillLandsInTheLedger(t *testing.T) {
+	t.Cleanup(provider.AntigravityBuiltinForTest()) // the retired built-in route
 	s, _ := antigravityTurnedAwayGroup(t, []string{"u@example.com"}, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
 		io.WriteString(w, turnedAway)
@@ -309,6 +315,7 @@ func TestAntigravityTurnedAwayStillLandsInTheLedger(t *testing.T) {
 // a round-trip apiece before the group reaches the member that answers
 // (the maintenance review of #873).
 func TestAntigravityTurnedAwayLeavesItsMatesForLast(t *testing.T) {
+	t.Cleanup(provider.AntigravityBuiltinForTest()) // the retired built-in route
 	s, _ := antigravityTurnedAwayGroup(t, []string{"u@example.com", "v@example.com"}, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
 		io.WriteString(w, turnedAway)
@@ -335,6 +342,7 @@ func TestAntigravityTurnedAwayLeavesItsMatesForLast(t *testing.T) {
 // It leaves the account alone as the 429 does, and an error event of any
 // other kind still rests it.
 func TestAntigravityTurnedAwaySaidInsideTheReply(t *testing.T) {
+	t.Cleanup(provider.AntigravityBuiltinForTest()) // the retired built-in route
 	for _, tc := range []struct {
 		name string
 		body string
@@ -397,6 +405,7 @@ func directTurn(system string, stream bool) string {
 // page tells it as the agent's prompt turned away, not a quota used up; the
 // account doesn't rest and isn't asked again.
 func TestAntigravityTurnedAwayLastIsNoQuota(t *testing.T) {
+	t.Cleanup(provider.AntigravityBuiltinForTest()) // the retired built-in route
 	for _, stream := range []bool{false, true} {
 		t.Run(fmt.Sprintf("stream=%v", stream), func(t *testing.T) {
 			asked := 0
@@ -440,6 +449,7 @@ func TestAntigravityTurnedAwayLastIsNoQuota(t *testing.T) {
 // event), with nobody left: told the same, at a status not retried, and not
 // asked again as a failure that may pass.
 func TestAntigravityTurnedAwayInsideTheReplyLast(t *testing.T) {
+	t.Cleanup(provider.AntigravityBuiltinForTest()) // the retired built-in route
 	asked := 0
 	s, _ := antigravityTurnedAwayGroup(t, []string{"u@example.com"}, func(w http.ResponseWriter, r *http.Request) {
 		asked++
@@ -462,6 +472,7 @@ func TestAntigravityTurnedAwayInsideTheReplyLast(t *testing.T) {
 // is told what Antigravity turned away and why, at a status it doesn't
 // retry — not the other's quota, which waiting wouldn't fix either.
 func TestAntigravityTurnedAwayThenAQuota(t *testing.T) {
+	t.Cleanup(provider.AntigravityBuiltinForTest()) // the retired built-in route
 	s, _ := antigravityTurnedAwayGroup(t, []string{"u@example.com"}, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
 		io.WriteString(w, turnedAway)
@@ -490,6 +501,7 @@ func TestAntigravityTurnedAwayThenAQuota(t *testing.T) {
 // nobody left the agent gets the 429 (Rest-of-#666 review: refusal, account
 // or model, told apart by what was said, not by the system prompt alone).
 func TestAntigravityQuotaOnAClaudeCodeTurnStaysQuota(t *testing.T) {
+	t.Cleanup(provider.AntigravityBuiltinForTest()) // the retired built-in route
 	t.Run("in a group", func(t *testing.T) {
 		s, askedUsage := antigravityTurnedAwayGroup(t, []string{"u@example.com"}, func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusTooManyRequests)
@@ -527,11 +539,72 @@ func TestAntigravityQuotaOnAClaudeCodeTurnStaysQuota(t *testing.T) {
 // The Routing page says the note apart from Antigravity's words, in its own
 // language, only when it knows the very words the gateway adds.
 func TestAntigravityTurnedAwayHintIsTheRoutingPages(t *testing.T) {
+	t.Cleanup(provider.AntigravityBuiltinForTest()) // the retired built-in route
 	b, err := os.ReadFile(filepath.Join("..", "gui", "assets", "plugins", "routing", "client.js"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(b), quote(antigravityTurnedAwayHint)) {
 		t.Fatal("plugins/routing/client.js doesn't know the note the gateway adds to Antigravity's refusal")
+	}
+}
+
+// Antigravity's 429 for a model's quota used up says when it is back,
+// "Your quota will reset after 3h19m30s.", and the account rests that long:
+// read as a quota that says nothing, it rested 15 minutes, and the account
+// first in order was asked again, and refused, every quarter of an hour
+// while the next ticked one had all its quota left (Dani Ariyanto on
+// Discord, 10-24: OpenCode on Gemini 3.8 Flash, seven accounts).
+func TestAntigravityQuotaRestsUntilItsReset(t *testing.T) {
+	t.Cleanup(provider.AntigravityBuiltinForTest()) // the retired built-in route
+	var asked []string
+	s, _ := antigravityGroupFor(t, []string{"u1@example.com", "u2@example.com"}, "gemini-3.8-flash", func(w http.ResponseWriter, r *http.Request) {
+		who := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		asked = append(asked, who)
+		if who == "u1@example.com" {
+			w.WriteHeader(http.StatusTooManyRequests)
+			io.WriteString(w, antigravityQuota)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, sse(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"from u2"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":3}}}`))
+	})
+	turn := func(n int) (int, string) {
+		body := fmt.Sprintf(`{"model":"antigravity/gemini-3.8-flash","stream":false,"messages":[{"role":"system","content":"You are opencode, an interactive CLI tool."},{"role":"user","content":"hi %d"}]}`, n)
+		rec := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
+		return rec.Code, rec.Body.String()
+	}
+	if code, out := turn(1); code != 200 || !strings.Contains(out, "from u2") || !slices.Equal(asked, []string{"u1@example.com", "u2@example.com"}) {
+		t.Fatalf("the turn: %d %s, asked %v", code, out, asked)
+	}
+	r := lastRoute(s)
+	if len(r.Tries) != 2 || r.Tries[0].Fail != failQuota || r.Tries[0].Rest == nil {
+		t.Fatalf("the used-up try: %+v", r.Tries)
+	}
+	want := 3*time.Hour + 19*time.Minute + 30*time.Second
+	if d := time.Until(r.Tries[0].Rest.Until); r.Tries[0].Rest.By != "resets" || d < want-time.Minute || d > want {
+		t.Fatalf("u1 rests %v by %q, not the %v its quota resets after", d, r.Tries[0].Rest.By, want)
+	}
+	asked = nil
+	if code, _ := turn(2); code != 200 || !slices.Equal(asked, []string{"u2@example.com"}) {
+		t.Fatalf("the next turn: %d, asked %v", code, asked)
+	}
+
+	for _, c := range []struct {
+		body string
+		want time.Duration
+	}{
+		{antigravityQuota, want},
+		{`{"error":{"code":429,"message":"You have exhausted your capacity on this model. Your quota will reset after 45m2s.","status":"RESOURCE_EXHAUSTED"}}`, 45*time.Minute + 2*time.Second},
+		{`{"error":{"code":429,"message":"You have exhausted your capacity on this model. Your quota will reset after 26s.","status":"RESOURCE_EXHAUSTED"}}`, 26 * time.Second},
+		{`{"error":{"code":429,"message":"You have exhausted your capacity on this model. Your quota will reset after 155h2m1s.","status":"RESOURCE_EXHAUSTED"}}`, 155*time.Hour + 2*time.Minute + time.Second},
+		{`{"error":{"code":429,"message":"Your quota will reset after 200h0m0s.","status":"RESOURCE_EXHAUSTED"}}`, 0}, // past longestWritten
+		{`{"error":{"code":429,"message":"You have exhausted your capacity on this model. Your quota will reset after ","status":"RESOURCE_EXHAUSTED"}}`, 0},
+		{turnedAway, 0},
+	} {
+		if got := resetsAfter([]byte(c.body)); got != c.want {
+			t.Errorf("%s: %v, want %v", c.body, got, c.want)
+		}
 	}
 }

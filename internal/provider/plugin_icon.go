@@ -21,8 +21,26 @@ func PluginIcon(pp plugin.Provider) string {
 	if ic := pluginOwnIcon(pp.Icon); ic != "" {
 		return ic
 	}
-	return plugin.Icon(pp.Spec, pp.ID)
+	return MarketIcon(plugin.Icon(pp.Spec, pp.ID))
 }
+
+// MarketIcon is an icon the plugin market (registry.json) gives, as the
+// page can show it. A bundled icon's name is given as it is. A picture
+// (an https URL or a data:image URI) is checked, fetched and kept as a
+// plugin's own picture is, and is "" until it is in: the page never
+// loads a remote URL itself, and an icon("https://…") would look for a
+// bundled file of that name.
+func MarketIcon(said string) string {
+	if MarketPicture(said) {
+		return pluginOwnIcon(said)
+	}
+	return said
+}
+
+// MarketPicture is whether a market icon is a picture to fetch or decode
+// (anything with a scheme or a path in it) rather than a bundled icon's
+// name.
+func MarketPicture(said string) bool { return strings.ContainsAny(said, ":/") }
 
 // PluginOwnIcon is the Icon value of a picture a plugin gave (a data:image
 // URI or an https URL), "" while there is none to show: an agent a
@@ -37,6 +55,11 @@ var plugIcons struct {
 	from  string // the file they were read from
 	kept  map[string]string
 	tried map[string]time.Time
+	// seen is when each kept icon's file was last found on disk: within
+	// iconSeenFor it is not looked for again. /api/providers asks for
+	// every plugin provider's icon, and a stat each was a fifth of its
+	// time on a real account's 26 providers
+	seen map[string]time.Time
 	// the URLs being fetched now, each closed once its fetch is over
 	busy map[string]chan struct{}
 }
@@ -45,6 +68,10 @@ var plugIcons struct {
 // public host only, at most MaxIcon. Tests point it elsewhere.
 var fetchPluginIcon = FetchIcon
 
+// iconSeenFor is how long a kept icon found on disk is taken to be there
+// still: one removed is fetched again within it.
+const iconSeenFor = time.Minute
+
 func plugIconsPath() string { return filepath.Join(filepath.Dir(Path()), "plugin-icons.json") }
 
 func loadPlugIcons() {
@@ -52,7 +79,7 @@ func loadPlugIcons() {
 		return
 	}
 	plugIcons.from = plugIconsPath()
-	plugIcons.kept, plugIcons.tried = map[string]string{}, map[string]time.Time{}
+	plugIcons.kept, plugIcons.tried, plugIcons.seen = map[string]string{}, map[string]time.Time{}, map[string]time.Time{}
 	if b, err := os.ReadFile(plugIcons.from); err == nil {
 		_ = json.Unmarshal(b, &plugIcons.kept)
 	}
@@ -82,11 +109,16 @@ func pluginOwnIcon(said string) string {
 	defer plugIcons.Unlock()
 	loadPlugIcons()
 	if ic := plugIcons.kept[k]; ic != "" {
+		if t, ok := plugIcons.seen[k]; ok && time.Since(t) < iconSeenFor {
+			return ic
+		}
 		if f := IconFile(strings.TrimPrefix(ic, iconPrefix)); f != "" {
 			if _, err := os.Stat(f); err == nil {
+				plugIcons.seen[k] = time.Now()
 				return ic
 			}
 		}
+		delete(plugIcons.seen, k)
 	}
 	if t, ok := plugIcons.tried[k]; ok && time.Since(t) < time.Hour {
 		return ""

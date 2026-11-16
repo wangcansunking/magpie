@@ -1075,6 +1075,8 @@ for (const engine of engines) for (const theme of ["light", "dark"]) {
     const {page,f,errors}=await open(t,engine,"en",false);
     await page.evaluate(theme=>document.documentElement.dataset.theme=theme,theme);
     const enabled=page.locator("#wanInstall, #wanLogin, #wanMicrosoftLogin");
+    // Theme colors transition independently; measure their settled contrast.
+    await enabled.evaluateAll(es=>Promise.all(es.flatMap(e=>e.getAnimations().map(a=>a.finished.catch(()=>{})))));
     const styles=await enabled.evaluateAll(es=>es.map(e=>{
       const c=getComputedStyle(e),r=e.getBoundingClientRect();
       const rgb=x=>x.match(/[\d.]+/g).slice(0,3).map(Number);

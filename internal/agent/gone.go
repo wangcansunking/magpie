@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/yetone/magpie/internal/claudecode"
 	"github.com/yetone/magpie/internal/proc"
 )
 
@@ -32,7 +33,7 @@ var goneOS = runtime.GOOS
 // folder as the agent does, so the folder is no leftover; known is false
 // when magpie can't tell, which never counts as gone.
 func (a *Agent) cliHeld() (held, known bool) {
-	if a.Bin != "" && (binAt(a.Bin) != "" || proc.FindTool(a.Bin) != "") {
+	if a.Bin != "" && (a.binsOwn(binAt(a.Bin)) || a.binsOwn(proc.FindTool(a.Bin))) {
 		if a.ID != "goose" {
 			return true, true
 		}
@@ -58,12 +59,25 @@ func (a *Agent) cliHeld() (held, known bool) {
 	switch a.ID {
 	case "claude":
 		at = []string{filepath.Join(home, ".claude", "local", exe("claude"))}
+		// the Claude Code magpie downloaded for a machine with none (a
+		// server's, claudecode.Install): magpie's own runs make ~/.claude,
+		// and `magpie claude` starts it, so the folder is no leftover. A
+		// systemd service's Agents page said Claude's CLI was not found
+		// while that Claude Code answered its requests (Wing8Aqua on X).
+		if p, _ := claudecode.Downloaded(); p != "" {
+			at = append(at, p)
+		}
 	case "opencode":
 		at = []string{filepath.Join(home, ".opencode", "bin", exe("opencode"))}
 	case "codex":
 		at = []string{filepath.Join(home, ".codex", "packages", "standalone")}
 	case "hermes":
 		at = []string{filepath.Join(a.Dir, "hermes-agent")}
+		// a profile magpie connects (hermesActive): the checkout is in
+		// the root its profiles are under
+		if filepath.Base(filepath.Dir(a.Dir)) == "profiles" {
+			at = append(at, filepath.Join(filepath.Dir(filepath.Dir(a.Dir)), "hermes-agent"))
+		}
 	}
 	for _, p := range at {
 		if _, err := os.Stat(p); err == nil {

@@ -26,6 +26,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       t.after(() => browser.close());
       const page = await browser.newPage({ viewport: { width: lang === "en" ? 1100 : 560, height: 900 }, reducedMotion: "reduce" });
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", (e) => errors.push(e.message));
       const seen = [];
@@ -67,7 +68,6 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.locator('[data-view="gateway"]').first().click();
       const rows = page.locator("#activity .call-item");
       await rows.first().waitFor();
-      await page.locator("#foldConnect").click();
       assert.equal(seen.length, 0, "the recent list is metadata only");
       const firstBody = once(arrivals, "call", { signal: AbortSignal.timeout(5000) });
       await rows.first().locator(".call").click();

@@ -15,12 +15,13 @@ package provider
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -31,6 +32,7 @@ import (
 
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/settings"
 )
@@ -64,7 +66,21 @@ func DevinCredentialsPath() string {
 	return filepath.Join(base, "devin", "credentials.toml")
 }
 
-var devinStatus = &cliIdentity{name: "devin", exe: func() string { return DevinExecutable() }, ask: askDevinStatus}
+var devinStatus = &cliIdentity{name: "devin", exe: func() string { return DevinExecutable() }, ask: askDevinStatus, mark: devinSignInMark}
+
+// devinSignInMark is the key credentials.toml keeps, hashed, as the mark
+// cliIdentity asks again on a change of; "" when it can't be read.
+func devinSignInMark() string {
+	b, err := readAccountFile(DevinCredentialsPath())
+	if errors.Is(err, os.ErrNotExist) {
+		return "none"
+	}
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:8])
+}
 
 // devinIdentity is who Devin's CLI says is signed in; see cliIdentity.
 func devinIdentity() (user, plan string, ok bool) {
@@ -183,13 +199,30 @@ type DevinFamily struct {
 	Models  []catalog.Model
 }
 
+// devinRouter says id is Adaptive or Fusion (the family or its model, in
+// any case): they route between models inside Devin's own agent, and
+// Devin's chat API answers either with 502 "no API providers are
+// available". The plugin leaves them out of its list (parseFamilies).
+func devinRouter(id string) bool {
+	id = strings.ToLower(strings.TrimSpace(id))
+	return id == "adaptive" || id == "fusion"
+}
+
+// withoutDevinRouters is ids less Adaptive and Fusion.
+func withoutDevinRouters(ids []string) []string {
+	if !slices.ContainsFunc(ids, devinRouter) {
+		return ids
+	}
+	return slices.DeleteFunc(slices.Clone(ids), devinRouter)
+}
+
 // devinModelsFlatten is the family list as a flat catalog: the family's
 // follow-newest id, then each of its variants. Adaptive and Fusion, which
 // route between models inside Devin's own agent, aren't served by the API.
 func devinModelsFlatten(families []DevinFamily) []catalog.Model {
 	var out []catalog.Model
 	for _, f := range families {
-		if id := strings.ToLower(f.UID); id == "adaptive" || id == "fusion" {
+		if devinRouter(f.UID) {
 			continue
 		}
 		// Devin's own numbers, which its list gives each variant and the family
@@ -308,7 +341,7 @@ func devinDeclaredImages() map[string]*bool {
 	return out
 }
 
-var devinEffort = regexp.MustCompile(`-(none|min|minimal|low|medium|high|xhigh|max|fast|priority)$`)
+var devinEffort = lazyre.New(`-(none|min|minimal|low|medium|high|xhigh|max|fast|priority)$`)
 
 // devinKnown is models.dev's window and reply cap for a model id, with the
 // effort suffix taken off: claude-opus-5-5-high-fast has claude-opus-5-5's.
@@ -800,6 +833,35 @@ func devinTierOf(id string) (tier, level string) {
 		}
 	}
 	return "", devinLevel(id)
+}
+
+// DevinModelEffort splits a Devin variant id into the model it runs and the
+// effort it runs at, the way its own logs name a call (generation_model):
+// swe-2-high is ("swe-2", "high"), claude-opus-5-5-high-fast
+// ("claude-opus-5-5-fast", "high"), and an id that names no effort
+// (glm-5-2-1m, swe-1-6-fast) is itself with none. No family list is needed:
+// the effort and tier words are Devin's own (devinLevels, devinTiers).
+func DevinModelEffort(id string) (model, effort string) {
+	tier, level := devinTierOf(id)
+	if level == "" {
+		return id, ""
+	}
+	rest, sep := id, ""
+	if tier != "" {
+		rest, sep = id[:len(id)-len(tier)-1], id[len(id)-len(tier)-1:len(id)-len(tier)]
+	}
+	low := strings.ToLower(rest)
+	for _, l := range devinLevels {
+		if l.level != level {
+			continue
+		}
+		for _, s := range []string{"-", "_"} {
+			if strings.HasSuffix(low, s+l.word) {
+				return rest[:len(rest)-len(l.word)-1] + sep + id[len(id)-len(tier):], level
+			}
+		}
+	}
+	return id, level
 }
 
 // devinEffortOf is the effort a Devin id runs at, in a tier or not.

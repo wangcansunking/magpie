@@ -6,10 +6,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/pluginrt"
+	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 	_ "github.com/yetone/magpie/plugins/all"
 )
@@ -134,6 +137,51 @@ func TestBootSaysBuiltinsOff(t *testing.T) {
 	}
 	if b := boot(); !strings.Contains(b, `"featuresOff":["groups","otel","sessions","warmups"]`) {
 		t.Fatalf("Essentials picked: %s", b)
+	}
+}
+
+// boot.js says where the gateway listens when this process serves it, so
+// the sidebar's line is drawn before the first paint (#3429), and nothing
+// when it doesn't: one served by another magpie is the providers' read to
+// find, never this process's guess.
+func TestBootSaysWhereItsGatewayListens(t *testing.T) {
+	h := builtinHome(t)
+	t.Setenv("MAGPIE_ADDR", "127.0.0.1:3481")
+	boot := func() string {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", "/boot.js", nil))
+		return rec.Body.String()
+	}
+	prev := served.Swap(nil)
+	t.Cleanup(func() { served.Store(prev) })
+	if b := boot(); strings.Contains(b, "sideGateway") {
+		t.Fatalf("no gateway served here: %s", b)
+	}
+	served.Store(gateway.New())
+	if b := boot(); !strings.Contains(b, `"sideGateway":{"boot":true,"running":true,"url":"http://127.0.0.1:3481"}`) {
+		t.Fatalf("served here: %s", b)
+	}
+	t.Setenv("MAGPIE_ADDR", "0.0.0.0:3483")
+	// on the network, it says so, with the addresses other machines use,
+	// for the window's line to name them (coeo91 on Discord)
+	if b := boot(); !strings.Contains(b, `"sideGateway":{"boot":true,"lan":true,`) || !strings.Contains(b, `"running":true,"url":"http://127.0.0.1:3483"}`) {
+		t.Fatalf("every interface, reached on loopback: %s", b)
+	}
+	// MAGPIE_PUBLIC_URL goes with it while other machines are let in, for
+	// magpie web's page to show (noahhrreion on Discord, in Docker), and
+	// not while the gateway is this computer's alone
+	t.Setenv("MAGPIE_PUBLIC_URL", "http://nas.local:3425")
+	if b := boot(); !strings.Contains(b, `"sideGateway":{"boot":true,"lan":true,"lanURLs":["http://nas.local:3425"],"publicURL":"http://nas.local:3425","running":true,"url":"http://127.0.0.1:3483"}`) {
+		t.Fatalf("on the network, with MAGPIE_PUBLIC_URL: %s", b)
+	}
+	t.Setenv("MAGPIE_ADDR", "127.0.0.1:3483")
+	if b := boot(); strings.Contains(b, "nas.local") || strings.Contains(b, `"lan"`) {
+		t.Fatalf("on loopback, not shared: %s", b)
+	}
+	t.Setenv("MAGPIE_PUBLIC_URL", "")
+	served.Store(nil)
+	if b := boot(); strings.Contains(b, "sideGateway") {
+		t.Fatalf("stopped: %s", b)
 	}
 }
 
@@ -271,5 +319,83 @@ func TestBuiltinsTranslated(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// Web search's row says what a model that can't search is searched with
+// now (netube99 on X): nothing yet in a new home, a search API once one
+// is set, and none while it is off.
+func TestBuiltinSearchSaysWhatSearches(t *testing.T) {
+	builtinHome(t)
+	if _, err := pluginrt.Settle(); err != nil {
+		t.Fatal(err)
+	}
+	search := func() builtinJSON {
+		for _, b := range builtinsState() {
+			if b.ID == "search" {
+				return b
+			}
+		}
+		t.Fatal("no search row")
+		return builtinJSON{}
+	}
+	if b := search(); !b.On || len(b.Searches) != 0 {
+		t.Fatalf("a new home: %+v", b)
+	}
+	if err := provider.SetSearchAPI(provider.SearchAPI{Vendor: "tavily", Key: "tvly-test"}); err != nil {
+		t.Fatal(err)
+	}
+	if b := search(); !b.On || !slices.Equal(b.Searches, []string{"Tavily"}) {
+		t.Fatalf("with Tavily: %+v", b)
+	}
+	if err := provider.RemoveSearchAPI("tavily"); err != nil {
+		t.Fatal(err)
+	}
+	if err := pluginrt.Set("search", false); err != nil {
+		t.Fatal(err)
+	}
+	if b := search(); b.On || b.Searches != nil {
+		t.Fatalf("off: %+v", b)
+	}
+}
+
+// A built-in with settings says where they are, and its page on or off,
+// for its row to go to both (netube99 on X: masking's switch, settings and
+// page didn't name each other)
+func TestBuiltinSaysWhereItsSettingsAre(t *testing.T) {
+	builtinHome(t)
+	if _, err := pluginrt.Settle(); err != nil {
+		t.Fatal(err)
+	}
+	if err := pluginrt.Set("redact", false); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][3]string{
+		"redact":   {"privacy #redactList", "masking", ""},
+		"search":   {"models #searchList", "", ""},
+		"otel":     {"otel #otelList", "", ""},
+		"gateway":  {"network #portList", "gateway", ""},
+		"library":  {"", "library", ""},
+		"groups":   {"", "", "groups"},
+		"budget":   {"", "", "gateway"},
+		"rotation": {"", "", "providers"},
+		"warmups":  {"", "", "providers"},
+		"tools":    {"", "", "plugins"},
+	}
+	for _, b := range builtinsState() {
+		w, ok := want[b.ID]
+		if !ok {
+			continue
+		}
+		delete(want, b.ID)
+		if got := [3]string{b.SetAt, b.Page, b.Opens}; got != w {
+			t.Errorf("%s (on %v): %q, want %q", b.ID, b.On, got, w)
+		}
+		if b.ID == "redact" && b.On {
+			t.Error("redact stayed on")
+		}
+	}
+	if len(want) > 0 {
+		t.Errorf("not listed: %v", want)
 	}
 }

@@ -3,6 +3,7 @@
 package gui
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -30,6 +31,28 @@ func mainMacWindow() application.MacWindow {
 	}
 }
 
+// mainFrameless: the main window on Windows has no title bar of its own.
+// The page's header is its title bar, as on the Mac, so a wallpaper or the
+// page's colour runs to the top of the window instead of under a separate
+// strip (258a14 on X); the page draws minimise, maximise and close
+// (#wincap). Wails keeps the frame's styles, so the window still snaps,
+// casts its shadow and has rounded corners on Windows 11.
+func mainFrameless(goos string) bool { return goos == "windows" }
+
+// captionJS tells the page whether the window is maximised, and keeps
+// Wails' resize edges inside the page off while it is. A frameless window
+// is resized by those edges (SM_CYSIZEFRAME pixels, Wails' drag.ts), which
+// Wails arms whenever the window is resizable; maximised, they would take
+// the top-right pixel from Close and the top row from the header's drag.
+// Wails turns them on again once its script is ready, which may come
+// before this or after, so its switch is wrapped once and remembers what
+// it was last asked.
+func captionJS(maximised bool) string {
+	return fmt.Sprintf(`(()=>{const m=%t;window.magpieMaximised=m;const w=window._wails;`+
+		`if(w&&typeof w.setResizable==="function"){if(!w.setResizable.edges){const f=w.setResizable,g=v=>{g.on=v;f(!!v&&!window.magpieMaximised)};g.edges=true;g.on=true;w.setResizable=g}w.setResizable(w.setResizable.on)}`+
+		`if(typeof window.magpieCaption==="function")window.magpieCaption(m)})();`, maximised)
+}
+
 type closeAction int
 
 const (
@@ -47,12 +70,19 @@ func closeStep(goos string, fullscreen bool) closeAction {
 	return closeHide
 }
 
+// mainClosedJS tells the page its window was closed: an account shown
+// while Hide accounts is on (its eye) is hidden again, as each is shown for
+// the window's session only (yogurt36 on Discord). The page stays loaded
+// while the window is hidden, so it can't tell by itself.
+const mainClosedJS = "window.hideAccounts?.closed?.()"
+
 // hideMain hides the main window, and takes magpie out of the Dock if it is
 // there only while the window is shown.
 func (h *host) hideMain() {
 	application.InvokeSync(func() {
 		if h.main != nil {
-			h.main.Hide()
+			h.main.ExecJS(mainClosedJS)
+			hideWebview(h.main)
 		}
 	})
 	h.dock(settings.Load(), false)

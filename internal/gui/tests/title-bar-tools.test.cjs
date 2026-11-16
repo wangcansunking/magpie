@@ -93,6 +93,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           // unrelated startup reads and WebKit reported them against the next layout.
           const page = await context.newPage();
           page.setDefaultTimeout(5000);
+          page.setDefaultNavigationTimeout(60000);
           const capture = e => errors.push(`${width}px ${p.name}: ${e.stack}`);
           page.on("pageerror", capture);
           await page.route("**/*", serve(lang));

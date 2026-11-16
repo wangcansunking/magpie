@@ -1,9 +1,8 @@
 // Run with Node's test runner and Playwright on the module path; see README.md.
 // A server on this machine (Ollama, LM Studio, oMLX) is reached at another
-// port, or on another computer, by its Address, under the key in a Server
-// address section that is folded unless the provider is somewhere other
-// than the preset's default, or an address typed or refused needs it open.
-// The Address is empty with the preset's as its placeholder when it is
+// port, or on another computer, by its Server address: a field shown first,
+// above the key, and never folded away (mengxiangziyou on X read a folded
+// one as an LM Studio whose base URL can't be changed). It is empty with the preset's as its placeholder when it is
 // added, the saved one's when it is edited. The
 // Endpoints follow what is typed, each API keeping its path; Add or Save
 // sends the URLs moved there, and one that left it alone sends them as
@@ -86,6 +85,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           const saves = [], asks = [];
           const page = await (await browser.newContext({ viewport: { width, height: 760 }, reducedMotion: "reduce" })).newPage();
           page.setDefaultTimeout(5000);
+          page.setDefaultNavigationTimeout(60000);
           const errors = [];
           page.on("pageerror", (e) => errors.push(e.message));
           await watchReplies(page, ["/api/provider/save", "/api/state", "/api/provider/test"]);
@@ -105,8 +105,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
             await row.click();
           };
           const address = ed.locator("input.address");
-          const more = ed.locator("details.more", { has: page.locator("input.address") });
-          const isOpen = () => more.evaluate((d) => d.open);
+          const shown = () => address.isVisible();
           const eps = async () => (await ed.locator(".eps code").allTextContents()).join(" ");
           const press = async (name, invalid = false) => {
             const n = saves.length;
@@ -135,40 +134,18 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
             return asks.at(-1);
           };
 
-          // added: folded under the key, Server address its summary
+          // added: shown at once, Server address its label, above the key
           await page.locator("#addProvider").click();
           await reach(page, page.locator("#addSheet .tile .n", { hasText: /^Ollama$/ }));
           await page.locator("#addSheet .tile .n", { hasText: /^Ollama$/ }).click();
           await ed.locator(".ehead b", { hasText: "Ollama" }).waitFor();
-          assert.equal(await isOpen(), false, "folded when added");
-          assert.equal(await address.isVisible(), false);
-          const summary = more.locator("summary");
-          const clickSummary = async () => {
-            await page.evaluate(async () => {
-              await document.fonts.ready;
-              await Promise.all(document.getAnimations().filter(a => a.effect.getTiming().iterations !== Infinity).map(a => a.finished.catch(() => {})));
-            });
-            for (let i = 0; i < 40; i++) {
-              const at = await summary.evaluate(e => {
-                const body = e.closest(".ebody"), r = e.getBoundingClientRect(), b = body.getBoundingClientRect();
-                const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
-                return { fits: r.top >= b.top && r.bottom <= b.bottom && (hit === e || e.contains(hit)), x: b.x + b.width / 2, y: b.y + b.height / 2, dy: r.top < b.top ? -60 : 60, top: body.scrollTop };
-              });
-              if (at.fits) { await summary.click(); return; }
-              await page.mouse.move(at.x, at.y);
-              await page.mouse.wheel(0, at.dy);
-              await page.waitForFunction(top => document.querySelector("#modal .ebody").scrollTop !== top, at.top, { timeout: 1000 }).catch(() => {});
-            }
-            throw new Error("the address fold did not come into the editor viewport");
-          };
-          assert.equal(await summary.textContent(), w.more);
+          assert.equal(await shown(), true, "shown when added, nothing to open");
+          assert.equal(await ed.locator("details.more", { has: page.locator("input.address") }).count(), 0, "in no fold");
+          assert.equal(await ed.locator("label", { hasText: new RegExp("^" + w.more + "$") }).count(), 1);
           const key = ed.locator("input[type=password]").first();
-          assert((await key.boundingBox()).y < (await summary.boundingBox()).y, "the section under the key");
-          await shot("folded");
-          // opened: empty, the preset's address its placeholder
-          await clickSummary();
-          assert.equal(await address.isVisible(), true);
-          assert.equal(await ed.locator("label", { hasText: new RegExp("^" + w.field + "$") }).count(), 1);
+          assert((await address.boundingBox()).y < (await key.boundingBox()).y, "the address above the key");
+          await shot("added");
+          // empty, the preset's address its placeholder
           assert.equal(await address.inputValue(), "");
           assert.equal(await address.getAttribute("placeholder"), "http://localhost:11434");
           assert.equal(await address.locator("xpath=following-sibling::div[contains(@class,'hint')]").textContent(), w.hint);
@@ -176,13 +153,10 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           assert(box.width >= 200 && box.x + box.width <= width, `the field keeps its width: ${JSON.stringify(box)}`);
           assert.equal(await eps(), "http://localhost:11434/v1 http://localhost:11434");
 
-          // no address: said, opened, focused, nothing sent, the page where it was
+          // no address: said, focused, nothing sent, the page where it was
           await address.fill("ftp://box");
-          await clickSummary();
-          assert.equal(await isOpen(), false);
           const y = await page.evaluate(() => document.scrollingElement.scrollTop);
           assert.equal(await press(w.add, true), null);
-          assert.equal(await isOpen(), true, "opened for the refused address");
           assert.equal(await ed.locator(".editor-error").textContent(), w.bad);
           assert.equal(await page.evaluate(() => document.activeElement?.classList.contains("address")), true);
           assert.equal(await page.evaluate(() => document.scrollingElement.scrollTop), y);
@@ -203,7 +177,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           // edited: the address it is at; left alone, none is sent
           await openProvider(/^oMLX$|oMLX(?! Apart)/);
           await ed.locator(".ehead b", { hasText: /^oMLX$/ }).waitFor();
-          assert.equal(await isOpen(), true, "open for an address not the preset's");
+          assert.equal(await shown(), true);
           assert.equal(await address.inputValue(), "http://192.168.1.5:8000");
           let s = await press(w.save);
           assert.equal("address" in s, false);
@@ -241,7 +215,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           // URLs set apart, saved with the address untouched, stay apart
           await openProvider("oMLX Apart");
           await ed.locator(".ehead b", { hasText: "oMLX Apart" }).waitFor();
-          assert.equal(await isOpen(), true);
+          assert.equal(await shown(), true);
           assert.equal(await address.inputValue(), "http://10.0.0.2:8000");
           const apartEps = "http://10.0.0.2:8000/v1 http://10.0.0.3:9000";
           assert.equal(await eps(), apartEps);
@@ -283,10 +257,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           assert.equal(s.chat, "http://10.0.0.2:8000/v1");
           assert.equal(s.anthropic, "http://10.0.0.3:9000");
 
-          // one where the preset puts it: folded, and saved as it is
+          // one where the preset puts it: shown too, there to change, and
+          // saved as it is
           await page.locator(".row.provider", { hasText: "LM Studio" }).click();
           await ed.locator(".ehead b", { hasText: "LM Studio" }).waitFor();
-          assert.equal(await isOpen(), false, "folded at the preset's address");
+          assert.equal(await shown(), true, "shown at the preset's address");
           assert.equal(await address.inputValue(), "http://localhost:1234");
           s = await press(w.save);
           assert.equal("address" in s, false);

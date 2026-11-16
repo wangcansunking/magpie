@@ -35,16 +35,17 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/lastgood"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/update"
@@ -146,7 +147,7 @@ func WhyOf(err error) *MoveWhy {
 
 // unreachable is an install that never got through to npm (or to Bun's
 // download): Bun's words for it, and Go's.
-var unreachable = regexp.MustCompile(`(?i)ConnectionRefused|ConnectionClosed|FailedToOpenSocket|ENOTFOUND|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|Unable to connect|network|no such host|dial tcp|i/o timeout|TLS handshake`)
+var unreachable = lazyre.New(`(?i)ConnectionRefused|ConnectionClosed|FailedToOpenSocket|ENOTFOUND|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|Unable to connect|network|no such host|dial tcp|i/o timeout|TLS handshake`)
 
 // installFailed says why the plugin couldn't be installed.
 func installFailed(pkg string, err error) error {
@@ -181,6 +182,9 @@ type movedAccount struct {
 	Key  string `json:"key"`
 	User string `json:"user"`
 	Own  bool   `json:"own,omitempty"`
+	// ID is the vendor's id of the account (WorkBuddy's uid), where the
+	// mover reads one: two accounts of one name are told apart by it.
+	ID string `json:"id,omitempty"`
 	// Was is what the plugin kept at Key before, when the user had signed
 	// in to the same account through the plugin already.
 	Was map[string]any `json:"was,omitempty"`
@@ -199,28 +203,39 @@ func signinHash(a map[string]any) string {
 // sent: the built-in renewed them while the move went on (a request, a
 // refresh) and, a refresh token being spent once used, the plugin's copy
 // may be dead.
-func renewedSince(mv *mover, moved []movedAccount) []string {
+func renewedSince(mv *mover, moved []movedAccount) []movedAccount {
 	now, err := mv.out()
 	if err != nil {
 		return nil
 	}
-	var out []string
+	var out []movedAccount
 	for _, ma := range moved {
 		if ma.Own {
 			continue
 		}
-		for _, a := range now {
-			if strings.EqualFold(a.User, ma.User) && signinHash(a.Auth) != ma.Sent {
-				out = append(out, ma.User)
-			}
+		if slices.ContainsFunc(now, func(a Moving) bool { return !a.Own && a.same(ma) && signinHash(a.Auth) != ma.Sent }) {
+			out = append(out, ma)
 		}
 	}
 	return out
 }
 
+// same is whether a is the account moved as ma: by the vendor's id where
+// both have one, a name being no one's own (wakkana on Discord), else by
+// name.
+func (a Moving) same(ma movedAccount) bool {
+	if a.ID != "" && ma.ID != "" {
+		return a.ID == ma.ID
+	}
+	return strings.EqualFold(a.User, ma.User)
+}
+
 // Moving is one of a built-in's accounts on its way to the plugin.
 type Moving struct {
-	User      string
+	User string
+	// ID is the vendor's id of the account, where the built-in kept one
+	// (WorkBuddy's uid).
+	ID        string
 	First, On bool
 	// Lapsed is an account the vendor already refused: it goes along, but
 	// isn't tried.
@@ -278,7 +293,26 @@ func Movable(id string) bool { return movers[id] != nil }
 // is listed by MoveCandidates with why, until it moves. The built-ins are
 // retired one by one, each with its code (the owner, 10-16: 陆续把内置
 // Provider下线掉), so this is the set retired so far.
-func BuiltinRetired(id string) bool { return Movable(id) && retiredBuiltins[id] }
+func BuiltinRetired(id string) bool {
+	if id == "antigravity" && antigravityBuiltinForTest.Load() > 0 {
+		return false
+	}
+	return Movable(id) && retiredBuiltins[id]
+}
+
+// antigravityBuiltinForTest counts the tests that serve the built-in
+// Antigravity again (AntigravityBuiltinForTest).
+var antigravityBuiltinForTest atomic.Int32
+
+// AntigravityBuiltinForTest serves the built-in Antigravity again until the
+// returned func runs. Its route has served nothing since it was retired on
+// 11-15, and its code is still shared with Gemini CLI's: the tests of that
+// route use this until the code is taken out (#6723).
+func AntigravityBuiltinForTest() func() {
+	antigravityBuiltinForTest.Add(1)
+	var once sync.Once
+	return func() { once.Do(func() { antigravityBuiltinForTest.Add(-1) }) }
+}
 
 // retiredBuiltins are the built-in subscriptions whose code is gone.
 var retiredBuiltins = map[string]bool{
@@ -295,6 +329,11 @@ var retiredBuiltins = map[string]bool{
 	"grok":            true,
 	"devin":           true,
 	CommandCodePlanID: true,
+	// Google bans accounts it sees on Code Assist through Antigravity's
+	// own client (the owner, 11-15): the built-in asks Google nothing, and
+	// its plugin serves the users who have it, withdrawn for anyone new
+	// (plugin.WithdrawnOf), who are pointed to Antigravity (local agy CLI)
+	"antigravity": true,
 }
 
 // PluginServes is whether the built-in id's subscription is its plugin's to
@@ -325,7 +364,14 @@ type MoveCandidate struct {
 }
 
 // MoveCandidates are the built-ins not on their plugins that have accounts
-// to move, by name.
+// to move, by name. One whose plugin the user removed (MoveRemoved) is
+// none: its accounts moved already and are kept with the plugin's sign-ins,
+// and installing the plugin again gives it back (HandOver), as MoveRetiring
+// and HandOver leave it too. A login row of the built-in's left behind kept
+// it here, so the Providers page's line said its accounts "haven't moved
+// yet" for good, with a Move that would install the plugin the user had
+// just removed (plugins#404: Grok, after the plugin, the provider and its
+// sign-ins were removed; #3542: ZCode).
 func MoveCandidates() []MoveCandidate {
 	if settings.AccountDiscoveryOff() {
 		return nil
@@ -333,6 +379,9 @@ func MoveCandidates() []MoveCandidate {
 	out := []MoveCandidate{}
 	for id, mv := range movers {
 		if Moved(id) {
+			continue
+		}
+		if m, ok := MigrationOf(id); ok && m.State == MoveRemoved {
 			continue
 		}
 		if accts, err := mv.out(); err == nil && len(accts) > 0 {
@@ -346,6 +395,10 @@ func MoveCandidates() []MoveCandidate {
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
 }
+
+// a retired subscription's id names its plugin to `magpie plugin add`
+// and the Plugins page's field (qoder-cn, commandcode-plan)
+func init() { plugin.SubscriptionPlugin = MovePackage }
 
 // MovePackage is the plugin the built-in id moves to.
 func MovePackage(id string) string {
@@ -539,6 +592,9 @@ var (
 	// so a test can read what it is handed
 	addPlugin     = plugin.Add
 	upgradePlugin = plugin.Upgrade
+	// addPluginExact is a backup's or a sync's install: the spec as the
+	// other computer has it, never taken for a name
+	addPluginExact = plugin.AddExact
 	// importAuth keeps a built-in's sign-in as one of the plugin's
 	importAuth = plugin.Import
 )
@@ -642,7 +698,9 @@ func move(ctx context.Context, id string, mv *mover) (err error) {
 		return fmt.Errorf("no %s account to move", id)
 	}
 	had := pluginListed(mv.pkg)
-	if err := installPlugin(ctx, mv.pkg, mv.min); err != nil {
+	// the user's own accounts: a package withdrawn for anyone new is
+	// still theirs (plugin.KeepWithdrawn)
+	if err := installPlugin(plugin.KeepWithdrawn(ctx), mv.pkg, mv.min); err != nil {
 		return installFailed(mv.pkg, err)
 	}
 	installed := !had
@@ -688,7 +746,7 @@ func move(ctx context.Context, id string, mv *mover) (err error) {
 		if err != nil {
 			return fmt.Errorf("%s: %w", a.User, err)
 		}
-		ma := movedAccount{Key: key, User: a.User, Own: a.Own, Was: before[key], Sent: signinHash(a.Auth)}
+		ma := movedAccount{Key: key, User: a.User, Own: a.Own, ID: a.ID, Was: before[key], Sent: signinHash(a.Auth)}
 		moved = append(moved, ma)
 		if err := setMigration(id, func(m *Migration) { m.Accounts = moved }); err != nil {
 			return err
@@ -769,7 +827,11 @@ func keepOrder(pp plugin.Provider, accts []Moving, moved []movedAccount) error {
 // commitMove hands the id over: the built-in's accounts go aside.
 func commitMove(id string, mv *mover, moved []movedAccount, installed bool, host string) error {
 	if r := renewedSince(mv, moved); len(r) > 0 {
-		return fmt.Errorf("%s renewed while moving; tried again later", strings.Join(r, ", "))
+		var users []string
+		for _, ma := range r {
+			users = append(users, ma.User)
+		}
+		return fmt.Errorf("%s renewed while moving; tried again later", strings.Join(users, ", "))
 	}
 	var kept json.RawMessage
 	if mv.take != nil {
@@ -848,7 +910,7 @@ func putBack(ctx context.Context, id string, mv *mover, why string) {
 	}
 	renewed := renewedSince(mv, m.Accounts)
 	skip := func(ma movedAccount, a map[string]any) bool {
-		return signinHash(a) == ma.Sent || slices.ContainsFunc(renewed, func(u string) bool { return strings.EqualFold(u, ma.User) })
+		return signinHash(a) == ma.Sent || slices.ContainsFunc(renewed, func(r movedAccount) bool { return r.Key == ma.Key })
 	}
 	_, _, _ = handBack(ctx, id, mv, m.Accounts, keys, skip, nil, func(ls []savedLogin, _ map[string]string) []savedLogin { return ls })
 	for _, ma := range m.Accounts {
@@ -1076,7 +1138,7 @@ func keepMovedCurrent(ctx context.Context) {
 		if mv.min == "" {
 			continue
 		}
-		if err := installPlugin(ctx, mv.pkg, mv.min); err != nil {
+		if err := installPlugin(plugin.KeepWithdrawn(ctx), mv.pkg, mv.min); err != nil {
 			log.Printf("updating %s's plugin: %s", id, err)
 		}
 	}
@@ -1146,12 +1208,36 @@ func MovedOnto(name string) []string {
 	return out
 }
 
+// PluginAgentGoing, set by internal/agent, takes magpie out of the config
+// of the agent the plugin spec adds and puts back what the user had, as
+// `magpie <agent> default` does. It runs before the plugin is turned off
+// or removed, while magpie still knows the agent: after, nothing could
+// (#3810).
+var PluginAgentGoing func(spec string) error
+
+// agentGoing runs PluginAgentGoing for the installed plugin named; an
+// error keeps the plugin as it is.
+func agentGoing(name, left string) error {
+	spec := installedSpec(name)
+	if spec == "" || PluginAgentGoing == nil {
+		return nil
+	}
+	if err := PluginAgentGoing(spec); err != nil {
+		return fmt.Errorf("%s is left %s: magpie couldn't put back its agent's config as it was (%w); switch the agent off magpie first", name, left, err)
+	}
+	return nil
+}
+
 // RemovePlugin removes the plugin named and sets aside the model picks of
 // its providers it leaves in providers.json (plugin_left.go). A built-in
 // moved onto it isn't moved back, as the built-in is going: it is
 // MoveRemoved, its accounts kept with the plugin's sign-ins for when the
-// plugin is installed again.
+// plugin is installed again. The agent it adds is taken off magpie first
+// (PluginAgentGoing).
 func RemovePlugin(ctx context.Context, name string) error {
+	if err := agentGoing(name, "installed"); err != nil {
+		return err
+	}
 	// what it served is read while it is still on the list
 	moved := MovedOnto(name)
 	spec := installedSpec(name)
@@ -1178,7 +1264,14 @@ func RemovePlugin(ctx context.Context, name string) error {
 
 // SetPluginOff turns the plugin named off, or back on. A built-in moved
 // onto it stays moved, off with it: nothing moves it back, as the built-in
-// is going.
+// is going. The agent it adds is taken off magpie before it is off
+// (PluginAgentGoing), and stays off when it is on again: the agent's
+// switch puts back the model it was on.
 func SetPluginOff(_ context.Context, name string, off bool) error {
+	if off {
+		if err := agentGoing(name, "on"); err != nil {
+			return err
+		}
+	}
 	return plugin.SetOff(name, off)
 }

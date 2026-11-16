@@ -104,7 +104,7 @@ func sessionRouteOf(r Route) SessionRoute {
 // secret the key can be trusted to lack.
 func (s *Server) sessionRoute(w http.ResponseWriter, r *http.Request) {
 	if !local(r) && !sharedWith(r) {
-		writeError(w, provider.Chat, http.StatusForbidden, "magpie's routes are told to another machine only when magpie is shared on the local network (Settings → Share on local network) and the request carries its API key (Authorization: Bearer <key> or x-api-key: <key>)")
+		writeError(w, provider.Chat, http.StatusForbidden, "magpie's routes are told to another machine only when magpie is shared on the local network (Settings → Network and sharing → Share on local network) and the request carries its API key (Authorization: Bearer <key> or x-api-key: <key>)")
 		return
 	}
 	q := r.URL.Query()
@@ -145,7 +145,7 @@ func (t *trace) sessionLatest(ctx context.Context, session, only string, after i
 		var seq int64
 		var found *Route
 		for i := len(t.routes) - 1; i >= 0; i-- {
-			if r := t.routes[i]; r.Session == session && (only == "" || r.callerKey == only) {
+			if r := t.routes[i]; r.Session == session && (only == "" || r.CallerKey == only) {
 				c := *r
 				c.Order = append([]Weighed{}, r.Order...) // [] for none: the GUI reads it as a list
 				c.Left = append([]Weighed(nil), r.Left...)

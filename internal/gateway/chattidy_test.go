@@ -1,8 +1,10 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -148,5 +150,129 @@ func TestChatTidyToolCallNames(t *testing.T) {
 	if strings.Contains(out, `"name":""`) || !strings.Contains(out, `"arguments":"a"`) ||
 		!strings.Contains(out, `"arguments":"b"`) || !strings.Contains(out, `"arguments":"c"`) {
 		t.Fatalf("got %q", out)
+	}
+}
+
+// A streamed call with no index is given its call's (#3386): one index for
+// a call's fragments, the next for the next call (a new id, or a later
+// place in its delta), each choice its own, a null index none. A stream
+// whose calls have their index goes as it came.
+func TestChatTidyGivesCallsAnIndex(t *testing.T) {
+	var tidy chatTidy
+	for i, c := range []struct {
+		choices string
+		want    [][]float64 // each choice's calls' indexes
+	}{
+		{`[{"index":0,"delta":{"tool_calls":[{"id":"a","type":"function","function":{"name":"grep","arguments":""}}]}}]`, [][]float64{{0}}},
+		{`[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":"{\"pat"}}]}}]`, [][]float64{{0}}},
+		{`[{"index":1,"delta":{"tool_calls":[{"id":"x","type":"function","function":{"name":"ls","arguments":"{}"}}]}}]`, [][]float64{{0}}},
+		{`[{"index":0,"delta":{"tool_calls":[{"id":"a","function":{"arguments":"tern\"}"}}]}}]`, [][]float64{{0}}},
+		{`[{"index":0,"delta":{"tool_calls":[{"id":"b","type":"function","function":{"name":"ls","arguments":"{}"}},{"type":"function","function":{"name":"cat","arguments":"{"}}]}}]`, [][]float64{{1, 2}}},
+		{`[{"index":0,"delta":{"tool_calls":[{"index":null,"function":{"arguments":"}"}}]}}]`, [][]float64{{2}}},
+		{`[{"index":0,"delta":{"tool_calls":[{"id":"d","type":"function","function":{"name":"pwd","arguments":"{}"}}]}},{"index":1,"delta":{"tool_calls":[{"id":"y","type":"function","function":{"name":"pwd","arguments":"{}"}}]}}]`, [][]float64{{3}, {1}}},
+	} {
+		out := tidy.write([]byte(`data: {"choices":` + c.choices + "}\n"))
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					ToolCalls []map[string]any `json:"tool_calls"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal(bytes.TrimPrefix(bytes.TrimSpace(out), []byte("data:")), &chunk); err != nil {
+			t.Fatalf("line %d unreadable %q: %v", i, out, err)
+		}
+		var got [][]float64
+		for _, ch := range chunk.Choices {
+			var idx []float64
+			for _, tc := range ch.Delta.ToolCalls {
+				n, ok := tc["index"].(float64)
+				if !ok {
+					n = -1
+				}
+				idx = append(idx, n)
+			}
+			got = append(got, idx)
+		}
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("line %d: indexes %v, want %v: %s", i, got, c.want, out)
+		}
+	}
+
+	indexed := `data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"ls","arguments":"{}"}},{"index":1,"id":"call_2","type":"function","function":{"name":"pwd","arguments":"{}"}}]}}]}` + "\n"
+	var other chatTidy
+	if out := string(other.write([]byte(indexed))); out != indexed {
+		t.Fatalf("a stream with its indexes changed: %q", out)
+	}
+}
+
+// A second parallel call sent on the first one's index (jiezhengj on
+// Discord: OpenDesign's amr-link numbered three calls 0,0,1) goes by an
+// index of its own, with every later fragment at that index, and the
+// call after it by the next: 0,1,2. A client that adds fragments up by
+// index wrote the two calls' arguments into one and ended the turn. A
+// fragment that only carries arguments keeps its index's call whatever
+// id it has.
+func TestChatTidyRenumbersAReusedIndex(t *testing.T) {
+	var tidy chatTidy
+	frames := []string{
+		`{"index":0,"id":"call_00_a","type":"function","function":{"name":"read_file","arguments":""}}`,
+		`{"index":0,"function":{"arguments":"{\"path\":\"/etc/hostname\"}"}}`,
+		`{"index":0,"id":"call_01_b","type":"function","function":{"name":"list_dir","arguments":""}}`,
+		`{"index":0,"function":{"arguments":"{\"path\":"}}`,
+		`{"index":0,"id":"rotated","function":{"arguments":"\"/etc\"}"}}`,
+		`{"index":1,"id":"call_02_c","type":"function","function":{"name":"write_file","arguments":""}}`,
+		`{"index":1,"function":{"arguments":"{}"}}`,
+	}
+	want := []float64{0, 0, 1, 1, 1, 2, 2}
+	for i, f := range frames {
+		out := tidy.write([]byte(`data: {"id":"resp_02","choices":[{"index":0,"delta":{"tool_calls":[` + f + `]}}]}` + "\n"))
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					ToolCalls []map[string]any `json:"tool_calls"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal(bytes.TrimPrefix(bytes.TrimSpace(out), []byte("data:")), &chunk); err != nil {
+			t.Fatalf("frame %d unreadable %q: %v", i, out, err)
+		}
+		if got := chunk.Choices[0].Delta.ToolCalls[0]["index"]; got != want[i] {
+			t.Errorf("frame %d: index %v, want %v: %s", i, got, want[i], out)
+		}
+	}
+}
+
+// hixonchan on X (OpenDesign, deepseek-v4.1-flash): a reply of one
+// sentence and then three parallel calls came with Responses'
+// output_index as the calls' index, the text holding 0: 1,1,2,3. A client
+// that keeps calls in an array by index broke on the gap. The calls go
+// by 0, 1, 2 in the order they start.
+func TestChatTidyNumbersCallsFromZero(t *testing.T) {
+	var tidy chatTidy
+	frames := []string{
+		`{"index":1,"id":"call_a","type":"function","function":{"name":"read_file","arguments":""}}`,
+		`{"index":1,"function":{"arguments":"{\"path\":\"a\"}"}}`,
+		`{"index":2,"id":"call_b","type":"function","function":{"name":"list_dir","arguments":""}}`,
+		`{"index":2,"function":{"arguments":"{}"}}`,
+		`{"index":3,"id":"call_c","type":"function","function":{"name":"pwd","arguments":""}}`,
+		`{"index":3,"function":{"arguments":"{}"}}`,
+	}
+	want := []float64{0, 0, 1, 1, 2, 2}
+	for i, f := range frames {
+		out := tidy.write([]byte(`data: {"id":"resp_03","choices":[{"index":0,"delta":{"tool_calls":[` + f + `]}}]}` + "\n"))
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					ToolCalls []map[string]any `json:"tool_calls"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal(bytes.TrimPrefix(bytes.TrimSpace(out), []byte("data:")), &chunk); err != nil {
+			t.Fatalf("frame %d unreadable %q: %v", i, out, err)
+		}
+		if got := chunk.Choices[0].Delta.ToolCalls[0]["index"]; got != want[i] {
+			t.Errorf("frame %d: index %v, want %v: %s", i, got, want[i], out)
+		}
 	}
 }

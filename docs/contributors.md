@@ -1,4 +1,4 @@
-# Community PRs: what is closed unreviewed, and who is blocked
+# Community PRs: what is closed unreviewed, who is credited, and who is blocked
 
 magpie merges community PRs through agents. Two things keep that from
 wearing the project down: a PR that could harm users is caught before any
@@ -34,6 +34,22 @@ Close with a short reason, without running it, a PR that:
 - is a resubmission of a PR closed for its idea, with nothing new to answer
   the reason it was closed;
 - is one of several near-identical PRs opened seconds apart.
+
+## Credit what a reporter gave
+
+PRs are open to collaborators only, so a reporter's fix often arrives in
+an issue. Whoever uses it credits it in the commit:
+
+- A fix branch on the reporter's fork is merged with their commits as they
+  are, authored by them. The look-for-harm check above applies to it
+  first. What has to change goes in a commit of our own on top, and the
+  issue says what changed and why.
+- A fix that uses the reporter's patch, test fixture, request body, error
+  text or root cause carries `Co-authored-by: <login> <email>` for them.
+  Use their noreply address, `<id>+<login>@users.noreply.github.com`
+  (`gh api users/<login> --jq .id`), when no other address is known.
+- A report that only says something is broken is named in the body
+  (`#<n>, <login>`), with no trailer.
 
 ## Blocking an author
 
@@ -81,6 +97,8 @@ reviewed, but more strictly than others:
 | Author | Evidence |
 | --- | --- |
 | lunar-me | #233, #234, #235 opened within 12 seconds, all rewriting `codex_prompt.md`, which is kept byte for byte. #590 resubmitted after the rejection. #592 broke a path in AGENTS.md. #590, #592 and #593 opened within 51 seconds. The same template across many repositories. |
+| muzimu217 (commits as blackEvil217) | plugins#601 (11-11) added a Doubao plugin the maintainer declined on 10-06 (it needs bot-detection evasion). It reads Doubao.app's HttpOnly session cookies over CDP, clicks through Doubao's reward campaigns and schedules throwaway jobs to earn credits ("anti-abuse hardening"), copies a .dmg from ~/Downloads into /Applications and pkills the app. It also adds a third-party relay (relay.mirasim.ai), which stops a review by itself. Closed unrun. |
+| luo173176 | plugins#1176 (11-15) adds Perch as a provider. It reads every Chrome, Edge, Brave and Chromium cookie jar for any `sb-*-auth-token`, with no `host_key` check, and refreshes the first one at Perch's Supabase, so another site's session can reach Perch. It spawns a local Python with `curl_cffi` for a Chrome TLS fingerprint. Its README describes getting past Perch's suspensions: a sentence lifted from Perch's prompt as a `CANARY`, and a faked `cli-turn` record on every turn. After the review stopped it, the next push (6b98644e2) answered none of this and added `unbrand()`, which rewrites "DSH" and "DeepSeek Harness" in the user's messages and tool schemas so Perch can't tell who is calling. Fair since: d4ef0e7f4 limited the scan to Perch's own jar and `perchai.app` cookies, and the rewrite to the host's own system sentences; the client mimicry is held for the maintainer, unrun. |
 
 ### Watched
 
@@ -89,4 +107,4 @@ and not extra care: the review checks the named gaps before merging.
 
 | Author | Check | Evidence |
 | --- | --- | --- |
-| ggbdpq | Break each fix by hand and see its new test go red. Grep for the sibling sites (other deciders, other routes, other providers, other agents) the change didn't touch. Check what a failed read becomes. | On 10-13 two of their batches needed a follow-up. 44b5b2b96 and e21b1dbc1 were merged with tests that pass on the old code. 4ed379f11 decoded `\uXXXX` at four sites but left three deciders reading the raw body, and one site had no test (0c6752dbd). #1919 (90ac1f038) mended a renamed provider's models for StepCode only; Pi, OmO and Prime Agent followed in cb003877f. #2017's patch kept an unreadable codex-autoreset.json aside but still read it as "no reset spent", so its own crash-and-restart case spent a second reset (fixed at the read in e297a8ab2). On 10-14 94e3b3f52 came from a patch marked "wip and unverified" on its branch: json.Valid let an object through to be written over, and the review finished it. Better since: eb0d5750f, ca5dc773c, f348ff2c7, 7a6b10104 and 05107bf03 each have a test red before and green after, and #2256 was a careful security report. |
+| ggbdpq | Break each fix by hand and see its new test go red. Grep for the sibling sites (other deciders, other routes, other providers, other agents) the change didn't touch. Check what a failed read becomes. Check each value a new encoder can send against the vendor's docs, and diff their doc edits against main's current text. | On 10-13 two of their batches needed a follow-up. 44b5b2b96 and e21b1dbc1 were merged with tests that pass on the old code. 4ed379f11 decoded `\uXXXX` at four sites but left three deciders reading the raw body, and one site had no test (0c6752dbd). #1919 (90ac1f038) mended a renamed provider's models for StepCode only; Pi, OmO and Prime Agent followed in cb003877f. #2017's patch kept an unreadable codex-autoreset.json aside but still read it as "no reset spent", so its own crash-and-restart case spent a second reset (fixed at the read in e297a8ab2). On 10-14 94e3b3f52 came from a patch marked "wip and unverified" on its branch: json.Valid let an object through to be written over, and the review finished it. Better since: eb0d5750f, ca5dc773c, f348ff2c7, 7a6b10104 and 05107bf03 each have a test red before and green after, and #2256 was a careful security report. On 11-14 two of their patches needed the review again: fee33668d (#5452) sent a file of any type as an Anthropic `document` and a Responses `input_file`, where Anthropic's base64 document takes only a PDF, so a .docx that used to go as a note would 400 the whole turn (7a9c40413 sends only a PDF). Their #5197 patch put an older text back over the Codex model-list bullet in gateway-routing.md; the review kept main's (131037e2b). |

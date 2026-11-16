@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/provider"
@@ -59,6 +61,10 @@ type agentModelJSON struct {
 	// Own: one of Codex's own, a ChatGPT account's, which Codex lists
 	// ahead of magpie's until the user puts them in an order (#855)
 	Own bool `json:"own,omitempty"`
+	// Kept: the agent's visibility (magpie visible) keeps it out of its
+	// lists, so it is off; ticked, the list sends it as widen, and its
+	// provider or group is listed (whysugarsweet on X)
+	Kept bool `json:"kept,omitempty"`
 }
 
 // takesCatalog reports whether an agent picks among magpie's catalog: some
@@ -76,8 +82,21 @@ func takesCatalog(fields []fieldJSON) bool {
 
 // agentFields are an agent's pickers as the Agents page draws them.
 func agentFields(a *agent.Agent, vals map[string]string) []fieldJSON {
+	return fieldsOf(a, vals, false)
+}
+
+// ownFields are its settings of the user's own (agent.Field.Own), which
+// its Settings fold under Advanced and no picker draws.
+func ownFields(a *agent.Agent, vals map[string]string) []fieldJSON {
+	return fieldsOf(a, vals, true)
+}
+
+func fieldsOf(a *agent.Agent, vals map[string]string, own bool) []fieldJSON {
 	out := []fieldJSON{}
 	for _, f := range a.Fields {
+		if f.Own != own {
+			continue
+		}
 		opts := a.Picks(f, vals)
 		if opts == nil {
 			opts = []agent.Option{}
@@ -106,7 +125,49 @@ func agentModelCount(a *agent.Agent, fields []fieldJSON) *modelCountJSON {
 	return nil
 }
 
+// modelCounts keeps each agent's count while provider.StampNow stays the
+// same, for a minute at most, as the agents' model lists are kept
+// (agent's magpieModelsFor): every poll of the Agents page counted each
+// agent's list anew, ListedFor built whole for a number (0.27 GB of the
+// 2.6 GB a real config allocated over 20 polls).
+var modelCounts struct {
+	sync.Mutex
+	m map[string]keptCount
+}
+
+type keptCount struct {
+	c     modelCountJSON
+	stamp provider.Stamp
+	at    time.Time
+}
+
+// modelCountFor is how long a count is kept while the stamp says nothing
+// changed: what it can't see (another app rewriting an account's file, a
+// model retired by its date) reaches the count within it.
+const modelCountFor = time.Minute
+
 func modelCount(id string) *modelCountJSON {
+	modelCounts.Lock()
+	k, ok := modelCounts.m[id]
+	modelCounts.Unlock()
+	// the stamp is read before the count is made: a change while it is
+	// moves it past the one kept, and the next call counts again
+	stamp := provider.StampNow()
+	if !ok || k.stamp != stamp || time.Since(k.at) >= modelCountFor {
+		k = keptCount{countModels(id), stamp, time.Now()}
+		modelCounts.Lock()
+		if modelCounts.m == nil {
+			modelCounts.m = map[string]keptCount{}
+		}
+		modelCounts.m[id] = k
+		modelCounts.Unlock()
+	}
+	c := k.c
+	c.By, c.Names = slices.Clone(c.By), slices.Clone(c.Names)
+	return &c
+}
+
+func countModels(id string) modelCountJSON {
 	listed, _ := provider.ListedFor(id)
 	off := provider.ModelOff(id)
 	c := &modelCountJSON{Listed: len(listed)}
@@ -131,7 +192,7 @@ func modelCount(id string) *modelCountJSON {
 		}
 		c.By[i].N++
 	}
-	return c
+	return *c
 }
 
 // usedBy reports whether one of the agent's values is the entry: its id,
@@ -154,13 +215,19 @@ func usedBy(a *agent.Agent, vals map[string]string, e provider.Entry) bool {
 
 func agentModelList(a *agent.Agent) []agentModelJSON {
 	id := a.ListsFor()
-	listed, _ := provider.ListedFor(id)
+	listed, kept := provider.ListedFor(id)
 	off := provider.ModelOff(id)
 	vals := a.Values()
 	out := []agentModelJSON{}
-	for _, e := range listed {
+	// the ones its visibility keeps after the rest, off, so a provider
+	// added after the agent was narrowed is still in its list to tick
+	n := len(listed)
+	for i, e := range append(listed, kept...) {
 		m := agentModelJSON{ID: e.ID, Name: e.Name, Group: e.Provider.Name, Icon: e.Provider.Icon, Context: e.Context,
 			Hidden: off(e.ID), InUse: usedBy(a, vals, e), Own: id == "codex" && provider.CodexOwn(e)}
+		if i >= n {
+			m.Hidden, m.Kept = true, true
+		}
 		if m.Name == "" {
 			m.Name = e.Model
 		}
@@ -240,6 +307,9 @@ func agentModelsAPI(mux *http.ServeMux) {
 			Only   *bool
 			// OwnHidden, sent as ownHidden
 			OwnHidden *bool
+			// Widen: models its visibility keeps that were ticked, whose
+			// providers or groups it is shown from now on
+			Widen []string
 		}
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			fail(rw, err)
@@ -279,8 +349,18 @@ func agentModelsAPI(mux *http.ServeMux) {
 			answer()
 			return
 		}
+		if err := provider.Widen(id, in.Widen); err != nil {
+			fail(rw, err)
+			return
+		}
 		used := map[string]bool{}
-		listed := agentModelList(a)
+		// what the visibility still keeps is neither picked nor taken out:
+		// it isn't listed
+		keptID := map[string]bool{}
+		listed := slices.DeleteFunc(agentModelList(a), func(m agentModelJSON) bool {
+			keptID[m.ID] = m.Kept
+			return m.Kept
+		})
 		for _, m := range listed {
 			used[m.ID] = m.InUse
 		}
@@ -325,7 +405,7 @@ func agentModelsAPI(mux *http.ServeMux) {
 		} else {
 			hidden = in.Hidden
 		}
-		hidden = slices.DeleteFunc(slices.Clone(hidden), func(s string) bool { return used[s] })
+		hidden = slices.DeleteFunc(slices.Clone(hidden), func(s string) bool { return used[s] || keptID[s] })
 		if err := provider.SetHiddenModels(id, hidden); err != nil {
 			fail(rw, err)
 			return

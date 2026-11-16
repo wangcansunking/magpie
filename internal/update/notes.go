@@ -7,10 +7,13 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
+
+	"github.com/yetone/magpie/internal/lazyre"
+	"github.com/yetone/magpie/internal/settings"
 )
 
 // Note is one release's notes, as the app shows them after an update.
@@ -18,6 +21,8 @@ type Note struct {
 	Version string `json:"version"` // no v
 	Notes   string `json:"notes"`   // markdown, its Install section taken out
 	URL     string `json:"url,omitempty"`
+	// Pending: a release after the one running, up to the update waiting
+	Pending bool `json:"pending,omitempty"`
 }
 
 // NotesFeed is where the notes of past releases are listed: beside the
@@ -39,10 +44,44 @@ func ReleasePage(version string) string {
 // (none when "") up to and including upto, newest first, in lang (see
 // InLang).
 func NotesBetween(ctx context.Context, after, upto, lang string) ([]Note, error) {
+	notes, _, err := NotesBetweenTotal(ctx, after, upto, lang)
+	return notes, err
+}
+
+// NotesBetweenTotal is NotesBetween with how many releases there are in
+// all before MostNotes keeps the newest, so a list cut short can say so
+// (sujingshen on X: 156 releases behind read "40 releases").
+func NotesBetweenTotal(ctx context.Context, after, upto, lang string) ([]Note, int, error) {
 	q := url.Values{"upto": {upto}}
 	if after != "" {
 		q.Set("after", after)
 	}
+	notes, err := askNotes(ctx, q, lang)
+	if err != nil {
+		return nil, 0, err
+	}
+	all := between(notes, after, upto)
+	return capNotes(all), len(all), nil
+}
+
+// BackCounts are the ranges Settings' What's new offers besides the notes
+// since the last update: this version and that many before it (Linka on
+// Discord).
+var BackCounts = []int{10, 20, 50, 100}
+
+// NotesBack asks the site for the notes of upto and the n releases before
+// it, newest first, in lang. The site is asked for those alone (limit); one
+// from before it took a limit sends them all, and Back keeps n+1.
+func NotesBack(ctx context.Context, upto string, n int, lang string) ([]Note, error) {
+	notes, err := askNotes(ctx, url.Values{"upto": {upto}, "limit": {strconv.Itoa(n + 1)}}, lang)
+	if err != nil {
+		return nil, err
+	}
+	return Back(notes, upto, n), nil
+}
+
+// askNotes is the site's list for q, each release's notes in lang.
+func askNotes(ctx context.Context, q url.Values, lang string) ([]Note, error) {
 	if lang != "" {
 		q.Set("lang", lang)
 	}
@@ -67,7 +106,7 @@ func NotesBetween(ctx context.Context, after, upto, lang string) ([]Note, error)
 	for i := range out.Releases {
 		out.Releases[i].Notes = InLang(out.Releases[i].Notes, lang)
 	}
-	return Between(out.Releases, after, upto), nil
+	return out.Releases, nil
 }
 
 // zhMarker is where a release's notes turn from English to Chinese: the
@@ -110,10 +149,79 @@ func withLang(feed, lang string) string {
 // often, and a long-unopened one would have pages of them.
 const MaxNotes = 40
 
+// StableMaxNotes is MaxNotes on the Stable and Daily channels, where an
+// update is a week or a day of releases and its notes are read as one list
+// (ssharpcc on X): every one of them, as far as the site keeps them.
+const StableMaxNotes = 1500
+
+// MostNotes is how many releases' notes are shown at most on the channel
+// Settings name.
+func MostNotes() int {
+	if Picked() {
+		return StableMaxNotes
+	}
+	return MaxNotes
+}
+
+// Channel is Settings' Update channel: settings.UpdateStable, the update
+// feed asked for a version a week, the newest that had been out three days
+// as the week began (Monday 00:00 UTC); settings.UpdateDaily, a version a
+// day, the newest out by 20:00 UTC that passed its tests (the Test run on
+// its commit) and has every file; either one with an urgent release (a
+// security hole, a ban risk, lost data) as soon as it is out. "" is every
+// version, and so is a value magpie doesn't know. usemagpie.ai chooses
+// both from the release list (site/worker.js, "The Stable channel" and
+// "The Daily channel"); a release is urgent when a line of its notes
+// starts with "**Urgent release:**".
+func Channel() string {
+	switch c := settings.Shared().UpdateChannel; c {
+	case settings.UpdateStable, settings.UpdateDaily:
+		return c
+	}
+	return ""
+}
+
+// Picked is whether the update feed picks the version (Stable or Daily)
+// rather than offering every one: only the site knows a picked release.
+func Picked() bool { return Channel() != "" }
+
+// Stable is whether Settings' Update channel is Stable.
+func Stable() bool { return Channel() == settings.UpdateStable }
+
+// withChannel is feed asking for the channel's release on Stable or Daily,
+// and feed as it is on every version.
+func withChannel(feed string) string {
+	ch := Channel()
+	if ch == "" {
+		return feed
+	}
+	u, err := url.Parse(feed)
+	if err != nil {
+		return feed
+	}
+	q := u.Query()
+	q.Set("channel", ch)
+	u.RawQuery = q.Encode()
+	return u.String()
+}
+
 // Between keeps the notes of the releases after after up to and including
-// upto, newest first, at most MaxNotes; with after "" only upto's. Each
+// upto, newest first, at most MostNotes; with after "" only upto's. Each
 // one's Install section is taken out, and one left empty is dropped.
 func Between(notes []Note, after, upto string) []Note {
+	return capNotes(between(notes, after, upto))
+}
+
+// capNotes keeps the newest MostNotes of notes, newest first.
+func capNotes(notes []Note) []Note {
+	if most := MostNotes(); len(notes) > most {
+		return notes[:most]
+	}
+	return notes
+}
+
+// between is Between with every release kept.
+func between(notes []Note, after, upto string) []Note {
 	var out []Note
 	seen := map[string]bool{}
 	for _, n := range notes {
@@ -136,13 +244,39 @@ func Between(notes []Note, after, upto string) []Note {
 		out = append(out, n)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return Newer(out[i].Version, out[j].Version) })
-	if len(out) > MaxNotes {
-		out = out[:MaxNotes]
+	return out
+}
+
+// Back keeps upto and the n releases before it, newest first: n+1
+// releases counted before any is dropped, so a release whose notes are
+// empty once its Install section is out still counts as one. A release
+// newer than upto, or one listed twice, isn't counted.
+func Back(notes []Note, upto string, n int) []Note {
+	var keep []Note
+	seen := map[string]bool{}
+	for _, r := range notes {
+		v := strings.TrimPrefix(strings.TrimSpace(r.Version), "v")
+		if parse(v) == nil || seen[v] || Newer(v, upto) {
+			continue
+		}
+		seen[v] = true
+		r.Version = v
+		keep = append(keep, r)
+	}
+	sort.SliceStable(keep, func(i, j int) bool { return Newer(keep[i].Version, keep[j].Version) })
+	if len(keep) > n+1 {
+		keep = keep[:n+1]
+	}
+	out := []Note{}
+	for _, r := range keep {
+		if r.Notes = StripInstall(r.Notes); strings.TrimSpace(r.Notes) != "" {
+			out = append(out, r)
+		}
 	}
 	return out
 }
 
-var heading = regexp.MustCompile(`^(#{1,6})\s+(.*?)\s*#*\s*$`)
+var heading = lazyre.New(`^(#{1,6})\s+(.*?)\s*#*\s*$`)
 
 // installHeadings are the Install section's heading in each language the
 // notes come in: the Chinese notes call it 安装, and every release's own

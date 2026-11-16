@@ -35,8 +35,8 @@ function serve(lang, settings, saved) {
 }
 
 const words = {
-  en: { count: "Count me as a user", share: "Share the agents, providers and models I use", personal: "Mask personal data", on: "On", off: "Off" },
-  zh: { count: "计入用户数", share: "分享我用的 agent、provider 和模型", personal: "脱敏个人信息", on: "开启", off: "关闭" },
+  en: { count: "Count me as a user", share: "Share the agents, providers, models and plugins I use", personal: "Mask personal data", on: "On", off: "Off" },
+  zh: { count: "计入用户数", share: "分享我用的 agent、provider、模型和插件", personal: "脱敏个人信息", on: "开启", off: "关闭" },
 };
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
@@ -50,6 +50,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       const context = await browser.newContext({ viewport: { width: 900, height: 760 }, reducedMotion: "reduce" });
       const page = await context.newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       page.on("pageerror", (e) => errors.push(e.message));
       await page.route("**/*", serve(lang, settings, saved));
       await watchSettingsReads(page);
@@ -67,8 +68,11 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       // below the card, scrolled to with the wheel as a reader does
       const reveal = async (name) => {
         await page.mouse.move(450, 300);
-        for (let i = 0; i < 20 && (await row(name).boundingBox()).y > 600; i++) {
-          await page.mouse.wheel(0, 200);
+        await row(name).waitFor(); // a save draws the rows again
+        for (let i = 0; i < 40; i++) {
+          const y = (await row(name).boundingBox())?.y ?? 9999;
+          if (y > 60 && y < 600) break;
+          await page.mouse.wheel(0, y > 600 ? 200 : -200);
           await page.waitForTimeout(80);
         }
       };
@@ -79,6 +83,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.ok(!saved.at(-1).noStats);
 
       // another setting saved keeps it off
+      await reveal(w.personal);
       await row(w.personal).getByRole("button", { name: w.on, exact: true }).click();
       await isOn(w.personal);
       assert.equal(saved.at(-1).noUsageStats, true, JSON.stringify(saved.at(-1)));

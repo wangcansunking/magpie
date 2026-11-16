@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -56,7 +57,7 @@ func TestKnownTextOnlyModelRejectsImagesBeforeUpstream(t *testing.T) {
 		}
 		// it says why magpie takes it for text-only, and where that is
 		// changed (KimYx0207 on X)
-		if b := rec.Body.String(); !strings.Contains(b, "Probe's model list marks it as not taking images") || !strings.Contains(b, "Providers → Probe → Names & levels") {
+		if b := rec.Body.String(); !strings.Contains(b, "Probe's model list marks it as not taking images") || !strings.Contains(b, "Providers → Probe → Model settings") {
 			t.Errorf("%s: doesn't say why or where: %s", tc.path, b)
 		}
 	}
@@ -162,7 +163,7 @@ func TestTextOnlyModelOmitsToolImages(t *testing.T) {
 		{"responses-current", "/v1/responses", "responses", `{"model":"probe/text","input":[{"type":"function_call_output","call_id":"call_1","output":[{"type":"input_text","text":"screenshot"},{"type":"input_image","image_url":"data:image/png;base64,aGVsbG8="}]},{"role":"user","content":[{"type":"input_text","text":"answer"}]}]}`},
 		{"responses-last", "/v1/responses", "responses", `{"model":"probe/text","input":[{"role":"user","content":[{"type":"input_text","text":"read"}]},{"type":"function_call_output","call_id":"call_1","output":[{"type":"input_image","image_url":"data:image/png;base64,aGVsbG8="}]}]}`},
 		{"responses-to-chat", "/v1/responses", "chat", `{"model":"probe/text","input":[{"type":"function_call_output","call_id":"call_1","output":[{"type":"input_text","text":"screenshot"},{"type":"input_image","image_url":"data:image/png;base64,aGVsbG8="}]},{"role":"user","content":[{"type":"input_text","text":"answer"}]}]}`},
-		{"chat-tool", "/v1/chat/completions", "chat", `{"model":"probe/text","messages":[{"role":"tool","tool_call_id":"call_1","content":[{"type":"text","text":"screenshot"},{"type":"image_url","image_url":{"url":"data:image/png;base64,aGVsbG8="}}]}]}`},
+		{"chat-tool", "/v1/chat/completions", "chat", `{"model":"probe/text","messages":[{"role":"user","content":"look"},{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"shot","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_1","content":[{"type":"text","text":"screenshot"},{"type":"image_url","image_url":{"url":"data:image/png;base64,aGVsbG8="}}]}]}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fresh(t)
@@ -481,8 +482,19 @@ func TestGeminiNonImageFileTranslation(t *testing.T) {
 			}
 			responses := buildResponses(r, "text", "", false)
 			anthropic := buildAnthropic(r, "text")
+			// inline data rides whole in both tongues (#5452); a file
+			// only referenced (a fileUri on the vendor's storage) is told
+			// of, Responses' file_id and Anthropic's url source being
+			// someone else's
+			rides := tc.field == "inlineData"
 			for protocol, out := range map[string][]byte{"Responses": responses, "Anthropic": anthropic} {
-				if strings.Contains(string(out), `"image_url"`) || strings.Contains(string(out), `"type":"image"`) || !strings.Contains(string(out), "[attachment "+tc.mime) {
+				if strings.Contains(string(out), `"image_url"`) || strings.Contains(string(out), `"type":"image"`) {
+					t.Errorf("%s mislabeled file as image: %s", protocol, out)
+				}
+				if rides && !strings.Contains(string(out), tc.mime) {
+					t.Errorf("%s lost the file: %s", protocol, out)
+				}
+				if !rides && !strings.Contains(string(out), "[attachment "+tc.mime) {
 					t.Errorf("%s lost or mislabeled file: %s", protocol, out)
 				}
 			}
@@ -520,7 +532,7 @@ func TestTextOnlyRefusalSaysWhyAndWhere(t *testing.T) {
 	s := New()
 	body := `{"model":"MODEL","messages":[{"role":"user","content":[{"type":"text","text":"read"},{"type":"image_url","image_url":{"url":"data:image/png;base64,aGVsbG8="}}]}]}`
 	for model, want := range map[string]string{
-		"probe/sol":   "Accepts images is turned off for it in magpie, in Providers → Probe → Names & levels",
+		"probe/sol":   "Accepts images is turned off for it in magpie, in Providers → Probe → Model settings",
 		"group/words": "no model in the group Words is marked as taking images",
 	} {
 		rec := httptest.NewRecorder()
@@ -582,6 +594,55 @@ func TestImageWalkReadsTextOnlyTurnsInPlace(t *testing.T) {
 	} {
 		if !hasImage(c.proto, []byte(strings.ReplaceAll(c.body, "%u", "\x5cu"))) {
 			t.Errorf("case %d (%v): its image was not found", i, c.proto)
+		}
+	}
+}
+
+// An agent's turns are mostly tool results, and nearly all of them text:
+// the image walk looks into each one where it is, as it does a turn,
+// rather than decoding the request whenever a tool_result or a
+// functionResponse is there (#3725). An image a tool gave back is still
+// found, however its block is spelled.
+func TestImageWalkReadsToolResultsInPlace(t *testing.T) {
+	var turns []string
+	for i := range 60 {
+		turns = append(turns,
+			`{"role":"assistant","content":[{"type":"tool_use","id":"t`+fmt.Sprint(i)+`","name":"Read","input":{"path":"a.go"}}]}`,
+			`{"role":"user","content":[{"type":"tool_result","tool_use_id":"t`+fmt.Sprint(i)+`","content":[{"type":"text","text":"`+strings.Repeat("package a ", 100)+`"}]},{"type":"tool_result","tool_use_id":"u","content":"done"}]}`)
+	}
+	body := []byte(`{"model":"m","messages":[` + strings.Join(turns, ",") + `]}`)
+	if hasImage(provider.Anthropic, body) {
+		t.Fatal("an image found in a text-only body")
+	}
+	if per := testing.AllocsPerRun(5, func() { hasImage(provider.Anthropic, body) }); per > 4 {
+		t.Fatalf("looking for an image in a %d-byte body of text tool results took %v allocations", len(body), per)
+	}
+	gem := []byte(`{"contents":[{"role":"user","parts":[{"functionResponse":{"name":"f","response":{"out":"` + strings.Repeat("x", 4000) + `"}}}]}]}`)
+	if hasImage(provider.Gemini, gem) {
+		t.Fatal("an image found in a Gemini text-only function response")
+	}
+	if per := testing.AllocsPerRun(5, func() { hasImage(provider.Gemini, gem) }); per > 4 {
+		t.Fatalf("looking for an image in a Gemini function response took %v allocations", per)
+	}
+
+	img := `{"type":"image","source":{"type":"url","url":"https://x/a.png"}}`
+	for i, c := range []struct {
+		proto provider.Protocol
+		body  string
+		want  bool
+	}{
+		{provider.Anthropic, `{"messages":[{"role":"user","content":[{"content":[` + img + `],"type":"tool_result","tool_use_id":"t"}]}]}`, true},
+		{provider.Anthropic, `{"messages":[{"role":"user","content":[{"type":"tool_result","content":[{"type":"text","text":"a"}],"content":[` + img + `]}]}]}`, true},
+		{provider.Anthropic, `{"messages":[{"role":"user","content":[{"type":"tool_result","content":[{"type":"tool_result","content":[` + img + `]}]}]}]}`, true},
+		{provider.Anthropic, `{"messages":[{"role":"user","content":[{"%u0074ype":"tool_result","content":[` + img + `]}]}]}`, true},
+		{provider.Anthropic, `{"messages":[{"role":"user","content":[{"type":"text","content":[` + img + `]}]}]}`, false},
+		{provider.Anthropic, `{"messages":[{"role":"user","content":[{"type":"tool_result","content":"see a.png"}]}]}`, false},
+		{provider.Gemini, `{"contents":[{"role":"user","parts":[{"functionResponse":{"parts":[{"inlineData":{"mimeType":"image/png","data":"AAAA"}}],"name":"f"}}]}]}`, true},
+		{provider.Gemini, `{"contents":[{"role":"user","parts":[{"functionResponse":{"name":"f","parts":[{"functionResponse":{"parts":[{"fileData":{"fileUri":"gs://a"}}]}}]}}]}]}`, true},
+		{provider.Gemini, `{"contents":[{"role":"user","parts":[{"functionResponse":{"name":"f","parts":[{"text":"a"}]}}]}]}`, false},
+	} {
+		if got := hasImage(c.proto, []byte(strings.ReplaceAll(c.body, "%u", "\x5cu"))); got != c.want {
+			t.Errorf("case %d (%v): hasImage = %v, want %v", i, c.proto, got, c.want)
 		}
 	}
 }

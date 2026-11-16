@@ -1,12 +1,12 @@
 package gateway
 
 import (
-	"bytes"
 	"context"
 	"net/http"
 	"slices"
 	"time"
 
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -27,8 +27,17 @@ const didNotStream = "did not stream"
 // alone, as the last one left of a plain provider is (passing), while
 // another member is busy too. A streaming agent is kept alive with SSE
 // comments through the pause, as through a held stream. A plain provider,
-// which the agent picked as itself, keeps the retries passing gives the
-// last one left.
+// which the agent picked as itself, is kept the same way once the retries
+// passing gives the last one left are spent, its accounts its members,
+// for its own Patience, unset singlePatience.
+
+// singlePatience is how long a request to one provider, not a group, is
+// kept once it has failed in a way that passes and the same-one retries
+// (passing) are spent: as long as a group that sets no Patience waits
+// (zoecats on Discord), unless the provider sets its own Patience (magpie
+// provider set <id> patience=), which wins. A group's, set or not, is the
+// group's.
+var singlePatience = provider.PatienceDefault * time.Second
 
 // replanRounds is how many times the members are asked again, at most:
 // a backstop that never comes before the patience does. The pauses alone
@@ -51,17 +60,57 @@ type busyTry struct {
 
 // busy says whether a failure is one a member may be over in a moment:
 // overloaded, unavailable, timed out, or a rate limit that isn't the
-// plan's or the money's. A proxy that refused the connection, a quota used
-// up, response protection's 502, or an upstream that answered a stream
-// request with a whole reply (didNotStream) isn't: each fails the same
+// plan's or the money's, nor an account's token wall (walled). A proxy
+// that refused the connection, a quota used up, response protection's
+// 502, a void cut at its length (cutVoidWords, #2972), an upstream
+// that answered a stream request with a whole reply (didNotStream), or
+// the Qoder plugin's queue answer (queued) isn't: each fails the same
 // however often it is asked.
 func busy(status int, body []byte) bool {
-	switch status {
-	case 408, 500, 502, 503, 504, 529:
+	switch {
+	case busyStatus(status):
 		return failure(status, body) == failOther && !protectionRefused(status, body) &&
-			!bytes.Contains(body, []byte(didNotStream))
-	case 429:
-		return failure(status, body) == failRate && !creditWords.Match(wordsOf(body))
+			!bodyHas(body, didNotStream) &&
+			!bodyHas(body, cutVoidWords) &&
+			!queued(body)
+	case status == 429:
+		return failure(status, body) == failRate && !creditWords.Match(wordsOf(body)) && !walled(body)
+	}
+	return false
+}
+
+// queuedWords matches the 503 the Qoder plugin answers when Qoder put a
+// request in the model's queue (its code 10605) and magpie has another
+// candidate to ask (#4049: "Qoder queued the request for efficient (this
+// plan's queue: p3, 3 ahead); try again in 30s", or "Qoder is busy for
+// efficient (this plan's queue: p3); …" when the model's service is out).
+// Asked again as a group's patience asks, the members only meet the same
+// queue again, every body sent again on every account, a whole round at
+// a time (#5346: 217 accounts, one request tried 656 times, 20 GB of
+// re-uploaded bodies a day). The last one left is asked untold, and the
+// plugin waits the queue out as Qoder's own client does, asking its
+// queue status rather than sending the request again. Only the plugin's
+// own words are matched: a relay's 503 that names its own queue ("queue
+// full", 排队中) is a moment's overload, waited out as before.
+var queuedWords = lazyre.New(`(?i)\bqueued the request\b|\bthis plan's queue:`)
+
+// queued says whether a failure's body is the Qoder plugin's queue answer.
+func queued(body []byte) bool {
+	return queuedWords.Match(wordsOf(body))
+}
+
+// busyStatus says whether an error status is one a vendor or the relay in
+// front of it gives for a moment's trouble: a timeout, an internal error,
+// a gateway or the service unavailable, Anthropic's 529 overloaded, and
+// Cloudflare's 520 to 524 (the origin gave an unknown error, is down,
+// timed out, unreachable, or slow to answer), which a relay behind
+// Cloudflare answers with now and then (vdaoren on Discord: an API-key
+// provider's 4xx/5xx went straight to the agent). The same-one retries
+// (passing) and the patience's rounds (busy) both read it.
+func busyStatus(status int) bool {
+	switch status {
+	case 408, 500, 502, 503, 504, 529, 520, 521, 522, 523, 524:
+		return true
 	}
 	return false
 }
@@ -113,6 +162,20 @@ func replan(list []busyTry, round int, waitFrom time.Time, fallback time.Duratio
 	}
 	now := time.Now()
 	wait := min(retryPause<<(round+1), replanLongest())
+	// a vendor's time is read in whole seconds: one back within a second
+	// past a member's budget is asked as the budget ends, not given up on
+	// (zoecats on Discord: "will reset in 1 minutes" against the minute a
+	// lone provider waits by default, which the moment between the
+	// failure and its note put a hair past)
+	list = slices.Clone(list)
+	for i, b := range list {
+		if budget := waitsOf(b.c.patience, fallback); budget > 0 {
+			end := waitFrom.Add(budget)
+			if b.ready.After(end) && !b.ready.After(end.Add(time.Second)) {
+				list[i].ready = end
+			}
+		}
+	}
 	soonest := list[0].ready
 	for _, b := range list[1:] {
 		soonest = minTime(soonest, b.ready)
@@ -125,7 +188,7 @@ func replan(list []busyTry, round int, waitFrom time.Time, fallback time.Duratio
 		if budget <= 0 {
 			continue
 		}
-		if !at.Before(waitFrom.Add(budget)) {
+		if at.After(waitFrom.Add(budget)) {
 			continue // this member's budget is spent
 		}
 		alive = append(alive, b)
@@ -153,10 +216,16 @@ func minTime(a, b time.Time) time.Time {
 
 // pauseAlive waits d, keeping a streaming agent alive as a held stream
 // does once the request has gone keepHeldAfter without a word. false: the
-// agent went away first.
-func pauseAlive(ctx context.Context, w http.ResponseWriter, kept *keptAlive, streams bool, start time.Time, d time.Duration) bool {
+// agent went away first. A pause ends early once moved (when given) says
+// a provider about to be asked again was saved at another address
+// (readdressedOf).
+func pauseAlive(ctx context.Context, w http.ResponseWriter, kept *keptAlive, streams bool, start time.Time, d time.Duration, moved func() bool) bool {
 	t := time.NewTimer(d)
 	defer t.Stop()
+	edits := editsOf(moved)
+	if moved != nil && moved() {
+		return true // saved elsewhere while it was asked
+	}
 	var hw *holdWriter
 	if streams && kept != nil && kept.proto != provider.Gemini {
 		hw = newHoldWriter(w, true)
@@ -174,6 +243,61 @@ func pauseAlive(ctx context.Context, w http.ResponseWriter, kept *keptAlive, str
 		case <-ctx.Done():
 			return false
 		case <-tick.C:
+		case <-edits:
+			if moved() {
+				return true
+			}
+			edits = provider.Edited()
 		}
+	}
+}
+
+// pauseUntilReaddressed waits d, or until moved (when given) says a
+// provider about to be asked again was saved at another address. false:
+// ctx ended first.
+func pauseUntilReaddressed(ctx context.Context, d time.Duration, moved func() bool) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	edits := editsOf(moved)
+	if moved != nil && moved() {
+		return true // saved elsewhere while it was asked
+	}
+	for {
+		select {
+		case <-t.C:
+			return true
+		case <-ctx.Done():
+			return false
+		case <-edits:
+			if moved() {
+				return true
+			}
+			edits = provider.Edited()
+		}
+	}
+}
+
+// editsOf is provider.Edited when there is a moved to ask, else a channel
+// that never fires.
+func editsOf(moved func() bool) <-chan struct{} {
+	if moved == nil {
+		return nil
+	}
+	return provider.Edited()
+}
+
+// readdressedOf says whether any of cs is a Remote magpie saved at another
+// address since the request read it: the user typed its new address in
+// while the request paused before asking it again (le13ure on X). nil
+// when none of cs is a Remote magpie, for a pause that never wakes early.
+func readdressedOf(cs []candidate) func() bool {
+	if !slices.ContainsFunc(cs, func(c candidate) bool { return c.p.IsRemoteMagpie() }) {
+		return nil
+	}
+	return func() bool {
+		return slices.ContainsFunc(cs, func(c candidate) bool {
+			_, ok := provider.Readdressed(c.p)
+			return ok
+		})
 	}
 }

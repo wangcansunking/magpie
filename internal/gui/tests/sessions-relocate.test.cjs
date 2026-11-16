@@ -1,7 +1,7 @@
 // Run with Node's test runner and Playwright on the module path; see README.md.
 // A Claude Code project folder renamed or moved (#1131): its row on the
-// Sessions page has Relocate project, which opens magpie's own dialog (never
-// prompt()) with the old path and a field for the new one. Preview posts
+// Sessions page has Relocate project in its ⋯ menu, which opens magpie's
+// own dialog (never prompt()) with the old path and a field for the new one. Preview posts
 // sessions/relocate-claude with no token and says what would move; the same
 // button then confirms with the preview's token, and editing the path first
 // asks for a new preview. A folder with a session magpie can't write, or a
@@ -13,6 +13,17 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const { test } = require("node:test");
+const atPointer = async (page, target, menu) => {
+  const b = await target.boundingBox(), vw = page.viewportSize().width;
+  const px = b.x + b.width / 2, py = b.y + b.height / 2;
+  // the menu's own placement, not its bounding box, which an entrance transform scales
+  const m = await menu.evaluate((e) => ({ x: parseFloat(e.style.left), y: parseFloat(e.style.top), w: e.offsetWidth, h: e.offsetHeight }));
+  // opens at the pointer, or pushed in to the window's edge (mmmg_btc on X)
+  const x = Math.max(8, Math.min(px - 4, vw - m.w - 8));
+  assert(Math.abs(m.x - x) <= 2, `menu at x=${m.x}, expected ${x} for a pointer at ${px}`);
+  // below the pointer, or above it where there is no room below
+  assert((m.y >= py - 2 && m.y <= py + 14) || (m.y + m.h >= py - 14 && m.y + m.h <= py + 2), `menu at y=${m.y}-${m.y + m.h}, pointer at ${py}`);
+};
 const { chromium, webkit } = require("playwright");
 
 const assets = path.resolve(__dirname, "../assets");
@@ -78,6 +89,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           await browser.close();
         });
         page.setDefaultTimeout(5000);
+        page.setDefaultNavigationTimeout(60000);
         const errors = [];
         page.on("pageerror", (e) => errors.push(e.message));
         page.on("dialog", (d) => { errors.push("a browser dialog: " + d.message()); d.dismiss(); });
@@ -98,14 +110,25 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
           assert.deepEqual(missing, [], `${lang} has every string`);
         }
 
+        // Relocate is in the folder's ⋯ menu; a read-only folder has none
         const relocate = await tr("Relocate project");
-        assert.equal(await folder("desk").getByRole("button", { name: relocate }).count(), 0, "no Relocate where a session is read-only");
-        const move = folder("old-app").getByRole("button", { name: relocate, exact: true });
-        await move.scrollIntoViewIfNeeded();
-        const box = await move.boundingBox();
-        assert(box && box.x + box.width <= width, "Relocate fits in the row");
+        assert.equal(await folder("desk").locator(".sm-folder-more").count(), 0, "no Relocate where a session is read-only");
+        const more = folder("old-app").locator(".sm-folder-more");
+        await more.scrollIntoViewIfNeeded();
+        await folder("old-app").hover();
+        const box = await more.boundingBox();
+        assert(box && box.x + box.width <= width, "the ⋯ fits in the row");
+        // a right-click on the row opens the same menu at the pointer, not under the ⋯ (mmmg_btc on X)
+        const nameAt = folder("old-app").locator(".fold .name");
+        await nameAt.click({ button: "right" });
+        await page.locator(".row-menu").waitFor();
+        await atPointer(page, nameAt, page.locator(".row-menu"));
+        await page.keyboard.press("Escape");
+        await page.locator(".row-menu").waitFor({ state: "detached" });
         const open0 = await folder("old-app").locator(".fold").getAttribute("aria-expanded");
         const y0 = await page.evaluate(() => document.querySelector("#view-sessions").scrollTop);
+        await more.click();
+        const move = page.locator(".row-menu").getByRole("menuitem", { name: relocate, exact: true });
         await move.click();
         const ask = page.locator("#modal .sm-ask");
         await ask.waitFor();

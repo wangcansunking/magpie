@@ -30,7 +30,7 @@ var wslMore = []struct {
 	{"fx", ".fx/settings.json", "/v1"},
 	{"commandcode", ".commandcode/providers.json", "/v1"},
 	{"minimax-code", ".minimax/config.yaml", ""},
-	{"dsh", ".dsh/config.yaml", "/v1"},
+	{"dsh", ".dsh/profiles/web/cordis.patch.yml", "/v1"}, // liby233: no dsh reads config.yaml
 	{"muse", ".config/muse/settings.json", "/v1"},
 	{"qoder", ".qoder/settings.json", "/v1"},
 	{"qoder-cn", ".qoder-cn/settings.json", "/v1"},
@@ -42,6 +42,7 @@ var wslMore = []struct {
 	{"snow", ".snow/profiles/magpie.json", "/v1"},
 	{"goose", ".config/goose/custom_providers/magpie.json", "/v1"},
 	{"mothx", ".mothx/settings.json", "/v1"},
+	{"penguin", ".penguin/data/default_project/.project_config.toml", "/v1"},
 	{"reasonix", ".reasonix/config.toml", "/v1"},
 }
 
@@ -69,7 +70,7 @@ func moveHostDirs(t *testing.T) string {
 	moved := t.TempDir()
 	for _, v := range []string{"OPENCODE_CONFIG_DIR", "MIMOCODE_HOME", "DEVECO_CONFIG_DIR", "KIMI_CODE_HOME", "KIMI_SHARE_DIR", "PI_CODING_AGENT_DIR",
 		"HERMES_HOME", "GROK_HOME", "FACTORY_HOME_OVERRIDE", "MINIMAX_DATA_DIR", "QODER_CONFIG_DIR", "QODERCN_CONFIG_DIR", "DSH_HOME", "MISTER_MORPH_CONFIG",
-		"CODEBUDDY_CONFIG_DIR", "CLINE_DIR", "CLINE_DATA_DIR", "ATOMCODE_HOME", "REASONIX_HOME", "SNOW_CONFIG_DIR", "MOTHX_DIR", "APPDATA"} {
+		"CODEBUDDY_CONFIG_DIR", "CLINE_DIR", "CLINE_DATA_DIR", "ATOMCODE_HOME", "REASONIX_HOME", "SNOW_CONFIG_DIR", "MOTHX_DIR", "PENGUIN_HOME", "APPDATA"} {
 		t.Setenv(v, filepath.Join(moved, v))
 	}
 	return moved
@@ -81,13 +82,13 @@ func moveHostDirs(t *testing.T) string {
 func TestWSLProbeFindsMoreAgents(t *testing.T) {
 	for _, c := range wslMore {
 		k := wslKindOf(c.id)
-		if k.dir != "" && !strings.Contains(wslProbeScript, `[ -d "$HOME/`+k.dir+`" ] && echo dir:`+k.dir+`; `) {
+		if k.dir != "" && !strings.Contains(wslProbeScript(), `[ -d "$HOME/`+k.dir+`" ] && echo dir:`+k.dir+`; `) {
 			t.Errorf("%s: probe lacks its folder %s", c.id, k.dir)
 		}
 		if k.dir != "" && !strings.HasPrefix(c.file, k.dir+"/") {
 			t.Errorf("%s: its file %s isn't under %s", c.id, c.file, k.dir)
 		}
-		if k.bin != "" && !strings.Contains(wslProbeScript, `command -v `+k.bin+` `) {
+		if k.bin != "" && !strings.Contains(wslProbeScript(), `p=$(wslcmd `+k.bin+`) `) {
 			t.Errorf("%s: probe lacks its command %s", c.id, k.bin)
 		}
 		if p, _, _ := wslFinds(k); k.dir != "" || k.version {
@@ -102,7 +103,7 @@ func TestWSLProbeFindsMoreAgents(t *testing.T) {
 		}
 	}
 	for _, bin := range []string{"fx", "grok", "goose"} {
-		if strings.Contains(wslProbeScript, `command -v `+bin+` `) {
+		if strings.Contains(wslProbeScript(), `wslcmd `+bin+`)`) {
 			t.Errorf("probe takes any %s command for the agent", bin)
 		}
 	}
@@ -195,7 +196,12 @@ func TestWSLMoreAgentsPick(t *testing.T) {
 			if !mirrored && !strings.Contains(a.Notice(), "mirrored") {
 				t.Errorf("%s: %s", c.id, a.Notice())
 			}
-			if mirrored && !strings.HasPrefix(a.Notice(), k.name+" in WSL Ubuntu ") {
+			// mirrored, only an agent that reads its config at start-up has
+			// something to say (PenguinHarness reads it again on a change)
+			if mirrored && k.restart != "" && !strings.HasPrefix(a.Notice(), k.name+" in WSL Ubuntu ") {
+				t.Errorf("%s: %s", c.id, a.Notice())
+			}
+			if mirrored && k.restart == "" && a.Notice() != "" {
 				t.Errorf("%s: %s", c.id, a.Notice())
 			}
 			own := k.dir
@@ -366,7 +372,7 @@ func TestWSLDshProfiles(t *testing.T) {
 func TestWSLGemini(t *testing.T) {
 	home := syncHome(t)
 	k := wslKindOf("gemini")
-	if strings.Contains(wslProbeScript, `"$HOME/" ]`) {
+	if strings.Contains(wslProbeScript(), `"$HOME/" ]`) {
 		t.Fatal("the probe asks after $HOME itself")
 	}
 	if d := parseProbe("U", "home:/home/me\ndir:.gemini\n"); d != nil && k.found(*d) {

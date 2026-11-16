@@ -29,15 +29,27 @@ magpie.plugin("sessions", (ctx) => {
   let found = null;       // { agent, needle, hits: Map(id -> hit), busy, cut, unread, searched, total, error }
   let searchCtl = null;
   let searchT = 0;
+  // elsewhere is the same words in every other agent's sessions, from
+  // magpie's index of what was said (cryingLiu on X): { needle, hits,
+  // indexed, total, busy }, read again while the index is still being made
+  let elsewhere = null;
+  let elseCtl = null;
+  let elseT = 0;
+  const ELSE_MORE = 20;
   const SEARCH_WAIT = 300;
   const needleOf = (q) => q.trim().split(/\s+/).filter(Boolean).join(" ").toLowerCase();
   let trashOn = false;
+  // Picking sessions to delete is a mode of its own, as in Finder and Mail:
+  // off, no row carries a checkbox and there is no bar over the list
+  // (yetone: a box on every row, and a lone Delete under the Trash).
+  let selecting = false;
+  let othersOpen = false;     // the folders an app or the system made, unfolded
   const picked = new Set();   // ids picked to delete, of the agent shown
   const opened = new Set();   // folders unfolded, by cwd
   const folderBoxes = new Map(); // each folder's box as drawn, by cwd
   let openedFor = "";         // the agent the folders were first unfolded for
   let detail = "";            // the session opened to its details
-  const talkOpen = new Set(); // sessions whose conversation is shown, by agent/id
+  const talkOpen = new Set(); // conversations whose sheet was opened, by agent/id
   const talks = new Map();    // what was said in them, as read, by agent/id
   // A session's subagents sit under it, folded (#2261): the conversations
   // its agent started inside it (Claude Code, Qoder, OpenCode, Kimi Code:
@@ -53,8 +65,27 @@ magpie.plugin("sessions", (ctx) => {
   const MAX_DEPTH = 8;
   let loading = 0;
   let fitObserver = null;
+  // Each session's output speed as the gateway counts it (/api/speeds,
+  // gateway/session_speed.go), by "agent|session", read once a second
+  // while the page is in sight and drawn on its rows: a curve of the last
+  // two minutes, tokens a second now, and the round's numbers in a
+  // popover. A session the gateway hasn't served lately has none.
+  let speeds = new Map();
+  let speedT = 0;
+  let speedBusy = false;
+  // speedSkips: ticks left before the next ask while no session has a
+  // speed: nothing heard in curveForget, so a new one's curve, kept by
+  // the gateway, shows within speedRestTicks seconds, and a resting page
+  // asks a fifth as often
+  let speedSkips = 0;
+  const speedRestTicks = 5;
+  let speedPop = null;    // { anchor, draw } of the popover open
   let focus = null;           // { agent, id, until }: a session to bring into sight once drawn
   let recordingBusy = false;
+  // the agents picked in the consent (RustCats on X), by id, and whether
+  // the choice is being saved
+  const consentPicked = new Set();
+  let consentBusy = false;
   // An open folder draws its latest SM_PAGE sessions and a "Show N more"
   // that adds the next page where it is (ChildhoodAndy on X: with thousands
   // of sessions, switching to the page or to another agent, a keystroke in
@@ -70,21 +101,89 @@ magpie.plugin("sessions", (ctx) => {
   // elements, held every click on the page for over a second, and slowed
   // the Library page after it (yetone).
   const FOLDERS = "\x00folders";
+  const OTHERS = "\x00others";
 
   // A session seen only through magpie's gateway has no folder magpie knows
   // (its agent's files are on another computer, in a container or under
   // another config folder): such sessions are grouped by that, not under
   // "No folder" with the agent's own (lc on Discord).
   const GW = "\x00gateway";
-  const groupOf = (s) => s.cwd || (s.gateway ? GW : "");
-  const groupName = (k) => k === GW ? t("Seen through the gateway") : k ? baseName(k) : t("No folder");
+  // A session its agent ran with no project of its own, in a folder the
+  // agent made for that one session: ZCode keeps ~/.zcode/workspace/
+  // draft-<id> or <ms>-<uuid> (its host, 3.17.2), one for each session
+  // started without a project.
+  // One "folder" each was 40 folders of one session, and they are no
+  // projects of the reader's (flandern1211_58540 on Discord): one group of
+  // their own, not "No folder", keeps them apart from sessions whose agent
+  // recorded no folder.
+  const DRAFTS = "\x00drafts";
+  const zcodeDraft = (s) => {
+    const home = (data?.home || "").replace(/\\/g, "/").replace(/\/+$/, "");
+    if (!s.cwd) return false;
+    const c = s.cwd.replace(/\\/g, "/");
+    // Codex Desktop makes ~/Documents/Codex/<date>/<name> for every chat
+    // started without a project (its outputs/ and work/), and Codex also
+    // runs in temp folders and worktrees
+    if (s.agent === "codex") return /\/Documents\/Codex\/\d{4}-\d{2}-\d{2}\//i.test(c) || scratch(s.cwd);
+    if (!home || s.agent !== "zcode") return false;
+    return c === home + "/.zcode/workspace" || c.startsWith(home + "/.zcode/workspace/");
+  };
+  const groupOf = (s) => zcodeDraft(s) ? DRAFTS : s.cwd || (s.gateway ? GW : "");
+  const groupName = (k) => k === GW ? t("Seen through the gateway")
+    : k === DRAFTS ? t("Draft sessions") : k ? baseName(k) : t("No folder");
+
+  // A folder an app or the system made, not a project of the reader's: the
+  // disk's root, a temp folder, or one under a hidden folder of a home
+  // (~/.some-agent/…). They go under a fold of their own after the
+  // projects (yetone: "/", "T" and folders named by UUIDs led the list).
+  const scratch = (k) => {
+    if (!k || k === GW || k === DRAFTS) return false;
+    const p = k.replace(/\\/g, "/").replace(/\/+$/, "");
+    return p === "" || /^[a-z]:$/i.test(p)
+      || /^\/(private\/)?(tmp|var\/tmp|var\/folders)(\/|$)/.test(p)
+      || /\/AppData\/Local\/Temp(\/|$)/i.test(p)
+      || /^([a-z]:)?\/(Users|home)\/[^/]+\/\.[^/]/i.test(p) || /^\/root\/\./.test(p);
+  };
+  // where a folder is, as its row says it: the folder it is in, with the
+  // home folder as ~; the whole path is the row's title
+  const whereOf = (p) => {
+    const home = data?.home || "";
+    const up = p.replace(/[\\/]+$/, "");
+    const cut = Math.max(up.lastIndexOf("/"), up.lastIndexOf("\\"));
+    if (home && up === home) return "~";
+    const parent = cut < 0 ? "" : cut === 0 ? "/" : up.slice(0, cut);
+    if (!home || !parent) return parent;
+    return parent === home ? "~" : parent.startsWith(home + "/") || parent.startsWith(home + "\\") ? "~" + parent.slice(home.length) : parent;
+  };
 
   const TRASH = "M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5M7 7v4M9 7v4";
   const TERM = "M3 4.5 6 7.5 3 10.5M7.5 11.5h5.5";
   const UNDO = "M5.5 3.5 2.5 6.5l3 3M2.5 6.5H10a3.5 3.5 0 0 1 0 7H7";
+  const MOVE = "M2.5 8h10M9.5 5l3 3-3 3";
+
+  // fillIn asks again, while rows are still pending (a file of theirs not
+  // read whole yet: their first lines are what shows), for what the read
+  // behind the answer has found; only the list is drawn again, so the
+  // filter keeps its focus and an open menu stays.
+  let fillT = 0;
+  function fillSoon() {
+    clearTimeout(fillT);
+    if (!data?.sessions?.some((s) => s.pending)) return;
+    const n = loading, was = data.agent;
+    fillT = setTimeout(async () => {
+      if (n !== loading || view !== "sessions") return;
+      let d;
+      try { d = await api("sessions/manage?agent=" + encodeURIComponent(was)); } catch { return fillSoon(); }
+      if (n !== loading || !data || data.agent !== was || d?.agent !== was) return;
+      data = { ...data, ...d, agents: d?.agents || [], sessions: (d?.sessions || []).map((s) => ({ ...s, models: s.models || [] })), trash: d?.trash || [], agent: was };
+      if (view === "sessions" && !trashOn) redrawList(); // the pages shown stay
+      fillSoon();
+    }, 1500);
+  }
 
   async function load(name) {
     const n = ++loading;
+    clearTimeout(fillT);
     if (!data) draw();
     try {
       const d = await api("sessions/manage?agent=" + encodeURIComponent(name ?? agent));
@@ -99,7 +198,8 @@ magpie.plugin("sessions", (ctx) => {
       if (n !== loading) return;
       failed = e.message;
     }
-    if (view === "sessions") draw();
+    if (view === "sessions") { draw(); speedsOn(); }
+    if (n === loading) fillSoon();
   }
 
   // reveal: the Sessions page, from the Usage page's list (#752):
@@ -157,8 +257,10 @@ magpie.plugin("sessions", (ctx) => {
       searchCtl?.abort();
       searchCtl = null;
       found = null;
+      elseSoon("");
       return;
     }
+    elseSoon(needle);
     if (found && found.agent === data.agent && found.needle === needle && !found.busy && !found.error) return;
     searchCtl?.abort();
     searchCtl = null;
@@ -178,6 +280,77 @@ magpie.plugin("sessions", (ctx) => {
     }, SEARCH_WAIT);
   }
 
+  // elseSoon searches every agent's sessions for needle (none in gateway
+  // mode, where no agent's files here are read), once typing pauses, and
+  // again a few seconds on while magpie's index has sessions to read yet
+  function elseSoon(needle, again = 0) {
+    clearTimeout(elseT);
+    if (!needle || data?.reads?.gateway) {
+      elseCtl?.abort();
+      elseCtl = null;
+      elsewhere = null;
+      return;
+    }
+    if (!again && elsewhere?.needle === needle && !elsewhere.error) return;
+    elseCtl?.abort();
+    elseCtl = null;
+    const mine = elsewhere = again ? elsewhere : { needle, hits: [], busy: true };
+    elseT = setTimeout(async () => {
+      const ctl = elseCtl = new AbortController();
+      try {
+        const r = await api(`sessions/said?q=${encodeURIComponent(needle)}&limit=${ELSE_MORE + 10}`, undefined, undefined, ctl.signal);
+        if (elsewhere !== mine) return;
+        elsewhere = { needle, busy: false, hits: r?.hits || [], indexed: r?.indexed || 0, total: r?.total || 0, listing: !!r?.listing };
+        if ((elsewhere.listing || elsewhere.indexed < elsewhere.total) && again < 40) {
+          const now = elsewhere;
+          elseT = setTimeout(() => { if (elsewhere === now) { elsewhere = { ...now }; elseSoon(needle, again + 1); } }, 3000);
+        }
+      } catch (e) {
+        if (ctl.signal.aborted || elsewhere !== mine) return;
+        elsewhere = { needle, busy: false, hits: [], error: e.message };
+      }
+      if (elseCtl === ctl) elseCtl = null;
+      if (view === "sessions" && !trashOn) redrawList();
+    }, again ? 0 : SEARCH_WAIT);
+  }
+  // the hits elsewhere shown with the agent shown: those of other agents
+  const elseHits = () => elsewhere && elsewhere.needle === needleOf(query) && data ? elsewhere.hits.filter((h) => h.agent !== data.agent).slice(0, ELSE_MORE) : [];
+
+  // elseBox is the sessions of other agents that said what was searched
+  // for; a click shows the conversation at the words
+  function elseBox() {
+    const f = elsewhere && elsewhere.needle === needleOf(query) ? elsewhere : null;
+    const hits = elseHits();
+    const still = f && !f.busy && (f.listing || f.indexed < f.total);
+    if (!f || (!hits.length && !still)) return null;
+    const box = el("div", "list sm-else");
+    const h = el("div", "row sm-else-head");
+    h.append(el("span", "name", t("Other agents")));
+    if (still) h.append(el("span", "note", f.listing ? t("Indexing sessions…") : t("Indexing {n} of {total} sessions…", { n: f.indexed, total: f.total })));
+    box.append(h);
+    for (const x of hits) {
+      const r = el("button", "row sess sm-else-row");
+      r.type = "button";
+      r.dataset.agent = x.agent;
+      r.dataset.id = x.id;
+      r.setAttribute("aria-haspopup", "dialog");
+      const a = agentOf(x.agent);
+      const who = el("span", "who");
+      const s = { agent: x.agent, id: x.id, title: x.title || x.id };
+      who.append(el("span", "name", x.title || t("(no prompt)")),
+        el("span", "sub", [a.name, x.last ? ago(x.last) : "", x.wsl ? "WSL " + x.wsl : "", x.cwd || ""].filter(Boolean).join(" · ")),
+        hitLine(x.hit));
+      r.append(icon(a.icon), who);
+      r.onclick = (e) => {
+        e.stopPropagation();
+        if (window.getSelection()?.toString()) return;
+        talkSheet(s, null, f.needle);
+      };
+      box.append(r);
+    }
+    return box;
+  }
+
   // what the search is doing, above the list, when it says more than the
   // rows do
   function searchNote() {
@@ -194,11 +367,21 @@ magpie.plugin("sessions", (ctx) => {
     return p;
   }
 
-  // the words round where a session said what was searched for
-  function hitLine(h) {
-    const d = el("div", "sub sm-hit");
+  // the words round where a session said what was searched for; given
+  // its session, a click shows the conversation there
+  function hitLine(h, s) {
+    const d = el(s ? "button" : "div", "sub sm-hit");
     d.append(h.before || "", el("mark", "", h.match), h.after || "");
     d.title = (h.before || "") + h.match + (h.after || "");
+    if (s) {
+      d.type = "button";
+      d.setAttribute("aria-haspopup", "dialog");
+      d.onclick = (e) => {
+        e.stopPropagation();
+        if (window.getSelection()?.toString()) return;
+        talkSheet(s, null, needleOf(query));
+      };
+    }
     return d;
   }
 
@@ -211,22 +394,31 @@ magpie.plugin("sessions", (ctx) => {
     const wrap = page.querySelector(".sm-switch");
     const tabs = wrap.querySelector(".sm-agents");
     const pick = wrap.querySelector(".sm-agent-pick");
+    const filter = page.querySelector(".sm-filter");
     const fit = () => {
+      filter.style.flexBasis = "";
       const room = parseFloat(getComputedStyle(wrap).width);
       if (!room) return;
       const focused = document.activeElement;
       // Measure the actual labels, including language, font and text zoom,
       // rather than guessing a breakpoint or a number of agents.
       tabs.hidden = false;
-      const compact = tabs.scrollWidth > Math.floor(room);
+      // the search gives way to the tabs, down to its least, before the menu
+      // takes them (Settings › came into the head beside them)
+      // (a narrow window's head is a grid, where it can't)
+      const over = tabs.scrollWidth - Math.floor(room);
+      const fw = getComputedStyle(filter.parentElement).display === "flex" ? filter.offsetWidth : 0;
+      const compact = over > 0 && (!fw || fw - over < 110);
+      if (over > 0 && !compact) filter.style.flexBasis = Math.ceil(fw - over) + "px";
       tabs.hidden = compact || !data?.agents.length;
       pick.hidden = !compact || !current();
       if (!compact && pick.classList.contains("open")) closeProtoMenu();
       if (compact && tabs.contains(focused)) pick.focus({ preventScroll: true });
       else if (!compact && focused === pick) tabs.querySelector(".on")?.focus({ preventScroll: true });
     };
+    // the head, not the tabs' box, which the search's width changes
     fitObserver = new ResizeObserver(fit);
-    fitObserver.observe(wrap);
+    fitObserver.observe(page.querySelector(".sm-head"));
     fit();
     if (keepFocus) (pick.hidden ? tabs.querySelector(".on") : pick)?.focus({ preventScroll: true });
   }
@@ -234,6 +426,7 @@ magpie.plugin("sessions", (ctx) => {
   function chooseAgent(name) {
     if (name === data.agent && !trashOn) return;
     trashOn = false;
+    selecting = false;
     agent = name;
     try { localStorage.setItem("magpie.sessionsAgent", name); } catch {}
     picked.clear();
@@ -292,12 +485,90 @@ magpie.plugin("sessions", (ctx) => {
         if (!await confirmAction(t("Stop recording and clear saved conversations"), t("Delete all locally recorded gateway conversation content? Usage totals and native session files are kept."), t("Delete"))) return;
         recordingBusy = true;
         clear.disabled = true;
-        try { await api("sessions/recording", { clear: true }); talks.clear(); await load(); }
+        try { await api("sessions/recording", { clear: true }); talks.clear(); await load(); for (const b of document.querySelectorAll(".sess-sheet .sess-talk")) b.again?.(); }
         catch (err) { status(err.message, "err"); }
         finally { recordingBusy = false; draw(); }
       };
       card.append(clear);
     }
+    return card;
+  }
+
+  // The consent (RustCats on X: a new install showed every agent's history
+  // before anyone agreed to it). Until the reader says which agents'
+  // sessions magpie may read (data.reads.asked), it reads none of them and
+  // this card comes first: the agents found here, each with its own
+  // switch, off; Allow selected reads those picked, and Allow all every
+  // agent, those found later too. Settings › Privacy changes it later.
+  // In gateway mode no agent's files here are read (reads.gateway), so
+  // there is nothing to ask.
+  const consentApplies = () => data?.reads && data.reads.asked === false && !data.reads.gateway;
+
+  function consentCard() {
+    const found = data.reads.found || [];
+    const card = el("div", "sm-consent");
+    const title = el("b", "sm-consent-title", t("Show your agents' sessions?"));
+    title.id = "smConsentTitle";
+    card.setAttribute("role", "group");
+    card.setAttribute("aria-labelledby", title.id);
+    card.append(title, el("p", "sm-consent-sub", t("magpie reads no agent's session history until you allow it. Pick the agents whose sessions this page may show; what magpie's gateway served is counted either way. You can change this in Settings › Privacy.")));
+    if (found.length) {
+      const list = el("div", "list sm-consent-list");
+      for (const x of found) {
+        const on = consentPicked.has(x.agent);
+        const row = el("div", "row sm-consent-row");
+        const name = el("span", "sm-consent-name", x.name);
+        name.id = "smConsent-" + x.agent;
+        const sw = el("button", "lib-switch" + (on ? " on" : ""));
+        sw.type = "button";
+        sw.setAttribute("role", "switch");
+        sw.setAttribute("aria-checked", String(on));
+        sw.setAttribute("aria-labelledby", name.id);
+        sw.disabled = consentBusy;
+        sw.append(el("i"));
+        sw.onclick = (e) => {
+          e.stopPropagation();
+          if (consentPicked.has(x.agent)) consentPicked.delete(x.agent); else consentPicked.add(x.agent);
+          const now = consentPicked.has(x.agent);
+          sw.classList.toggle("on", now);
+          sw.setAttribute("aria-checked", String(now));
+          const some = card.querySelector(".sm-consent-some");
+          if (some) some.disabled = consentBusy || !consentPicked.size;
+        };
+        row.onclick = () => sw.click();
+        row.append(icon(x.icon), name, sw);
+        list.append(row);
+      }
+      card.append(list);
+    } else {
+      card.append(el("p", "sm-consent-none", t("No agent's sessions were found on this computer yet.")));
+    }
+    const acts = el("div", "sm-consent-acts");
+    const save = async (all) => {
+      consentBusy = true;
+      draw();
+      const agents = {};
+      for (const x of found) agents[x.agent] = all || consentPicked.has(x.agent);
+      try {
+        await api("sessions/reads", { all, agents });
+        consentPicked.clear();
+        await load();
+      } catch (err) { status(err.message, "err"); }
+      finally { consentBusy = false; draw(); }
+    };
+    if (found.length) {
+      const some = el("button", "text sm-consent-some", t("Allow selected"));
+      some.type = "button";
+      some.disabled = consentBusy || !consentPicked.size;
+      some.onclick = () => save(false);
+      acts.append(some);
+    }
+    const all = el("button", "text primary sm-consent-all", t("Allow all"));
+    all.type = "button";
+    all.disabled = consentBusy;
+    all.onclick = () => save(true);
+    acts.append(all);
+    card.append(acts);
     return card;
   }
 
@@ -327,11 +598,12 @@ magpie.plugin("sessions", (ctx) => {
       pick.onclick = (e) => {
         e.stopPropagation();
         if (pick.classList.contains("open")) return closeProtoMenu();
-        const opts = data.agents.map((x) => ({ v: x.agent, name: x.name, note: String(x.count), literalName: true }));
+        const opts = data.agents.map((x) => ({ v: x.agent, name: x.name, icon: x.icon, note: String(x.count), literalName: true }));
         openProtoMenu(pick, opts, data.agent, (name) => {
           pick.focus({ preventScroll: true });
           chooseAgent(name);
         }, "Agent", "sm-agent-menu");
+        iconItems(opts);
       };
     }
     wrap.append(tabs, pick);
@@ -345,13 +617,29 @@ magpie.plugin("sessions", (ctx) => {
     q.hidden = trashOn;
     q.oninput = () => { query = q.value; drawnIn.clear(); searchSoon(); redrawList(); };
     q.onkeydown = (e) => { if (e.key === "Escape" && q.value) { e.stopPropagation(); q.value = ""; query = ""; drawnIn.clear(); searchSoon(); redrawList(); } };
+    const sel = el("button", "text sm-select" + (selecting ? " on" : ""), t(selecting ? "Done" : "Select"));
+    sel.type = "button";
+    sel.setAttribute("aria-pressed", String(selecting));
+    sel.hidden = trashOn || !a?.deletable || !data?.sessions?.some((s) => s.deletable);
+    sel.onclick = () => {
+      selecting = !selecting;
+      if (!selecting) picked.clear();
+      draw();
+    };
     const tr = el("button", "text sm-trash-btn" + (trashOn ? " on" : ""));
     tr.type = "button";
     tr.setAttribute("aria-pressed", String(trashOn));
     tr.append(svg(TRASH, 13, 1.4), el("span", "", t("Trash")));
     if (data?.trash.length) tr.append(el("em", "", String(data.trash.length)));
-    tr.onclick = () => { trashOn = !trashOn; draw(); };
-    h.append(q, tr);
+    tr.onclick = () => { trashOn = !trashOn; selecting = false; picked.clear(); draw(); speedsOn(); };
+    // which agents' history is read is Settings › Privacy's (the scattered
+    // settings audit after netube99 on X); gateway mode reads none there
+    const go = el("button", "text sm-toset");
+    go.type = "button";
+    go.append(el("span", "", t("Settings")), " ›");
+    go.hidden = !!data?.reads?.gateway;
+    go.onclick = (e) => openSettingsAt(e, "privacy", "#sessionReadsList .row");
+    h.append(q, sel, tr, go);
     return h;
   }
 
@@ -365,10 +653,15 @@ magpie.plugin("sessions", (ctx) => {
       return box;
     }
     if (trashOn) { box.append(...trash()); return box; }
+    if (consentApplies()) box.append(consentCard());
     if (recordingApplies()) box.append(recordingCard());
     if (!data.agents.length) {
+      if (consentApplies()) return box;
       const e = el("div", "empty-state");
-      e.append(el("b", "", t("No sessions yet")), el("span", "", t("Claude Code's, Codex's, Hermes's, OpenCode's and Pi's sessions on this computer show up here, by the folder they ran in.")));
+      e.append(el("b", "", t("No sessions yet")), el("span", "", data.reads?.gateway
+        // gateway mode lists no session of this computer's agents
+        ? t("The sessions of agents on other computers that use this gateway show up here, by the folder they ran in.")
+        : t("Claude Code's, Codex's, Hermes's, OpenCode's and Pi's sessions on this computer show up here, by the folder they ran in.")));
       box.append(e);
       return box;
     }
@@ -392,6 +685,13 @@ magpie.plugin("sessions", (ctx) => {
         ? "These {agent} sessions were seen only through magpie's gateway: {agent}'s own files of them aren't on this computer (it may run on another one, in a container or with another config folder), so they can't be resumed here. Delete takes one off this list and moves any conversation magpie recorded of it to its trash; Usage keeps what it spent."
         : "Sessions under \"Seen through the gateway\" have no {agent} files on this computer, so they can't be resumed here. Delete takes one off this list and moves any conversation magpie recorded of it to its trash; Usage keeps what it spent.", { agent: a.name })));
     }
+    // output speed is measured as the reply streams through the gateway; a
+    // session file has no per-token times, so with none of the rows measured
+    // the page says where the speed is and where the files' own figures are
+    // (simonzyzy on X: sessions with no provider set up)
+    if (!data.reads?.gateway && data.sessions.length && !data.sessions.some((s) => speedOf(s))) {
+      box.append(el("p", "usage-note sm-note sm-speed-note", t("Live output speed is measured on requests that go through magpie's gateway. For agents that don't, each call's tokens and time are in Usage › Requests, read from their session files.")));
+    }
     const prov = providerBar();
     if (prov) box.append(prov);
     box.append(selectBar(), el("div", "sm-tree"));
@@ -408,7 +708,10 @@ magpie.plugin("sessions", (ctx) => {
 
   function providerBar() {
     if (data.agent !== "codex") return null;
-    const hidden = data.sessions.filter(otherProvider);
+    // Codex's own threads only: its review and title threads (role
+    // subagent) never show in its history, so they are no conversations
+    // to move
+    const hidden = data.sessions.filter((s) => otherProvider(s) && s.role !== "subagent");
     const undo = lastMove?.agent === data.agent && lastMove.moved.length ? lastMove : null;
     if (!hidden.length && !undo) return null;
     const bar = el("div", "row sm-provider");
@@ -456,7 +759,10 @@ magpie.plugin("sessions", (ctx) => {
     if (out.refused.length) {
       const first = out.refused[0], s = data.sessions.find((x) => x.id === first.id);
       const active = out.refused.filter((r) => r.active);
+      // one that can't move at all says why, and what can be done instead
+      const stuck = out.refused.find((r) => r.stuck), ss = stuck && data.sessions.find((x) => x.id === stuck.id);
       status(active.length ? t(active.length === 1 ? "{title} is still being written to; close it in {agent} and try again in a minute" : "{n} sessions are still being written to; close them in {agent} and try again in a minute", { title: s?.title || first.id, n: active.length, agent: "Codex" })
+        : stuck ? t("{title} can't be moved: Codex keeps its history by byte and has no record of it in its database to move it by. It stays on {from}, unchanged, and Codex lists it when it uses {from} again. To clear it from here, delete it: it goes to magpie's trash and can be restored.", { title: ss?.title || stuck.id, from: stuck.from })
         : (s?.title || first.id) + ": " + first.error, "err");
     }
     return out;
@@ -472,17 +778,36 @@ magpie.plugin("sessions", (ctx) => {
     ed.append(h);
     const names = el("ul", "sm-ask-list sm-provider-list");
     const go = el("button", "text primary", t("Move"));
+    // over a longer list: how many are picked, Select all (Deselect all
+    // once all are) and Invert selection (Cyrus on Discord)
+    const pick = el("div", "sm-provider-pick");
+    const n = el("span", "note sm-count");
+    const all = el("button", "text sm-pick-all");
+    const flip = el("button", "text sm-pick-invert", t("Invert selection"));
+    all.type = flip.type = "button";
+    pick.append(n, el("span", "grow"), all, flip);
+    if (list.length > 1) ed.append(pick);
+    const boxes = [];
+    const sync = () => {
+      for (const [c, id] of boxes) c.checked = chosen.has(id);
+      go.disabled = !chosen.size;
+      n.textContent = t("{n} selected", { n: chosen.size });
+      all.textContent = t(chosen.size === list.length ? "Deselect all" : "Select all");
+    };
+    all.onclick = (e) => { e.stopPropagation(); const on = chosen.size < list.length; for (const s of list) on ? chosen.add(s.id) : chosen.delete(s.id); sync(); };
+    flip.onclick = (e) => { e.stopPropagation(); for (const s of list) chosen.has(s.id) ? chosen.delete(s.id) : chosen.add(s.id); sync(); };
     for (const s of list) {
       const li = el("li");
       const lab = el("label");
       const c = el("input", "sm-check");
       c.type = "checkbox";
-      c.checked = true;
-      c.onchange = () => { c.checked ? chosen.add(s.id) : chosen.delete(s.id); go.disabled = !chosen.size; };
+      c.onchange = () => { c.checked ? chosen.add(s.id) : chosen.delete(s.id); sync(); };
+      boxes.push([c, s.id]);
       lab.append(c, el("span", "name", s.title || s.id), el("span", "sm-prov", s.provider), el("span", "note", ago(s.last)));
       li.append(lab);
       names.append(li);
     }
+    sync();
     ed.append(names);
     ed.append(el("p", "lib-confirm", t("Only the provider each one names is changed, in its files and in Codex's database: its messages, id, title and archive stay as they are. A copy of its files is kept in magpie's trash folder first, and Undo moves them back. A session written to in the last minute is left alone.")));
     const bar = el("div", "bar");
@@ -509,11 +834,12 @@ magpie.plugin("sessions", (ctx) => {
     cancel.focus({ preventScroll: true });
   }
 
-  // the bar over the tree: pick every session shown, and delete those picked
+  // the bar over the tree while picking: pick every session shown, and
+  // delete those picked
   function selectBar() {
     const bar = el("div", "row-head sm-bar");
     const a = current();
-    if (!a?.deletable) { bar.hidden = true; return bar; }
+    if (!a?.deletable || !selecting) { bar.hidden = true; return bar; }
     const list = shown().filter((s) => s.deletable);
     const all = el("input", "sm-check");
     all.type = "checkbox";
@@ -551,12 +877,14 @@ magpie.plugin("sessions", (ctx) => {
     const bar = page.querySelector(".sm-bar");
     if (bar) bar.replaceWith(selectBar());
     const list = shown();
-    // the folder of the latest session is open the first time an agent is shown
+    // the project of the latest session is open the first time an agent is
+    // shown
     if (openedFor !== data.agent) {
       openedFor = data.agent;
       opened.clear();
       drawnIn.clear();
-      if (list[0]) opened.add(groupOf(list[0]));
+      const first = list.find((s) => !scratch(groupOf(s)) && groupOf(s) !== DRAFTS) || list[0];
+      if (first) opened.add(groupOf(first));
     }
     nest(list);
     // a session shown under another stays in sight: its folder and every
@@ -577,24 +905,66 @@ magpie.plugin("sessions", (ctx) => {
     folderBoxes.clear();
     const note = searchNote();
     if (note) tree.append(note);
+    const others = elseBox();
     if (!list.length) {
       if (!search()?.busy) tree.append(el("div", "empty-state", query ? t("No session matches.") : t("No sessions yet")));
+      if (others) tree.append(others);
       return;
     }
     const q = query.trim();
-    const all = [...groups];
-    // a page of folders, or as many as were drawn before, and down to the
-    // folder of the session opened to its details
-    const top = rootOf.get(detail) || detail;
-    const at = detail ? all.findIndex(([, items]) => items.some((s) => s.id === top)) : -1;
-    const n = Math.min(all.length, Math.max(drawnIn.get(FOLDERS) || SM_PAGE, at + 1));
-    for (const [cwd, items] of all.slice(0, n)) tree.append(folder(cwd, items, q));
-    if (n < all.length) tree.append(moreFolders(all, n, q));
+    // the projects in one list, the folders apps and the system made
+    // folded under them, and the folders agents made one session each
+    // (DRAFTS) after the projects: they are no projects, but the reader
+    // looks for the sessions in them, so not folded away either
+    const all = [...groups].filter(([k]) => !scratch(k) && k !== DRAFTS);
+    const rest = [...groups].filter(([k]) => scratch(k));
+    const temp = groups.get(DRAFTS);
+    if (all.length || temp) {
+      const box = el("div", "list sm-folders");
+      if (all.length) folderList(box, all, FOLDERS, q);
+      if (temp) box.append(folder(DRAFTS, temp, q));
+      tree.append(box);
+    }
+    if (rest.length) tree.append(othersBox(rest, q));
+    if (others) tree.append(others);
     toFocus();
   }
 
+  // folderList draws into box a page of folders, or as many as were drawn
+  // before, and down to the folder of the session opened to its details
+  function folderList(box, all, key, q) {
+    const top = rootOf.get(detail) || detail;
+    const at = detail ? all.findIndex(([, items]) => items.some((s) => s.id === top)) : -1;
+    const n = Math.min(all.length, Math.max(drawnIn.get(key) || SM_PAGE, at + 1));
+    for (const [cwd, items] of all.slice(0, n)) box.append(folder(cwd, items, q));
+    if (n < all.length) box.append(moreFolders(all, n, q, key));
+    return box;
+  }
+
+  // othersBox is the fold of the folders apps and the system made: shut
+  // until the reader opens it, a search finds something in it, or the
+  // session opened to its details is in it
+  function othersBox(rest, q) {
+    const box = el("div", "list sm-others");
+    const top = rootOf.get(detail) || detail;
+    const open = othersOpen || !!q || (!!detail && rest.some(([, items]) => items.some((s) => s.id === top)));
+    const r = el("div", "row sm-others-row");
+    const fold = el("button", "fold sm-others-fold");
+    fold.type = "button";
+    fold.setAttribute("aria-expanded", String(open));
+    const words = el("span", "sm-fwords");
+    words.append(el("span", "name", t("Other folders")), el("span", "sm-latest", t("Temporary folders, the disk's root and apps' hidden folders")));
+    fold.append(svg(CHEV_R, 10, 1.6), words);
+    fold.onclick = () => { othersOpen = !open; redrawList(); };
+    r.append(fold, el("span", "note", t(rest.length === 1 ? "{n} folder" : "{n} folders", { n: rest.length })), folderSlot());
+    box.append(r);
+    if (open) folderList(box, rest, OTHERS, q);
+    return box;
+  }
+
   // nest finds the sessions shown that are under another one shown: a
-  // Codex thread whose parent_session is, by a chain with no loop in it
+  // Codex thread, or a Claude branch, whose parent_session is, by a chain
+  // with no loop in it
   function nest(list) {
     const byId = new Map(list.map((s) => [s.id, s]));
     kidsOf = new Map();
@@ -619,8 +989,8 @@ magpie.plugin("sessions", (ctx) => {
 
   // moreFolders adds the next page of folders above itself, as moreRow does
   // a folder's sessions
-  function moreFolders(all, n, q) {
-    drawnIn.set(FOLDERS, n);
+  function moreFolders(all, n, q, key) {
+    drawnIn.set(key, n);
     const b = el("button", "text sess-page-more sm-more-folders");
     b.type = "button";
     b.dataset.unrolls = ""; // it goes down with the folders it opens
@@ -631,16 +1001,19 @@ magpie.plugin("sessions", (ctx) => {
       const next = Math.min(all.length, n + SM_PAGE);
       b.before(...all.slice(n, next).map(([cwd, items]) => folder(cwd, items, q)));
       n = next;
-      drawnIn.set(FOLDERS, n);
+      drawnIn.set(key, n);
       if (n >= all.length) b.remove();
       else b.textContent = label();
     };
     return b;
   }
 
+  // A folder's row: its name and where it is, the latest session's title
+  // under them, and when that was and how many there are on the right.
+  // What can be done to the whole folder is in its ⋯ menu, shown on hover.
   function folder(cwd, items, q) {
     const open = !!q || opened.has(cwd);
-    const g = el("div", "list sm-group");
+    const g = el("div", "sm-group");
     const r = el("div", "row sm-folder");
     // the sessions under those on top are the folder's too
     const members = [];
@@ -649,7 +1022,7 @@ magpie.plugin("sessions", (ctx) => {
     const writable = members.filter((s) => s.deletable);
     // the folder's box picks every session of it shown, folded or not,
     // for the bar's Delete; the bar still counts sessions (#527)
-    if (current()?.deletable && writable.length) {
+    if (selecting && current()?.deletable && writable.length) {
       const c = el("input", "sm-check sm-folder-check");
       c.type = "checkbox";
       // a session's own box ticked or not shows here at once
@@ -670,21 +1043,48 @@ magpie.plugin("sessions", (ctx) => {
     const fold = el("button", "fold");
     fold.type = "button";
     fold.setAttribute("aria-expanded", String(open));
-    fold.append(svg(CHEV_R, 10, 1.6), el("span", "name", groupName(cwd)));
+    const path = cwd === GW || cwd === DRAFTS ? "" : cwd;
+    const line = el("span", "sm-fline");
+    line.append(el("span", "name", groupName(cwd)));
+    const where = path ? whereOf(path) : "";
+    if (where) line.append(el("span", "sub sm-path", where));
+    const words = el("span", "sm-fwords");
+    words.append(line);
+    const latest = members.reduce((x, s) => (s.last || "") > (x.last || "") ? s : x, members[0]);
+    if (latest) words.append(el("span", "sm-latest", latest.title || t("(no prompt)")));
+    fold.append(svg(CHEV_R, 10, 1.6), words);
     fold.onclick = () => {
       if (opened.has(cwd)) opened.delete(cwd); else opened.add(cwd);
       redrawList();
     };
-    const path = cwd === GW ? "" : cwd;
-    r.append(fold, el("span", "sub sm-path", path), el("span", "grow"), el("span", "note", t(members.length === 1 ? "{n} session" : "{n} sessions", { n: members.length })));
-    const allInFolder = (data.sessions || []).filter((s) => s.cwd === cwd);
+    const when = el("span", "sm-when");
+    if (latest?.last) when.append(el("span", "sm-ago", ago(latest.last)));
+    when.append(el("span", "note", t(members.length === 1 ? "{n} session" : "{n} sessions", { n: members.length })));
+    r.append(fold, when);
+    const acts = [];
+    const allInFolder = (data.sessions || []).filter((s) => groupOf(s) === cwd);
     if (data.agent === "claude" && path && allInFolder.every((s) => !s.read_only && !s.gateway)
       && new Set(allInFolder.map((s) => s.wsl || "")).size === 1) {
-      const move = el("button", "text", t("Relocate project"));
-      move.type = "button";
-      move.onclick = (e) => { e.stopPropagation(); askRelocate(cwd, allInFolder[0].wsl || ""); };
-      r.append(move);
+      acts.push({ name: "Relocate project", icon: MOVE, run: () => askRelocate(cwd, allInFolder[0].wsl || "") });
     }
+    if (current()?.deletable && writable.length) {
+      acts.push({ name: "Delete all sessions", icon: TRASH, sep: acts.length > 0, run: () => askDelete(writable.map((s) => s.id), wholeFolder(writable.map((s) => s.id))) });
+    }
+    if (acts.length) {
+      const more = el("button", "copy sm-folder-more");
+      more.type = "button";
+      more.title = t("More");
+      more.setAttribute("aria-label", t("More"));
+      more.setAttribute("aria-haspopup", "menu");
+      more.append(svg(DOTS, 14, 2));
+      more.onclick = (e) => {
+        e.stopPropagation();
+        if (more.classList.contains("open")) return closeAgentMenu();
+        openRowMenu(more, acts);
+      };
+      r.append(more);
+      r.oncontextmenu = (e) => { e.preventDefault(); openRowMenu(more, acts, { x: e.clientX, y: e.clientY }); };
+    } else r.append(folderSlot());
 
     r.title = path;
     g.append(r);
@@ -721,13 +1121,41 @@ magpie.plugin("sessions", (ctx) => {
     return b;
   }
 
+  // lanes says which of a row's controls some session of the list has, so
+  // a row without one keeps its room and every row's columns line up
+  const laneOf = new WeakMap();
+  function lanes() {
+    const list = data?.sessions || [];
+    let l = laneOf.get(list);
+    if (!l) {
+      const resume = list.some((s) => s.resume);
+      l = { resume, term: resume && !!data.terminal, carry: list.some((s) => s.carry?.length) };
+      laneOf.set(list, l);
+    }
+    return l;
+  }
+  // slot is a control's room, unseen and out of reach
+  function slot(tag, cls, text) {
+    const b = el(tag, "sm-slot " + cls, text);
+    b.setAttribute("aria-hidden", "true");
+    b.inert = true;
+    b.tabIndex = -1;
+    return b;
+  }
+  const folderSlot = () => slot("span", "copy sm-folder-slot");
+  // undeletableText is why a session magpie lists can't be deleted
+  function undeletableText(s, a) {
+    if (s.undeletable === "cursor-editor") return t("Cursor's editor keeps this chat in its own database, which it holds open while it runs: delete it in Cursor.");
+    return t("This {agent} session is read only, so magpie can't delete it.", { agent: a.name });
+  }
+
   function item(s, depth = 0) {
     const a = current();
     const wrap = el("div", "sess-item sm-item" + (detail === s.id ? " open" : ""));
     wrap.dataset.depth = String(depth);
     const r = el("div", "row sess sm-sess");
     r.dataset.id = s.id;
-    if (a?.deletable && s.deletable) {
+    if (selecting && a?.deletable && s.deletable) {
       const c = el("input", "sm-check");
       c.type = "checkbox";
       c.checked = picked.has(s.id);
@@ -751,13 +1179,22 @@ magpie.plugin("sessions", (ctx) => {
       sub.prepend(p, " ");
     }
     who.append(sub);
+    // a draft session's folder is a name its agent made: the row says
+    // nothing of it otherwise (the group of them is one)
+    if (zcodeDraft(s)) r.title = s.cwd;
     const hit = hitOf(s);
-    if (hit) who.append(hitLine(hit));
+    if (hit) who.append(hitLine(hit, s.transcript ? s : null));
     // what it spent, as the Usage page's list shows it
     r.append(who, ...sessSpent(s));
+    r.append(speedCell(s));
+    const lane = lanes();
     if (s.resume) {
       const res = el("button", "sess-resume", t("Resume"));
       res.type = "button";
+      // as wide whichever it says
+      res.dataset.wide = t("Resume");
+      res.dataset.wide2 = t("Copied");
+
       res.title = t("Copy the command that resumes it: {cmd}", { cmd: s.resume });
       res.onclick = async (e) => {
         e.stopPropagation();
@@ -768,7 +1205,7 @@ magpie.plugin("sessions", (ctx) => {
         res.copiedT = setTimeout(() => { res.textContent = t("Resume"); res.classList.remove("done"); }, 1400);
       };
       r.append(res);
-      if (data.terminal) {
+      if (lane.term) {
         const term = el("button", "copy sess-term");
         term.type = "button";
         term.title = t("Open in session terminal");
@@ -779,15 +1216,34 @@ magpie.plugin("sessions", (ctx) => {
         };
         r.append(term);
       }
+    } else if (lane.resume) {
+      const res = slot("button", "sm-slot-resume", t("Resume"));
+      res.dataset.wide = t("Resume");
+      res.dataset.wide2 = t("Copied");
+      r.append(res);
+      if (lane.term) r.append(slot("span", "copy sm-slot-icon"));
     }
     if (s.carry?.length) r.append(carryPick(s));
-    if (a?.deletable && s.deletable) {
+    else if (lane.carry) {
+      const b = slot("button", "sess-pick sm-slot-carry");
+      b.append(el("span", "", t("Continue in")), svg(CHEV, 11, 1.6));
+      r.append(b);
+    }
+    // every session of an agent magpie deletes from has a delete; one it
+    // can't delete says why on it (ysm119 on Discord: some Cursor rows had
+    // none, and every column after it moved)
+    if (a?.deletable) {
       const del = el("button", "copy sm-del");
       del.type = "button";
-      del.title = t("Delete");
-      del.setAttribute("aria-label", t("Delete"));
+      const why = s.deletable ? "" : undeletableText(s, a);
+      del.title = why || t("Delete");
+      del.setAttribute("aria-label", why ? t("Delete") + ": " + why : t("Delete"));
       del.append(svg(TRASH, 13, 1.4));
-      del.onclick = (e) => { e.stopPropagation(); askDelete([s.id]); };
+      if (why) {
+        del.classList.add("off");
+        del.setAttribute("aria-disabled", "true");
+        del.onclick = (e) => { e.stopPropagation(); status(why, "err"); };
+      } else del.onclick = (e) => { e.stopPropagation(); askDelete([s.id]); };
       r.append(del);
     }
     // only the session opened and the one closed are drawn again
@@ -811,18 +1267,23 @@ magpie.plugin("sessions", (ctx) => {
 
   // subagentsBox is the fold under a session with its subagents: those
   // its agent started inside it, each opened to its conversation, and the
-  // Codex threads it started, drawn as sessions
+  // Codex threads it started, drawn as sessions; and the Claude sessions
+  // forked from it that went on (role "branch"), named apart
   function subagentsBox(s, kids, depth) {
     const box = el("div", "sm-subs");
     const k = s.agent + "/" + s.id;
     const subs = subTree(s.subagents || []);
-    const n = kids.length + subs.length;
+    const branches = kids.filter((c) => c.role === "branch").length;
+    const n = kids.length + subs.length - branches;
+    const words = [];
+    if (branches) words.push(t(branches === 1 ? "{n} branch" : "{n} branches", { n: branches }));
+    if (n || !branches) words.push(t(n === 1 ? "{n} subagent" : "{n} subagents", { n }));
     const draw = () => {
       const open = subsOpen.has(k) || (!!query.trim() && kids.length > 0);
       const fold = el("button", "fold sm-subs-fold");
       fold.type = "button";
       fold.setAttribute("aria-expanded", String(open));
-      fold.append(svg(CHEV_R, 10, 1.6), el("span", "", t(n === 1 ? "{n} subagent" : "{n} subagents", { n })));
+      fold.append(svg(CHEV_R, 10, 1.6), el("span", "", words.join(" · ")));
       fold.onclick = (e) => {
         e.stopPropagation();
         if (subsOpen.has(k)) subsOpen.delete(k); else subsOpen.add(k);
@@ -871,7 +1332,6 @@ magpie.plugin("sessions", (ctx) => {
   // subRow is one subagent of s: what it was asked, the agent it ran as,
   // and a click shows what was said in it
   function subRow(s, sa, d) {
-    const k = s.agent + "/" + s.id + "/" + sa.id;
     const wrap = el("div", "sm-sub");
     wrap.style.setProperty("--sub-in", String(d));
     const r = el("button", "row sm-sub-row");
@@ -881,23 +1341,13 @@ magpie.plugin("sessions", (ctx) => {
     who.append(el("span", "name", sa.title || sa.kind || sa.id),
       el("span", "sub", [sa.title ? sa.kind : "", sa.last || sa.start ? ago(sa.last || sa.start) : "", sa.id.slice(0, 8)].filter(Boolean).join(" · ")));
     r.append(who);
-    const box = el("div", "sess-talk");
-    box.dataset.talk = k;
-    const show = () => {
-      const on = talkOpen.has(k);
-      r.setAttribute("aria-expanded", String(on));
-      wrap.classList.toggle("open", on);
-      box.hidden = !on;
-      if (on) drawTalk(box, s, sa.id);
-    };
+    r.setAttribute("aria-haspopup", "dialog");
     r.onclick = (e) => {
       e.stopPropagation();
       if (window.getSelection()?.toString()) return;
-      if (talkOpen.has(k)) talkOpen.delete(k); else talkOpen.add(k);
-      show();
+      talkSheet(s, sa);
     };
-    wrap.append(r, box);
-    show();
+    wrap.append(r);
     return wrap;
   }
 
@@ -914,30 +1364,25 @@ magpie.plugin("sessions", (ctx) => {
     if (s.cwd) line(t("Folder"), s.cwd);
     line(t("Session ID"), s.id, copyBtn(s.id, t("Session id")));
     if (s.resume) line(t("Resume"), el("code", "", s.resume), copyBtn(s.resume, t("Resume command")));
-    for (const c of s.carry || []) line(t("Continue in {agent}", { agent: agentOf(c.agent).name }), el("code", "", c.command), copyBtn(c.command, t("Command")));
+    for (const c of s.carry || []) {
+      const agent = agentOf(c.agent).name;
+      if (!c.convert) line(t("Continue in {agent}", { agent }), el("code", "", c.command), copyBtn(c.command, t("Command")));
+      else {
+        // made only when asked: a new session of that agent's, this one only read
+        const b = copyBtn("", t("Command"));
+        b.title = t("Convert, then copy the command");
+        b.onclick = (e) => { e.stopPropagation(); carryOver(s, c.agent, false, b); };
+        line(t("Continue in {agent}", { agent }), el("span", "v", t("A new {agent} session is made from this conversation", { agent })), b);
+      }
+    }
     sessUsageDetail(d, s, line);
     if (s.path) line(t("File"), s.path + (s.files > 1 ? " " + t("+{n} more", { n: s.files - 1 }) : ""));
     if (s.transcript) {
-      const box = el("div", "sess-talk");
-      box.dataset.talk = s.agent + "/" + s.id;
-      const b = el("button", "text sess-talk-btn");
+      const b = el("button", "text sess-talk-btn", t("Show conversation"));
       b.type = "button";
-      const show = () => {
-        const on = talkOpen.has(s.agent + "/" + s.id);
-        b.textContent = t(on ? "Hide conversation" : "Show conversation");
-        b.setAttribute("aria-expanded", String(on));
-        box.hidden = !on;
-        if (on) drawTalk(box, s);
-      };
-      b.onclick = (e) => {
-        e.stopPropagation();
-        const k = s.agent + "/" + s.id;
-        if (talkOpen.has(k)) talkOpen.delete(k); else talkOpen.add(k);
-        show();
-      };
+      b.setAttribute("aria-haspopup", "dialog");
+      b.onclick = (e) => { e.stopPropagation(); talkSheet(s); };
       line(t("Conversation"), b, exportBtn(s));
-      d.append(box);
-      show();
     }
     return d;
   }
@@ -977,11 +1422,14 @@ magpie.plugin("sessions", (ctx) => {
 
   // agentOf is an agent as the page names it: of those with sessions, else
   // by its id
+  // iconItems gives each agent in the menu just opened its icon, as its button has
+  const iconItems = (opts) => document.querySelectorAll(".proto-menu .pm-item").forEach((b, i) => opts[i]?.icon && b.firstChild.after(icon(opts[i].icon)));
   const agentOf = (id) => data?.agents.find((x) => x.agent === id) || { agent: id, name: id, icon: id };
 
-  // carryPick is the other agents that can carry a session on from its
-  // file as it is (#845; oh-my-pi forks a Pi session), in the app's menu:
-  // copy the command, or open it in the session terminal.
+  // carryPick is the other agents that can carry a session on (#845):
+  // from its file as it is (oh-my-pi forks a Pi session), or from a new
+  // session of theirs converted from it (Claude Code and Codex), in the
+  // app's menu: copy the command, or open it in the session terminal.
   function carryPick(s) {
     const b = el("button", "sess-pick sess-carry");
     b.type = "button";
@@ -994,26 +1442,40 @@ magpie.plugin("sessions", (ctx) => {
       if (b.classList.contains("open")) return closeProtoMenu();
       const opts = [];
       for (const c of s.carry) {
-        const name = agentOf(c.agent).name;
-        opts.push({ v: "copy\x01" + c.agent, name, literalName: true, note: "Copy the command", title: c.command });
-        if (data.terminal) opts.push({ v: "term\x01" + c.agent, name, literalName: true, note: "Open in session terminal", title: c.command });
+        const { name, icon: ic } = agentOf(c.agent);
+        const title = c.convert ? t("A new {agent} session is made from this conversation", { agent: name }) : c.command;
+        opts.push({ v: "copy\x01" + c.agent, name, icon: ic, literalName: true, note: c.convert ? "Convert, then copy the command" : "Copy the command", title });
+        if (data.terminal) opts.push({ v: "term\x01" + c.agent, name, icon: ic, literalName: true, note: c.convert ? "Convert, then open in session terminal" : "Open in session terminal", title });
       }
       openProtoMenu(b, opts, "", (v) => {
         b.focus({ preventScroll: true });
         const [how, to] = v.split("\x01");
         const c = s.carry.find((x) => x.agent === to);
         if (!c) return;
-        if (how === "copy") copy(c.command, t("Command"));
+        if (c.convert) carryOver(s, to, how === "term");
+        else if (how === "copy") copy(c.command, t("Command"));
         else api("sessions/terminal", { agent: s.agent, id: s.id, in: to }).then(() => status(t("Opening in session terminal"), "ok"), (err) => status(err.message, "err"));
       }, "Continue in another agent", "sess-carry-menu", "right");
+      iconItems(opts);
     };
     return b;
   }
 
+  // carryOver converts a session for another agent (Claude Code's for
+  // Codex, Codex's for Claude Code) when the user picks it, then copies the
+  // line that opens the new one, or opens it in the session terminal
+  function carryOver(s, to, open, btn) {
+    const agent = agentOf(to).name;
+    api("sessions/carry", { agent: s.agent, id: s.id, to, open }).then((r) => {
+      if (open) status(t("Made a new {agent} session from this one, opening in session terminal", { agent }), "ok");
+      else copy(r.command, t("Command"), btn, t("Made a new {agent} session from this one, and copied the command that opens it", { agent }));
+    }, (err) => status(err.message, "err"));
+  }
+
   // drawTalk fills box with what was said in a session, read from the
   // agent's own file when it is first shown (only read, never written)
-  function drawTalk(box, s, sub = "") {
-    const k = s.agent + "/" + s.id + (sub ? "/" + sub : "");
+  function drawTalk(box, s, sub = "", find = "") {
+    const k = s.agent + "/" + s.id + (sub ? "/" + sub : "") + (find ? "?" + find : "");
     const got = talks.get(k);
     if (!got) {
       box.replaceChildren(el("p", "cx-none", t("Reading…")));
@@ -1024,11 +1486,11 @@ magpie.plugin("sessions", (ctx) => {
         if (talks.get(k) !== pending) return;
         talks.set(k, value);
         if (!talkOpen.has(k)) return;
-        for (const currentBox of page.querySelectorAll(".sess-talk")) {
-          if (currentBox.dataset.talk === k) drawTalk(currentBox, s, sub);
+        for (const currentBox of document.querySelectorAll(".sess-talk")) {
+          if (currentBox.dataset.talk === k) drawTalk(currentBox, s, sub, find);
         }
       };
-      api("sessions/transcript?agent=" + encodeURIComponent(s.agent) + "&id=" + encodeURIComponent(s.id) + (sub ? "&sub=" + encodeURIComponent(sub) : ""))
+      api("sessions/transcript?agent=" + encodeURIComponent(s.agent) + "&id=" + encodeURIComponent(s.id) + (sub ? "&sub=" + encodeURIComponent(sub) : "") + (find ? "&find=" + encodeURIComponent(find) : ""))
         .then((tr) => finish({ tr }), (err) => finish({ err: err.message }));
       return;
     }
@@ -1036,11 +1498,13 @@ magpie.plugin("sessions", (ctx) => {
     if (got.err) { box.replaceChildren(el("p", "cx-none", got.err)); talks.delete(k); return; }
     const parts = got.tr?.parts || [];
     const out = [];
+    // read from where the words were said, the start left out
+    if (got.tr?.from > 0) out.push(el("p", "cx-none sess-from", t(got.tr.from === 1 ? "{n} earlier message not shown" : "{n} earlier messages not shown", { n: got.tr.from })));
     if (!parts.length) out.push(el("p", "cx-none", t(got.tr?.source === "gateway" ? "No saved gateway content for this session" : "Nothing was said here")));
     // each reply names its model once, at its first part, and again
     // only where the model changes inside it (#2253): the model its own
     // line in the agent's file names, so none where the file names none
-    let said = "", fresh = true;
+    let said = "", fresh = true, foundOne = false;
     for (const p of parts) {
       let model = "";
       if (p.role === "assistant") {
@@ -1048,11 +1512,110 @@ magpie.plugin("sessions", (ctx) => {
         said = p.model || "";
         fresh = false;
       } else if (p.role === "user") fresh = true;
-      out.push(ledSaid(p, model));
+      const said1 = ledSaid(p, model);
+      if (p.role === "user" && (!p.kind || p.kind === "text")) said1.dataset.turn = "1";
+      if (find && !foundOne && (!p.kind || p.kind === "text" || p.kind === "context") && needleOf(p.text || "").includes(find)) { said1.classList.add("sess-found"); foundOne = true; }
+      out.push(said1);
     }
     if (got.tr?.cut) out.push(el("p", "cx-none", t("There was more than is shown here")));
     out.push(el("p", "cx-src", t(got.tr?.source === "gateway" ? "Recorded gateway traffic only; earlier, expired or uncaptured content may be missing" : "Read from the agent's session file; magpie keeps no copy")));
     box.replaceChildren(...out);
+    box.dispatchEvent(new Event("talkdrawn"));
+  }
+
+  // talkSheet shows a session's conversation (or a subagent's, sa) in a
+  // sheet of its own, long as it may be, with the turns to jump between and
+  // the top and bottom in its head (Wing8Aqua on X: the inline list was too
+  // long to get around). A turn is what the user said; the sheet scrolls
+  // to it, with no animation, as a key pressed many times would.
+  const NAV = { top: "M4 3.5h8M8 13V6.5M5 9 8 6l3 3", prev: "M4.5 10 8 6.5l3.5 3.5", next: "M4.5 6 8 9.5 11.5 6", bottom: "M4 12.5h8M8 3v6.5M5 7 8 10l3-3" };
+  function talkSheet(s, sa, find = "") {
+    const k = s.agent + "/" + s.id + (sa ? "/" + sa.id : "") + (find ? "?" + find : "");
+    talkOpen.add(k);
+    if (globalThis.CSS?.highlights) CSS.highlights.delete("sess-found");
+    const ed = el("div", "editor sess-sheet wide");
+    const head = el("div", "ehead");
+    const nav = (name, label) => {
+      const b = el("button", "sess-nav");
+      b.type = "button";
+      b.dataset.nav = name;
+      b.title = label;
+      b.setAttribute("aria-label", label);
+      b.append(svg(NAV[name], 14, 1.6));
+      return b;
+    };
+    const top = nav("top", t("Top")), prev = nav("prev", t("Previous turn")), next = nav("next", t("Next turn")), bottom = nav("bottom", t("Bottom"));
+    const count = el("span", "sess-turns");
+    head.append(icon(agentOf(s.agent).icon), el("b", "", (sa ? sa.title || sa.kind || sa.id : s.title || s.id)), el("span", "grow"), count, top, prev, next, bottom);
+    const box = el("div", "sess-talk");
+    box.dataset.talk = k;
+    const bar = el("div", "bar");
+    const close = el("button", "text primary", t("Close"));
+    close.type = "button";
+    close.onclick = (e) => { e.stopPropagation(); closeConfirmAsk(); };
+    bar.append(el("span", "grow"), close);
+    ed.append(head, box, bar);
+    confirmAsk = ed;
+    openModal(ed);
+    $("#modal").classList.add("lib");
+    const body = ed.querySelector(":scope > .ebody");
+    const turns = () => [...box.querySelectorAll("[data-turn]")];
+    const at = (n) => n.getBoundingClientRect().top - body.getBoundingClientRect().top + body.scrollTop;
+    const SLACK = 8;
+    const sync = () => {
+      const ts = turns(), y = body.scrollTop;
+      const tops = ts.map(at);
+      const atEnd = y + body.clientHeight >= body.scrollHeight - 1;
+      const here = ts.length ? (atEnd ? ts.length : Math.max(1, tops.filter((x) => x <= y + SLACK).length)) : 0;
+      count.hidden = !ts.length;
+      count.textContent = here + " / " + ts.length;
+      prev.disabled = !tops.some((x) => x < y - SLACK);
+      next.disabled = here >= ts.length;
+      top.disabled = y <= 0;
+      bottom.disabled = atEnd;
+    };
+    const go = (y) => { body.scrollTo({ top: y, behavior: "instant" }); sync(); };
+    top.onclick = () => go(0);
+    bottom.onclick = () => go(body.scrollHeight);
+    prev.onclick = () => { const y = body.scrollTop - SLACK, c = turns().map(at).filter((x) => x < y); if (c.length) go(c[c.length - 1]); };
+    next.onclick = () => { const tops = turns().map(at), y = body.scrollTop + SLACK, c = tops[Math.max(1, tops.filter((x) => x <= y).length)]; if (c !== undefined) go(c); };
+    let queued = 0;
+    body.addEventListener("scroll", () => { if (!queued) queued = requestAnimationFrame(() => { queued = 0; sync(); }); });
+    box.addEventListener("talkdrawn", sync);
+    // opened at a search's words: the sheet starts at the message that
+    // said them, once, as it is first drawn
+    let toFound = !!find;
+    box.addEventListener("talkdrawn", () => {
+      const at1 = toFound && box.querySelector(".sess-found");
+      if (!at1) return;
+      toFound = false;
+      markFound(at1, find);
+      go(Math.max(0, at(at1) - SLACK));
+    });
+    box.again = () => drawTalk(box, s, sa ? sa.id : "", find);
+    box.again();
+    sync();
+    body.focus({ preventScroll: true });
+  }
+
+  // markFound marks the words searched for in the message n where the
+  // browser can (CSS Custom Highlight API), never changing what is drawn
+  function markFound(n, find) {
+    if (typeof Highlight === "undefined" || !CSS.highlights) return;
+    const words = find.split(" ").filter(Boolean);
+    const ranges = [];
+    const walk = document.createTreeWalker(n, NodeFilter.SHOW_TEXT);
+    for (let tn = walk.nextNode(); tn && ranges.length < 50; tn = walk.nextNode()) {
+      const low = tn.data.toLowerCase();
+      for (const w of words) {
+        for (let i = low.indexOf(w); i >= 0 && ranges.length < 50; i = low.indexOf(w, i + w.length)) {
+          const r = new Range();
+          try { r.setStart(tn, i); r.setEnd(tn, i + w.length); } catch { continue; }
+          ranges.push(r);
+        }
+      }
+    }
+    if (ranges.length) CSS.highlights.set("sess-found", new Highlight(...ranges));
   }
 
   function askRelocate(from, wsl) {
@@ -1136,13 +1699,14 @@ magpie.plugin("sessions", (ctx) => {
       : folders ? t("Delete all {n} sessions in {k} folders?", { n: list.length, k: folders })
       : t("Delete {n} sessions?", { n: list.length })));
     ed.append(h);
-    if (folder && folder !== GW) ed.append(el("p", "sub sm-ask-path", folder));
+    if (folder && folder !== GW && folder !== DRAFTS) ed.append(el("p", "sub sm-ask-path", folder));
     const names = el("ul", "sm-ask-list");
     for (const s of list.slice(0, 5)) names.append(el("li", "", s.title || s.id));
     if (list.length > 5) names.append(el("li", "more", t("+{n} more", { n: list.length - 5 })));
     ed.append(names);
     // a gateway session has no files of its agent's here: say what goes
-    if (list.some((s) => !s.gateway)) ed.append(el("p", "lib-confirm", t("Their files are moved to magpie's trash ({dir}), not erased: Trash puts them back. A session written to in the last minute is left alone, as {agent} may still be running it.", { dir: data.trashDir, agent: a.name })));
+    if (list.some((s) => !s.gateway && !s.forget)) ed.append(el("p", "lib-confirm", t("Their files are moved to magpie's trash ({dir}), not erased: Trash puts them back. A session written to in the last minute is left alone, as {agent} may still be running it.", { dir: data.trashDir, agent: a.name })));
+    if (list.some((s) => s.forget)) ed.append(el("p", "lib-confirm", t("{agent} isn't installed here. These sessions leave this list; its own files are not touched, and Trash puts them back.", { agent: a.name })));
     if (list.some((s) => s.gateway)) ed.append(el("p", "lib-confirm sm-gw-confirm", t("A session seen only through the gateway leaves this list, and any conversation magpie recorded of it is moved to magpie's trash ({dir}): Trash puts it back. {agent}'s own files elsewhere are not touched, and Usage keeps what it spent. One with a request in the last minute is left alone.", { dir: data.trashDir, agent: a.name })));
     const bar = el("div", "bar");
     const go = el("button", "text primary danger-fill", t("Delete"));
@@ -1255,8 +1819,8 @@ magpie.plugin("sessions", (ctx) => {
         r.append(icon(x.icon));
         const who = el("div", "who");
         who.append(el("div", "name", x.title || x.id));
-        who.append(el("div", "sub", [x.name, x.gateway ? t("Seen through the gateway") : x.cwd ? baseName(x.cwd) : "", t("deleted {when}", { when: ago(x.deleted) }),
-          x.gateway ? (x.size ? t("{size} recorded", { size: fmtBytes(x.size) }) : "") : fmtBytes(x.size)].filter(Boolean).join(" · ")));
+        who.append(el("div", "sub", [x.name, x.forgot ? t("Taken off the list") : x.gateway ? t("Seen through the gateway") : x.cwd ? baseName(x.cwd) : "", t("deleted {when}", { when: ago(x.deleted) }),
+          x.forgot ? "" : x.gateway ? (x.size ? t("{size} recorded", { size: fmtBytes(x.size) }) : "") : fmtBytes(x.size)].filter(Boolean).join(" · ")));
         who.title = (x.items || []).map((i) => i.from).join("\n");
         r.append(who);
         const b = el("button", "sess-resume sm-restore");
@@ -1292,6 +1856,157 @@ magpie.plugin("sessions", (ctx) => {
     if (items.some((x) => x.gateway)) out.push(el("p", "usage-note sm-gw-trash-note", t("Conversations magpie recorded through the gateway still expire after 7 days here, and Delete saved conversations… erases them too.")));
     return out;
   }
+
+  // speedOf is the speed of a row's session: of any of the keys the
+  // gateway may know it by (s.keys, sessions.GatewayKeys), the one in
+  // flight, else the one heard from last
+  function speedOf(s) {
+    let best = null;
+    for (const k of [s.agent + "|" + s.id, ...(s.keys || [])]) {
+      const sp = speeds.get(k);
+      if (sp && (!best || sp.live && !best.live || sp.live === best.live && sp.idle < best.idle)) best = sp;
+    }
+    return best;
+  }
+  const rateText = (v) => String(Math.round(v));
+  // rateParts is "{n} tok/s" in the reader's language, in the parts around n
+  const rateParts = () => t("{n} tok/s", { n: "\u0000" }).split("\u0000");
+  const NS = "http://www.w3.org/2000/svg";
+  function sv(tag, attrs) {
+    const n = document.createElementNS(NS, tag);
+    for (const k in attrs) n.setAttribute(k, attrs[k]);
+    return n;
+  }
+  // curveShape lays a curve (a value a second, null where nothing of the
+  // session's was in flight) on a 300-wide box h high: the runs of seconds
+  // with a value, the gaps between two runs, and where the last value is
+  function curveShape(curve, h) {
+    const vals = curve || [], n = vals.length;
+    const max = Math.max(1, ...vals.filter((v) => v != null));
+    const x = (i) => n > 1 ? i * 300 / (n - 1) : 300;
+    const y = (v) => +(h - 2 - v / max * (h - 8)).toFixed(1);
+    const runs = [], gaps = [];
+    let run = null, last = -1;
+    vals.forEach((v, i) => {
+      if (v == null) { if (run) runs.push(run); run = null; return; }
+      if (!run && last >= 0 && i - last > 1) gaps.push({ from: x(last), to: x(i), secs: i - last - 1 });
+      (run ||= []).push([+x(i).toFixed(1), y(v)]);
+      last = i;
+    });
+    if (run) runs.push(run);
+    // a lone second is a short stroke, not nothing
+    for (const r of runs) if (r.length === 1) r.push([Math.min(300, r[0][0] + 2.5), r[0][1]]);
+    return { runs, gaps, end: last === n - 1 && last >= 0 ? { x: x(last), y: y(vals[last]) } : null };
+  }
+  // curveSvg draws it: the line, a dashed baseline over each gap, and
+  // under the line a light fill in the popover
+  function curveSvg(curve, w, h, fill) {
+    const shape = curveShape(curve, h);
+    const g = sv("svg", { width: w, height: h, viewBox: `0 0 300 ${h}`, preserveAspectRatio: "none", "aria-hidden": "true", class: "sm-curve" });
+    const pts = (r) => r.map((p) => p.join(",")).join(" ");
+    for (const r of shape.runs) {
+      if (fill) g.append(sv("path", { class: "sm-curve-fill", d: `M${r[0][0]},${h} L${pts(r).replaceAll(" ", " L")} L${r[r.length - 1][0]},${h} Z` }));
+      g.append(sv("polyline", { class: "sm-curve-line", points: pts(r), "vector-effect": "non-scaling-stroke" }));
+    }
+    for (const gap of shape.gaps) g.append(sv("line", { class: "sm-curve-gap", x1: gap.from, x2: gap.to, y1: h - 1, y2: h - 1, "vector-effect": "non-scaling-stroke" }));
+    return { svg: g, shape };
+  }
+  // speedCell is a row's speed: its curve and tokens a second now, or the
+  // round's average once nothing is in flight; a button that opens the
+  // round's numbers. Hidden while the session has no speed.
+  function speedCell(s) {
+    const b = el("button", "sm-speed");
+    b.type = "button";
+    b.sess = s;
+    b.setAttribute("aria-haspopup", "dialog");
+    b.setAttribute("aria-expanded", "false");
+    b.onclick = (e) => { e.stopPropagation(); openSpeed(b); };
+    fillSpeed(b);
+    return b;
+  }
+  function fillSpeed(b) {
+    const sp = speedOf(b.sess);
+    const drawn = sp && (sp.live || sp.rated && sp.avg > 0 || sp.curve?.some((v) => v != null));
+    b.hidden = !drawn;
+    if (!drawn) { b.replaceChildren(); return; }
+    const parts = [];
+    if (sp.curve?.some((v) => v != null)) parts.push(curveSvg(sp.curve, 88, 24, false).svg);
+    const v = el("span", "sm-speed-val" + (sp.live ? " live" : ""));
+    if (!sp.rated) v.textContent = "—";
+    else if (sp.live) { const [pre, post] = rateParts(); v.append(pre, el("b", "", rateText(sp.now)), el("small", "", post)); }
+    else v.textContent = t("Avg {n} tok/s", { n: rateText(sp.avg) });
+    parts.push(v);
+    b.replaceChildren(...parts);
+    b.setAttribute("aria-label", t("Output speed") + ": " + v.textContent);
+  }
+  function speedPopBody(sp) {
+    const head = el("div", "sm-sp-head");
+    const [pre, post] = rateParts();
+    head.append(pre, el("span", "sm-sp-big", sp.rated ? rateText(sp.live ? sp.now : sp.avg) : "—"), el("span", "sm-sp-unit", post.trim()));
+    const chart = el("div", "sm-sp-chart");
+    const { svg: g, shape } = curveSvg(sp.curve, 308, 72, true);
+    chart.append(g);
+    // a gap inside the round is the agent at work between two requests
+    for (const gap of shape.gaps) {
+      if (gap.secs < 3 || gap.to - gap.from < 40) continue;
+      const l = el("span", "sm-sp-gap", t("Tool {n}s", { n: gap.secs }));
+      l.style.left = `calc(${gap.from / 3}% + 4px)`;
+      chart.append(l);
+    }
+    if (sp.live && shape.end) {
+      const d = el("span", "sm-sp-dot");
+      d.style.top = (shape.end.y - 3.5) + "px";
+      chart.append(d);
+    }
+    const stats = el("div", "sm-sp-stats");
+    const rate = (n) => sp.rated ? t("{n} tok/s", { n: rateText(n) }) : "—";
+    for (const [k, v] of [["Round average", rate(sp.avg)], ["Fastest second", rate(sp.peak)], ["Out so far", sp.rated ? t("{n} tokens", { n: fmtN(sp.output) }) : "—"]]) {
+      const c = el("div", "");
+      c.append(el("span", "sm-sp-k", t(k)), el("span", "sm-sp-v", v));
+      stats.append(c);
+    }
+    return [head, chart, stats];
+  }
+  function openSpeed(b) {
+    if (speedPop?.anchor === b) return closeProtoMenu();
+    closeProtoMenu();
+    const box = el("div", "pop sm-speed-pop");
+    box.setAttribute("role", "dialog");
+    box.setAttribute("aria-label", t("Output speed"));
+    const draw = () => {
+      const sp = speedOf(b.sess);
+      if (!sp || !b.isConnected) return closeProtoMenu();
+      box.replaceChildren(...speedPopBody(sp));
+    };
+    draw();
+    document.body.append(box);
+    placeMenu(box, b, "right");
+    b.classList.add("open");
+    b.setAttribute("aria-expanded", "true");
+    holdMenu(box, b, () => {}, (e) => { if (scrollCloses(box, e)) closeProtoMenu(); }, () => { speedPop = null; });
+    speedPop = { anchor: b, draw };
+  }
+  const speedsShown = () => view === "sessions" && !document.hidden && !trashOn;
+  async function speedTick() {
+    if (!speedsShown()) { clearInterval(speedT); speedT = 0; return; }
+    if (speedBusy) return;
+    if (speedSkips > 0) { speedSkips--; return; }
+    speedBusy = true;
+    try {
+      const list = await api("speeds");
+      speeds = new Map((Array.isArray(list) ? list : []).map((sp) => [sp.agent + "|" + sp.session, sp]));
+    } catch { return; } finally { speedBusy = false; }
+    if (!speeds.size) speedSkips = speedRestTicks - 1;
+    page?.querySelectorAll(".sm-speed").forEach(fillSpeed);
+    speedPop?.draw();
+  }
+  function speedsOn() {
+    if (speedT || !speedsShown()) return;
+    speedSkips = 0;
+    speedT = setInterval(speedTick, 1000);
+    speedTick();
+  }
+  document.addEventListener("visibilitychange", speedsOn);
 
   ctx.slots.add("page", {
     key: "sessions",

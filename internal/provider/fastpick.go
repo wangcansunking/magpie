@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/codexcat"
 	"github.com/yetone/magpie/internal/settings"
 )
 
@@ -46,8 +47,14 @@ func UltraPicks(agent string) []string {
 // CanUltra reports whether a fast pick of model on p can be sent as
 // Ultrafast: a ChatGPT model that one of Codex's accounts lists the tier
 // on (Account.Tiers), or a plugin's model, with fast mode, that the plugin
-// says its vendor serves at ultrafast (serviceTiers, #2514). A list that
-// doesn't say tiers offers none.
+// says its vendor serves at ultrafast (serviceTiers, #2514), or another
+// magpie's model its list offers ultrafast on (#1234), or a GPT model on a
+// provider the user added by its address (OwnFast) that OpenAI offers
+// Ultrafast on: one of Codex's accounts lists the tier on the model, or
+// Codex's own entry for it does, which Codex is offered on that provider
+// as well (codexcat.OwnOffers; KoiLx0 on X, a relay that serves it). Like
+// its Fast, that is asked for, and a provider that turns the field away is
+// asked again without it. A list that doesn't say tiers offers none.
 func CanUltra(p Provider, model string) bool {
 	return UltraOn(p, model, UltraModels())
 }
@@ -61,6 +68,14 @@ func UltraOn(p Provider, model string, ultra map[string]bool) bool {
 		}
 		m, listed := pluginModel(pp, model)
 		return listed && CanFast(p, model) && pluginTierOn(pp.ID, m, "ultrafast")
+	}
+	if p.IsRemoteMagpie() {
+		// another magpie's model it offers Ultrafast on, beside Fast
+		return CanFast(p, model) && slices.Contains(RemoteTiers(p, model), "ultrafast")
+	}
+	if OwnFast(p, model) {
+		slug := modelSlug(model)
+		return ultra[slug] || codexcat.OwnOffers(slug, "ultrafast")
 	}
 	return p.Account != nil && p.Account.Agent == "codex" && CanFast(p, model) && ultra[model]
 }

@@ -2,11 +2,15 @@
 // Each account of a subscription, and each key, can be kept for some of the
 // provider's models only (#474: 增加账号级别的模型选项). Its row has a badge:
 // one kept for some says how many, always shown; one serving every model
-// says All models, on hover. A click opens the provider's models under the
+// says All models, under its ⋯. A click opens the provider's models under the
 // row as chips; Save posts provider/accountmodels with the account (or the
 // key's id) and the models picked, All models posts none. A click moves
 // nothing and the page stays where it is. A subscription with one account
-// has no badge. In English and Chinese.
+// has no badge. Picks left unsaved in the picker go with the editor's own
+// Save, before the provider's (#2862, LoKi): a Save that closed the editor
+// without them said saved and kept the account's old list. A picker with
+// every model unpicked holds that Save with a warning. In English and
+// Chinese.
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
@@ -64,6 +68,10 @@ function serve(lang, posts) {
       p.accountModels = am;
       return json(providers);
     }
+    if (url.pathname === "/api/provider/save" && route.request().method() === "POST") {
+      posts.push({ saved: route.request().postDataJSON().id });
+      return json(providers);
+    }
     if (url.pathname.startsWith("/api/")) return json({});
     const file = path.join(assets, url.pathname === "/" ? "index.html" : url.pathname);
     const contentType = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png" }[path.extname(file)];
@@ -72,8 +80,8 @@ function serve(lang, posts) {
 }
 
 const words = {
-  en: { all: "All models", one: "1 model", two: "2 models", save: "Save", only: "Serves only gpt-6-mini" },
-  zh: { all: "全部模型", one: "1 个模型", two: "2 个模型", save: "保存", only: "只用于 gpt-6-mini" },
+  en: { all: "All models", one: "1 model", two: "2 models", save: "Save", only: "Serves only gpt-6-mini", pickOne: "Pick at least one model for the account, or choose All models" },
+  zh: { all: "全部模型", one: "1 个模型", two: "2 个模型", save: "保存", only: "只用于 gpt-6-mini", pickOne: "至少为该账号选一个模型，或选择「全部模型」" },
 };
 
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
@@ -90,6 +98,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       });
       const page = await (await browser.newContext({ viewport: { width: 900, height: 760 }, reducedMotion: "reduce" })).newPage();
       page.setDefaultTimeout(5000);
+      page.setDefaultNavigationTimeout(60000);
       const errors = [];
       page.on("pageerror", (e) => errors.push(e.message));
       const posts = [];
@@ -116,8 +125,16 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       assert.equal(typeof before, "number", "one live account row before the click");
       await b.click();
       await page.waitForTimeout(200);
+      // the redraw's soft refresh starts 2px low; WebKit can hold it there past 200ms
+      await page.evaluate(() => Promise.all(document.querySelector("#modal .dialog").getAnimations().map((a) => a.finished)));
       assert.equal(await top(), before, `${id}'s row moved`);
       assert.equal(await scrolled(page), sc, "a click scrolled");
+    };
+    // an unset badge waits under its row's ⋯
+    const reveal = async (page, id) => {
+      if (await pill(page, id).isVisible()) return;
+      await row(page, id).hover();
+      await row(page, id).locator(".acc-more").click();
     };
     const posted = async (posts, n) => {
       for (let i = 0; i < 60 && posts.length === n; i++) await new Promise((r) => setTimeout(r, 50));
@@ -125,17 +142,18 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     };
 
     test(`${engine} ${lang}: a Codex account is kept for some models, and given all again`, async (t) => {
-      const { page, errors, posts } = await open(t, "Codex", ".editor .accts .acc .amodels");
-      // the one kept for gpt-6-mini says so, always; the other says All models on hover only
+      const { page, errors, posts } = await open(t, "Codex", ".editor .accts .acc .amodels.set");
+      // the one kept for gpt-6-mini says so, always; the other says All models under ⋯ only
       assert.equal(await pill(page, "Spare@Example.com").textContent(), w.one);
       assert.equal(await pill(page, "Spare@Example.com").getAttribute("title"), w.only);
       assert.equal(await pill(page, "Spare@Example.com").evaluate((e) => getComputedStyle(e).opacity), "1");
       assert.equal(await pill(page, "me@example.com").textContent(), w.all);
       await page.mouse.move(0, 0);
       await page.waitForTimeout(250);
-      assert.equal(await pill(page, "me@example.com").evaluate((e) => getComputedStyle(e).opacity), "0");
+      assert.equal(await pill(page, "me@example.com").isVisible(), false);
 
       // me: the provider's models it serves agents, none picked; Save waits for one
+      await reveal(page, "me@example.com");
       await still(page, "me@example.com", pill(page, "me@example.com"));
       assert.deepEqual(await chips(page, "me@example.com"), ["gpt-6", "gpt-6-mini"]);
       const save = panel(page, "me@example.com").getByRole("button", { name: w.save, exact: true });
@@ -153,7 +171,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await still(page, "Spare@Example.com", pill(page, "Spare@Example.com"));
       assert.deepEqual(await chips(page, "Spare@Example.com"), ["gpt-6", "gpt-6-mini*"]);
       n = posts.length;
-      await panel(page, "Spare@Example.com").locator("button.action").click();
+      await panel(page, "Spare@Example.com").getByRole("button", { name: w.all, exact: true }).click();
       assert.deepEqual(await posted(posts, n), { id: "codex", account: "Spare@Example.com", allow: [] });
       await page.locator(".editor .acct-models").waitFor({ state: "detached" });
       assert.equal(await pill(page, "Spare@Example.com").textContent(), w.all);
@@ -165,6 +183,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         "Every model of the provider goes to this account. Click to keep it for some only",
         "Every model of the provider goes to this key. Click to keep it for some only",
         "Pick the provider's models first.",
+        "Pick at least one model for the account, or choose All models",
         "{who} serves only {models}",
         "{who} serves every model again",
         "Every model of the provider, as an account without a list of its own",
@@ -192,6 +211,58 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       await page.locator(".editor .acct-models").waitFor({ state: "detached" });
       assert.equal(await pill(page, "aaaaaaaaaa").textContent(), w.two);
       assert.equal(await pill(page, "bbbbbbbbbb").textContent(), w.all);
+      assert.deepEqual(errors, []);
+    });
+
+    // the editor's own Save, under the form
+    const editorSave = (page) => page.locator(".editor > .bar button.primary");
+    const settled = async (posts, n) => {
+      for (let i = 0; i < 60 && !posts.slice(n).some((x) => x.saved); i++) await new Promise((r) => setTimeout(r, 50));
+      return posts.slice(n);
+    };
+
+    test(`${engine} ${lang}: the editor's Save saves an account's unsaved picks first`, async (t) => {
+      const { page, errors, posts } = await open(t, "Codex", ".editor .accts .acc .amodels.set");
+      await pill(page, "Spare@Example.com").click();
+      await panel(page, "Spare@Example.com").locator(".mchip", { hasText: /^gpt-6$/ }).click();
+      assert.deepEqual(await chips(page, "Spare@Example.com"), ["gpt-6*", "gpt-6-mini*"]);
+      const n = posts.length;
+      await editorSave(page).click();
+      assert.deepEqual(await settled(posts, n), [{ id: "codex", account: "Spare@Example.com", allow: ["gpt-6-mini", "gpt-6"] }, { saved: "codex" }]);
+      await page.locator(".editor").waitFor({ state: "detached" });
+      // opened again, the account has both
+      await page.locator(".row.provider", { hasText: "Codex" }).first().click();
+      assert.equal(await pill(page, "Spare@Example.com").textContent(), w.two);
+      assert.deepEqual(errors, []);
+    });
+
+    test(`${engine} ${lang}: the editor's Save saves a key's unsaved picks first`, async (t) => {
+      const { page, errors, posts } = await open(t, "Relay", ".editor .accts .acc");
+      await row(page, "bbbbbbbbbb").hover();
+      await reveal(page, "bbbbbbbbbb");
+      await pill(page, "bbbbbbbbbb").click();
+      await panel(page, "bbbbbbbbbb").locator(".mchip", { hasText: "Cheap one" }).click();
+      const n = posts.length;
+      await editorSave(page).click();
+      assert.deepEqual(await settled(posts, n), [{ id: "relay", account: "bbbbbbbbbb", allow: ["cheap"] }, { saved: "relay" }]);
+      await page.locator(".editor").waitFor({ state: "detached" });
+      assert.deepEqual(errors, []);
+    });
+
+    test(`${engine} ${lang}: a picker with every model unpicked holds the editor's Save`, async (t) => {
+      const { page, errors, posts } = await open(t, "Codex", ".editor .accts .acc .amodels.set");
+      await pill(page, "Spare@Example.com").click();
+      await panel(page, "Spare@Example.com").locator(".mchip", { hasText: "gpt-6-mini" }).click();
+      const n = posts.length;
+      await editorSave(page).click();
+      assert.equal(await page.locator(".editor .editor-error").textContent(), w.pickOne);
+      await page.waitForTimeout(200);
+      assert.deepEqual(posts.slice(n), [], "nothing saved");
+      assert.equal(await panel(page, "Spare@Example.com").count(), 1, "the picker stays open");
+      // unchanged picks are no change: Cancel then Save goes through
+      await panel(page, "Spare@Example.com").getByRole("button", { name: lang === "zh" ? "取消" : "Cancel", exact: true }).click();
+      await editorSave(page).click();
+      assert.deepEqual(await settled(posts, n), [{ saved: "codex" }]);
       assert.deepEqual(errors, []);
     });
 

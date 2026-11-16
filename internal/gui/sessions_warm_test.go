@@ -2,6 +2,7 @@ package gui
 
 import (
 	"runtime"
+	"runtime/debug"
 	"testing"
 	"time"
 
@@ -33,7 +34,9 @@ func TestWarmUpReturnsItsGarbage(t *testing.T) {
 // With Codex sessions on this computer the warm-up also reads Codex's
 // per-thread effort, which a first Codex page after a start otherwise read
 // from the whole ledger while it waited (#2776); without any it doesn't.
+// It reads under the tight GC: the usage page's rows are still held then.
 func TestWarmUpReadsCodexEffort(t *testing.T) {
+	defer debug.SetGCPercent(debug.SetGCPercent(100))
 	statsMemo.Lock()
 	saved := statsMemo.m
 	statsMemo.Unlock()
@@ -55,10 +58,51 @@ func TestWarmUpReadsCodexEffort(t *testing.T) {
 		}
 		statsMemo.Unlock()
 		read := 0
-		warmCodexEffort = func() { read++ }
+		warmCodexEffort = func() {
+			read++
+			if p := gcPercent(); p != tightGCPercent {
+				t.Errorf("Codex's effort was read under GOGC=%d, want %d", p, tightGCPercent)
+			}
+		}
 		warmUp(warmSteps()...)
 		if read != c.want {
 			t.Fatalf("with sessions %v Codex's effort was read %d times, want %d", c.keys, read, c.want)
 		}
+	}
+}
+
+// The warm-up reads every day's and 30 days' stats in one pass over the
+// session files, not one pass each (~100 MB of garbage apiece with a real
+// history), and keeps both.
+func TestWarmUpReadsTheStatsInOnePass(t *testing.T) {
+	statsMemo.Lock()
+	saved := statsMemo.m
+	statsMemo.m = nil
+	statsMemo.Unlock()
+	old := statsAndNative
+	t.Cleanup(func() {
+		statsMemo.Lock()
+		statsMemo.m = saved
+		statsMemo.Unlock()
+		statsAndNative = old
+	})
+	var passes [][]int
+	statsAndNative = func(days []int) ([]sessions.Stats, map[string]bool) {
+		passes = append(passes, days)
+		return make([]sessions.Stats, len(days)), nil
+	}
+	warmStats(0, 30)
+	if len(passes) != 1 || len(passes[0]) != 2 {
+		t.Fatalf("the warm-up's stats were read in passes %v, want one for both ranges", passes)
+	}
+	statsMemo.Lock()
+	kept := statsMemo.m[0] != nil && statsMemo.m[30] != nil
+	statsMemo.Unlock()
+	if !kept {
+		t.Fatal("the warm-up's stats are not kept for the page")
+	}
+	warmStats(0, 30)
+	if len(passes) != 1 {
+		t.Fatalf("stats kept were read again: passes %v", passes)
 	}
 }

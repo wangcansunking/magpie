@@ -148,8 +148,18 @@ func TestProviderDetectDraft(t *testing.T) {
 	if got := keys(); len(got) != 1 || got[0] != "sk-typed" {
 		t.Fatalf("copy with a key typed asked with %v", got)
 	}
-	if after := draftFiles(t, appdir.Config()); !draftSame(before, after) {
+	// the request log is the one file a detection writes: each request it
+	// sent, as magpie's own (usage.SourceProbe), and nothing else changes
+	after := draftFiles(t, appdir.Config())
+	logBefore, logAfter := before["usage.jsonl"], after["usage.jsonl"]
+	delete(before, "usage.jsonl")
+	delete(after, "usage.jsonl")
+	if !draftSame(before, after) {
 		t.Fatalf("a detection wrote to the config folder:\nbefore %v\nafter  %v", draftNames(before), draftNames(after))
+	}
+	if added := strings.TrimPrefix(logAfter, logBefore); added == logAfter || !strings.Contains(added, `"source":"probe"`) ||
+		!strings.Contains(added, `"kind":"api_detect"`) || strings.Contains(added, "sk-") {
+		t.Fatalf("the request log has no detection of its own:\n%s", added)
 	}
 	if ps := provider.All(); len(ps) != 1 || ps[0].ID != "relay" || len(ps[0].Models) != 1 {
 		t.Fatalf("providers now %+v", ps)
@@ -157,7 +167,7 @@ func TestProviderDetectDraft(t *testing.T) {
 
 	// magpie web: without its key a draft probe is turned away, and the
 	// vendor is never asked
-	guarded := webHandler("3999", "0123456789abcdef-1545", time.Hour, mux)
+	guarded := webHandler("3999", "0123456789abcdef-1545", time.Hour, nil, mux)
 	if w := post(guarded, "detect", `{"typed":true,"key":"sk-typed","base":"`+base+`","picked":["draft-m"]}`); w.Code != http.StatusUnauthorized {
 		t.Fatalf("no web key: %d %s", w.Code, w.Body)
 	}

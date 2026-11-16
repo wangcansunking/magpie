@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"testing"
 
+	"github.com/yetone/magpie/internal/claudecode"
 	"github.com/yetone/magpie/internal/testenv"
 )
 
@@ -124,6 +125,13 @@ func TestCLIMissingHermes(t *testing.T) {
 	if h.CLIMissing() {
 		t.Fatal("hermes with its checkout taken for missing")
 	}
+	// connected in the profile `hermes profile use` made sticky: the
+	// checkout is in the root
+	bot := filepath.Join(dir, "profiles", "coder")
+	writeT(t, filepath.Join(bot, "config.yaml"), "model: {}\n")
+	if p := (&Agent{ID: "hermes", Name: "Hermes Agent", Bin: h.Bin, Dir: bot, Path: filepath.Join(bot, "config.yaml")}); p.CLIMissing() {
+		t.Fatal("hermes in a profile, with the root's checkout, taken for missing")
+	}
 	if err := os.RemoveAll(filepath.Join(dir, "hermes-agent")); err != nil {
 		t.Fatal(err)
 	}
@@ -166,6 +174,14 @@ func TestCLIMissingSharedFolders(t *testing.T) {
 		{"claude", ".claude", func(t *testing.T, home, _ string) {
 			mkdirT(t, jetBrainsDirFor(home))
 		}, false},
+		// the Claude Code magpie downloaded, no other (Wing8Aqua on X)
+		{"claude", ".claude", func(t *testing.T, _, _ string) {
+			writeT(t, filepath.Join(claudecode.Root(), "2.1.400", exe("claude")), "")
+		}, false},
+		// a version folder without its binary is no download
+		{"claude", ".claude", func(t *testing.T, _, _ string) {
+			mkdirT(t, filepath.Join(claudecode.Root(), "2.1.400"))
+		}, true},
 		{"codex", ".codex", nil, true},
 		{"codex", ".codex", func(t *testing.T, home, _ string) {
 			mkdirT(t, filepath.Join(home, ".vscode-server", "extensions", "openai.chatgpt-26.5.1"))
@@ -200,6 +216,7 @@ func TestCLIMissingSharedFolders(t *testing.T) {
 		t.Setenv("USERPROFILE", home)
 		t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
 		t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
+		t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
 		t.Setenv("PATH", t.TempDir())
 		apps := noApps(t)
 		dir := filepath.Join(home, c.folder)
