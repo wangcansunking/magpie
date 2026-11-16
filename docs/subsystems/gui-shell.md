@@ -1602,3 +1602,20 @@ localized system notification per failure; a click opens WAN rather than Usage.
 Closing or hiding the WAN page does not stop this observer. It ends with the
 backend context. The page independently gives a persistent error and one notice
 per observed failure. No notification implies permission to restart a tunnel.
+
+## Fork Windows builds
+
+In `wangcansunking/magpie`,
+[`windows-fork.yml`](../../.github/workflows/windows-fork.yml) builds the
+Windows amd64 GUI on each push to `main`, or a manual run on `main`.
+It runs Windows static checks and Desktop context regression tests before
+packing the normal GUI assets and console launcher. The executable is
+always named `magpie.exe`; normal model aliases, WAN gateway and context
+compatibility remain included. The separate experimental raw-model-ID
+worktree is not used.
+
+A successful build publishes `magpie.exe` and `SHA256SUMS.txt` as a fork
+prerelease tagged `windows-main-<12-character commit>`. Re-running the same
+commit replaces its assets. Builds are unsigned and do not replace the
+upstream update feed. Only the publish job has repository write permission;
+it uses the workflow token, with no upstream publishing secrets.

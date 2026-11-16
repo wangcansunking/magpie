@@ -1,0 +1,92 @@
+name: Fork Windows EXE
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-windows-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'wangcansunking/magpie' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      CGO_ENABLED: '0'
+      GOOS: windows
+      GOARCH: amd64
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Windows static checks
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          go vet ./...
+          git diff --check
+
+      - name: Desktop context regressions
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          go test -tags nogui ./internal/provider ./internal/agent ./internal/gateway -run '^(TestDesktopMaximumContexts|TestAgentOwnContextWindow|TestCopilotListsTheLongContextTier|TestClaudePlan.*|TestClaudeDesktop.*Window.*|TestClaudeDesktopLongest.*|TestClaudeDesktopSubmillionBudget|TestDesktopSubmillion.*|TestDesktopInferenceModels.*|TestBudgetPath)$' -count=1
+
+      - name: Build magpie.exe
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $shortSha = $env:GITHUB_SHA.Substring(0, 12)
+          $version = "v0.1.4300-fork.$env:GITHUB_RUN_NUMBER.$shortSha"
+          New-Item -ItemType Directory -Force dist | Out-Null
+          go run ./build/assetpack internal/gui/assets internal/gui/assets.zip
+          go run github.com/tc-hib/go-winres@v0.3.3 make --in build/windows/winres.json --arch amd64 --out rsrc --file-version 0.1.4300 --product-version 0.1.4300
+          go build -trimpath -buildvcs=false -ldflags='-s -w' -o internal/update/launcher-amd64.com ./internal/update/launcher
+          go build -tags production,comlauncher,packedassets -trimpath -ldflags="-s -w -X main.version=$version -H windowsgui" -o dist/magpie.exe .
+          $checksum = (Get-FileHash -LiteralPath dist/magpie.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$checksum  magpie.exe" | Set-Content -LiteralPath dist/SHA256SUMS.txt -Encoding utf8NoBOM
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: |
+            dist/magpie.exe
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-exe
+          path: dist
+      - name: Publish fork Windows release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="windows-main-${GITHUB_SHA:0:12}"
+          printf 'Windows x64 build of main at %s.\n\nIncludes WAN gateway and Claude Desktop context compatibility. Unsigned fork build.\n' "$GITHUB_SHA" > notes.md
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/magpie.exe dist/SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$tag" dist/magpie.exe dist/SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Windows main ${GITHUB_SHA:0:12}" --notes-file notes.md --prerelease --latest=false
+          fi
