@@ -193,7 +193,7 @@ var diagnosticLocalErrors = map[string]bool{
 	"Dev Tunnels account bandwidth is exhausted; wait for the reset or request a limit increase": true,
 	"Invalid wan.json; refusing to replace the saved tunnel":                                     true,
 	"Invalidate WAN sign-in before erasing its saved credential":                                 true,
-	"JSON object required":                                                           true,
+	"JSON object required": true,
 	"Sign in to GitHub for WAN before starting the gateway":                          true,
 	"Stop WAN gateway before replacing its sign-in":                                  true,
 	"The saved WAN tunnel was not found for this account; it was not replaced":       true,

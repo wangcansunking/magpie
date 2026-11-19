@@ -1403,9 +1403,6 @@ body.masked :hover > .acct-eye, body.masked .pq-card:hover .acct-eye, body.maske
 #view-usage.loading .opt { cursor: default; }
 .usage-cost { display: inline-flex; align-items: baseline; gap: 6px; min-width: 0; overflow: hidden; white-space: nowrap; font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; }
 .usage-cost b { font-size: 15px; font-weight: 600; color: var(--fg); }
-/* A font without tabular figures still gives each changing digit the same
-   slot. No clipping on the glyph: a wider custom digit can overhang it. */
-.usage-cost .cost-digit { display: inline-block; width: 1ch; font-style: normal; text-align: center; }
 /* a tab with no sum leaves the refresh at the content's right edge (a
    class app.js sets, not :has(), which Safari before 15.4 can't parse) */
 .usage-cost:empty { display: none; }
@@ -1997,7 +1994,7 @@ details.cx-part[open] > summary .cx-h { margin-bottom: 2px; }
 .sess-cal-side b { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .sess-cal-side span { font-size: 10.5px; color: var(--muted); }
 .sess-cal-side small { font-size: 10.5px; color: var(--faint); font-variant-numeric: tabular-nums; }
-@container (max-width: 560px) { .sess-cal-wrap { flex-direction: column; gap: 10px; } .sess-cal { align-self: stretch; } .sess-cal-side { flex-direction: row; flex-wrap: wrap; gap: 16px; padding-top: 0; } }
+@container (max-width: 560px) { .sess-cal-wrap { flex-direction: column; gap: 10px; } .sess-cal-side { flex-direction: row; flex-wrap: wrap; gap: 16px; padding-top: 0; } }
 .sess-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
 .sess-grid[hidden] { display: none; }
 .sess-card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px 10px; min-width: 0; display: flex; flex-direction: column; }
@@ -4866,10 +4863,7 @@ body.window.mac .modal-grip { top: calc(-1 * var(--grip-h)); }
 .modal .dialog { display: flex; flex-direction: column; }
 .modal .editor.framed { display: flex; flex-direction: column; align-items: stretch; gap: 0; padding: 0; min-height: 0; overflow: hidden; }
 .modal .editor.framed > .ebody {
-  /* Reserve the scrollbar from the first layout. WebKit otherwise keeps
-     grid tracks from the old width when a capped editor starts scrolling,
-     then wraps its rows again on a click, moving fields under the pointer. */
-  flex: 1 1 auto; min-height: 0; overflow-y: scroll; overscroll-behavior: contain;
+  flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
   display: grid; grid-template-columns: inherit; gap: 10px 14px; align-items: first baseline; padding: 14px 18px;
 }
 .modal .editor.framed > .ehead, .modal .editor.framed > .bar { flex: none; min-height: 48px; margin: 0; padding: 0 18px; }

@@ -243,6 +243,11 @@ var cliForRoute = map[string]string{
 }
 
 var notYet = map[string]string{
+	"GET /api/wan":                               W,  // WAN status and controls belong to the serving window; no WAN command yet.
+	"POST /api/wan/":                             W,  // WAN service, runtime, account and tunnel controls.
+	"POST /api/wan/auth/start":                   W,  // Explicit sign-in from the WAN page.
+	"POST /api/wan/auth/":                        W,  // The page's exact sign-in attempt is opened or cancelled.
+	"POST /api/wan/keys/{action}":                W,  // Independent WAN keys are managed on the WAN page.
 	"POST /api/agent-fast":                       A,  // agent_models.go
 	"POST /api/agent-models/{id}":                A,  // agent_models.go
 	"GET /api/agents/cli":                        A,  // api.go

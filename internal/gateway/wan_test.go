@@ -3,6 +3,7 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"io"
@@ -133,6 +134,7 @@ func TestWANRejectsControlAliasesEncodedPathsAndRedirects(t *testing.T) {
 		HeapPath, CPUPath,
 		provider.RemoteCardsPath, provider.RemoteRefreshPath, CodexPath, CodexPath + "/responses", CodexCatalogPath,
 		"/v1/systemone", "/v1/alpha/search", "/alpha/search", "/responses/compact", "/v1/responses/compact", "/messages/count_tokens",
+		"/v1/realtime", "/realtime",
 		"/v1beta/models/m:delete", "/v1beta/models/m", "/v1beta/models/:generateContent",
 		"//v1/models", "/v1/./models", "/v1/x/../models", "/v1/models/", "/v1/models/../magpie/quotas",
 		"/%61pi/hello", "/v1/%6dodels", "/v1/models%2f..%2fmagpie%2fquotas", "/v1/models/%252e%252e/magpie/quotas",
@@ -360,6 +362,54 @@ func wanJSONReply(r *http.Request) *http.Response {
 		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":30,\"completion_tokens\":5}}\n\ndata: [DONE]\n\n")), Request: r}
 	}
 	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":30,"completion_tokens":5}}`)), Request: r}
+}
+
+func TestWANBodyDictionariesStayScoped(t *testing.T) {
+	fresh(t)
+	freshDicts(t)
+	_, key := newWANCaller(t, "First")
+	_, other := newWANCaller(t, "Second")
+	calls := 0
+	s := wanUpstream(t, func(r *http.Request) *http.Response {
+		calls++
+		if r.Header.Get(availableDictHeader) != "" || r.Header.Get(KeepBodyHeader) != "" || r.Header.Get("Content-Encoding") != "" {
+			t.Error("dictionary headers escaped to the vendor")
+		}
+		return wanJSONReply(r)
+	})
+	h := s.WANHandler()
+	first := []byte(`{"model":"plan/m1","messages":[{"role":"user","content":"` + strings.Repeat("conversation ", 2000) + `"}]}`)
+	ask := func(body []byte, secret string, headers map[string]string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(body))
+		r.Header.Set("Authorization", "Bearer "+secret)
+		r.Header.Set("User-Agent", "magpie/0.1.9999")
+		r.Header.Set("Content-Type", "application/json")
+		for name, value := range headers {
+			r.Header.Set(name, value)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	w := ask(first, key, map[string]string{KeepBodyHeader: "dcz"})
+	sum := sha256.Sum256(first)
+	if w.Code != 200 || w.Header().Get(KeptBodyHeader) != sfBinary(sum) {
+		t.Fatalf("first body not kept: %d %v %s", w.Code, w.Header(), w.Body.String())
+	}
+	next := bytes.Replace(first, []byte("conversation "), []byte("next turn "), 1)
+	wire, err := dczEncode(next, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headers := map[string]string{"Content-Encoding": "dcz", availableDictHeader: sfBinary(sum), BodyDigestHeader: sfBinary(sha256.Sum256(next))}
+	w = ask(wire, other, headers)
+	if w.Code != 400 || w.Header().Get(DictMissHeader) == "" || calls != 1 {
+		t.Fatalf("another WAN key reused the dictionary: %d %v, calls %d", w.Code, w.Header(), calls)
+	}
+	w = ask(wire, key, headers)
+	if w.Code != 200 || calls != 2 {
+		t.Fatalf("own WAN dictionary was not decoded before routing: %d %s, calls %d", w.Code, w.Body.String(), calls)
+	}
 }
 
 func TestWANProtocolsKeepModelConstraintsAndUsage(t *testing.T) {

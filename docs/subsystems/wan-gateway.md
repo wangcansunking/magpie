@@ -356,6 +356,9 @@ embeddings, rerank, images, audio and videos, with supported aliases. WAN
 serves no GUI assets, `/api/*`, `/v1/magpie/*` diagnostics, `/mcp/*`, internal
 callbacks, System One, standalone search or general Codex backend subtree.
 A WAN key is not an administrator credential.
+Realtime WebSocket routes remain local-only, as do Responses socket upgrades.
+WAN uses the upstream request-body decoder before key limits and routing;
+compressed body dictionaries remain isolated by authenticated caller.
 
 The ordinary listener rejects the WAN namespace even on loopback; local
 agent tokens and ordinary gateway keys do not authenticate on WAN. Invalid,

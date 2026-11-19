@@ -3,11 +3,11 @@ const { test } = require("node:test");
 const { chromium, webkit } = require("playwright");
 const { fixture } = require("./fixtures/caller-keys.cjs");
 const { strings } = require("./strings.cjs");
-const { reach, pointerClick } = require("./reader.cjs");
+const { reach } = require("./reader.cjs");
 async function click(page, locator) {
   const closed = locator.locator('xpath=ancestor::details[not(@open)]');
   for (const detail of await closed.all()) await detail.locator(':scope > summary').click();
-  await reach(page, locator); await pointerClick(page, locator);
+  await reach(page, locator); await locator.click();
 }
 // WebKit can acknowledge a viewport change before delivering resize/layout.
 // Measure responsive geometry after that event and its animation frame, not

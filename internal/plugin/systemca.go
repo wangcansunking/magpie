@@ -69,18 +69,26 @@ func envSet(env []string, name string) bool {
 // A caller that changes cwd must call this before launch: relative user paths
 // are resolved against magpie's original working directory, not the helper's.
 func BunCAEnv(env []string, dir string) ([]string, error) {
+	out := caEnv(env, dir)
 	for _, kv := range env {
 		key, value, _ := strings.Cut(kv, "=")
-		if !strings.EqualFold(key, "NODE_EXTRA_CA_CERTS") || strings.TrimSpace(value) == "" {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		if strings.EqualFold(key, "NODE_USE_SYSTEM_CA") {
+			out = append(out, "NODE_USE_SYSTEM_CA="+value)
+			continue
+		}
+		if !strings.EqualFold(key, "NODE_EXTRA_CA_CERTS") {
 			continue
 		}
 		path, err := filepath.Abs(value)
 		if err != nil {
 			return nil, errors.New("Could not resolve the configured runtime certificate file")
 		}
-		return []string{"NODE_EXTRA_CA_CERTS=" + bunReadable(path, dir, runtime.GOOS)}, nil
+		out = append(out, "NODE_EXTRA_CA_CERTS="+bunReadable(path, dir, runtime.GOOS))
 	}
-	return caEnv(env, dir), nil
+	return out, nil
 }
 
 // bunReadable is p as a Bun on goos can open it. Bun on Windows reads

@@ -15558,7 +15558,7 @@ function stepFocus(e, list, i) {
 // holdMenu makes box the app menu: Escape, a click outside it, a resize
 // or the scroll it is given closes it, and done runs once it is closed
 function holdMenu(box, anchor, own, scroll, done) {
-  const keys = (e) => { if (e.key !== "Escape") return own(e); e.preventDefault(); e.stopPropagation(); closeProtoMenu(); anchor.focus(); };
+  const keys = (e) => { if (e.key !== "Escape") return own(e); e.preventDefault(); e.stopPropagation(); closeProtoMenu(); anchor.focus(NO_SCROLL); };
   const outside = (e) => { if (!box.contains(e.target) && !anchor.contains(e.target)) closeProtoMenu(); };
   document.addEventListener("mousedown", outside, true);
   document.addEventListener("keydown", keys, true);
@@ -19781,16 +19781,6 @@ function renderLoginAllow(s) {
   sub.replaceChildren(t("Switched off in System Settings’ Login Items, so magpie won’t open at login"), " ", open);
 }
 
-// setGatewayPaused pauses the gateway or resumes it, from Settings or the
-// Gateway page, and says which agent stood in the way; the pages are read
-// again either way, the agents' rows with them
-async function setGatewayPaused(on) {
-  let out;
-  try { out = await api("gateway/pause", { on }); } catch (e) { out = { error: e.message }; }
-  if (out?.fix) status(gatewayFixSays(out.fix), "err");
-  else if (out?.error) status(on && out.agent ? t("{agent} couldn't be disconnected: {error}", { agent: out.agent, error: out.error }) : out.error, "err");
-  await Promise.allSettled([loadSettings(), loadProviders(), load(true)]);
-}
 async function loadSettings() {
   const since = prefsWrites;
   if (fontList === null && !fontListError) loadFonts();
@@ -23619,7 +23609,7 @@ $("#prefs").onclick = () => { window.navFold?.("settings") || openSettings(); $(
 // The header's refresh reads again what the page shown draws (#844)
 function refreshKind() {
   if (mode === "panel") return { agents: "agents", usage: "allowances", stats: "requests" }[panelTab] || "models";
-  return { agents: "agents", usage: "usage" }[view] || "models";
+  return { agents: "agents", usage: "usage", wan: "wan" }[view] || "models";
 }
 // syncTitle: the refresh's tooltip says what it reads on the page shown.
 // Called from setPanelTab as the page loads, before this part of it has run.
@@ -23631,6 +23621,7 @@ function syncTitle() {
     usage: "Read the usage again now",
     allowances: "Read the allowances again now",
     requests: "Read the requests again now",
+    wan: "Read WAN Gateway status again",
     models: "Refresh model lists (models.dev and every vendor)",
   }[refreshKind()];
   b.title = t(b.dataset.enTitle);
@@ -23638,6 +23629,9 @@ function syncTitle() {
 }
 async function refreshPage(kind) {
   switch (kind) {
+    case "wan":
+      await magpie.call("wan", "refresh");
+      return t("WAN Gateway status refreshed");
     case "agents":
       state = await api("agents/rescan", {});
       renderAgents();

@@ -8,6 +8,15 @@
 // Classic script, loaded before app.js: what runs as it loads touches
 // neither the page nor app.js; mount, at magpie.start, wires the page.
 
+// Shared by Settings and the Gateway page; neither draw runs before boot.
+async function setGatewayPaused(on) {
+  let out;
+  try { out = await api("gateway/pause", { on }); } catch (e) { out = { error: e.message }; }
+  if (out?.fix) status(gatewayFixSays(out.fix), "err");
+  else if (out?.error) status(on && out.agent ? t("{agent} couldn't be disconnected: {error}", { agent: out.agent, error: out.error }) : out.error, "err");
+  await Promise.allSettled([loadSettings(), loadProviders(), load(true)]);
+}
+
 // the gateway tab's choices, kept per machine
 const gwParams = new URLSearchParams(location.search);
 let flavor = gwParams.get("flavor") || localStorage.getItem("magpie.flavor") || "openai"; // which API the snippets speak

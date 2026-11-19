@@ -37,11 +37,12 @@ jobs:
           go vet ./...
           git diff --check
 
-      - name: Desktop context regressions
+      - name: WAN regressions
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
-          go test -tags nogui ./internal/provider ./internal/agent ./internal/gateway -run '^(TestDesktopMaximumContexts|TestAgentOwnContextWindow|TestCopilotListsTheLongContextTier|TestClaudePlan.*|TestClaudeDesktop.*Window.*|TestClaudeDesktopLongest.*|TestClaudeDesktopSubmillionBudget|TestDesktopSubmillion.*|TestDesktopInferenceModels.*|TestBudgetPath)$' -count=1
+          go test -tags nogui -timeout 15m ./internal/access ./internal/wan ./internal/steady ./internal/proc ./internal/backup
+          go test -tags nogui -timeout 15m ./internal/gateway ./internal/gui -run 'WAN|ProviderRevocation|CoreScriptBudget|EveryRoute' -count=1
 
       - name: Build magpie.exe
         run: |
@@ -51,9 +52,10 @@ jobs:
           $version = "v0.1.4300-fork.$env:GITHUB_RUN_NUMBER.$shortSha"
           New-Item -ItemType Directory -Force dist | Out-Null
           go run ./build/assetpack internal/gui/assets internal/gui/assets.zip
+          go run ./build/conpty
           go run github.com/tc-hib/go-winres@v0.3.3 make --in build/windows/winres.json --arch amd64 --out rsrc --file-version 0.1.4300 --product-version 0.1.4300
           go build -trimpath -buildvcs=false -ldflags='-s -w' -o internal/update/launcher-amd64.com ./internal/update/launcher
-          go build -tags production,comlauncher,packedassets -trimpath -ldflags="-s -w -X main.version=$version -H windowsgui" -o dist/magpie.exe .
+          go build -tags production,comlauncher,packedassets,conptypair -trimpath -ldflags="-s -w -X main.version=$version -H windowsgui" -o dist/magpie.exe .
           $checksum = (Get-FileHash -LiteralPath dist/magpie.exe -Algorithm SHA256).Hash.ToLowerInvariant()
           "$checksum  magpie.exe" | Set-Content -LiteralPath dist/SHA256SUMS.txt -Encoding utf8NoBOM
 
@@ -84,7 +86,7 @@ jobs:
         run: |
           set -euo pipefail
           tag="windows-main-${GITHUB_SHA:0:12}"
-          printf 'Windows x64 build of main at %s.\n\nIncludes WAN gateway and Claude Desktop context compatibility. Unsigned fork build.\n' "$GITHUB_SHA" > notes.md
+          printf 'Windows x64 build of main at %s.\n\nIncludes WAN gateway on upstream main. Unsigned fork build.\n' "$GITHUB_SHA" > notes.md
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$tag" dist/magpie.exe dist/SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --clobber
           else
