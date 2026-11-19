@@ -587,6 +587,7 @@ type Server struct {
 	// taken off it (see Relisten)
 	lnMu sync.Mutex
 	ln   net.Listener
+	wan  wanRuntime
 	// front is Front's handler, built once
 	frontOnce sync.Once
 	front     http.Handler
@@ -890,6 +891,8 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		}
 	})
 	defer stopLimits()
+	stopWAN := s.ownWAN(ctx)
+	defer stopWAN()
 	freshCtx, stopFresh := context.WithCancel(ctx)
 	defer stopFresh()
 	// what another process writes to them is seen at once, not on the
@@ -1037,7 +1040,7 @@ func (s *Server) Handler() http.Handler {
 	// on (dumpFirst)
 	// a socket's turns go through all of it again (socketEntry); the
 	// agent's Retry-After is bounded on the way out (retryCapped)
-	return socketEntry(s.dumpFirst(retryCapped(s.counted(headerLogged(holdCatalog(corsGuard(callerGuard(readOnlyGuard(mux, withCaller(keptBodyRequests(keyLimited(s.keySlots(mux, mux)))))))))))))
+	return localKeysOnly(socketEntry(s.dumpFirst(s.apiHandler(mux))))
 }
 
 // routes are the client APIs, each by its pattern: readOnlyGuard reads
@@ -1050,10 +1053,6 @@ func (s *Server) routes() *routeMux {
 	// no key of its own only when its baseURL does
 	mux.HandleFunc("GET /v1", s.info)
 	mux.HandleFunc("GET /v1/{$}", s.info)
-	mux.HandleFunc("GET /v1/models", s.models)
-	mux.HandleFunc("GET /models", s.models)
-	mux.HandleFunc("GET /v1/models/{id...}", s.model)
-	mux.HandleFunc("GET /muse-code/models", s.museModels)
 	// Claude Desktop's third-party gateway looks for one here before it
 	// takes the address
 	mux.HandleFunc("GET /api/hello", func(w http.ResponseWriter, r *http.Request) {
@@ -1135,45 +1134,10 @@ func (s *Server) routes() *routeMux {
 	mux.HandleFunc("POST "+provider.RemoteUpdatePath, s.remoteUpdate)
 	mux.HandleFunc("GET /v1/magpie/omarchy", s.omarchyTheme)
 	mux.HandleFunc("OPTIONS /v1/magpie/omarchy", s.omarchyTheme)
-	mux.HandleFunc("POST /v1/chat/completions", s.handle(provider.Chat))
-	mux.HandleFunc("POST /chat/completions", s.handle(provider.Chat))
-	mux.HandleFunc("POST /v1/responses", s.handle(provider.Responses))
-	mux.HandleFunc("POST /responses", s.handle(provider.Responses))
-	mux.HandleFunc("GET /v1/responses", s.responsesOverHTTP)
-	mux.HandleFunc("GET /responses", s.responsesOverHTTP)
-	mux.HandleFunc("POST /v1/messages", keepsSignIn(s.handle(provider.Anthropic)))
-	mux.HandleFunc("POST /messages", keepsSignIn(s.handle(provider.Anthropic)))
 	mux.HandleFunc("POST /v1/systemone", s.serveSystemOne)
 	// Codex's web.run tool (anton on Discord)
 	mux.HandleFunc("POST /v1"+AlphaSearchPath, s.alphaSearch)
 	mux.HandleFunc("POST "+AlphaSearchPath, s.alphaSearch)
-	mux.HandleFunc("POST /v1/messages/count_tokens", keepsSignIn(s.countTokens))
-	mux.HandleFunc("POST /v1/images/generations", s.images(false))
-	mux.HandleFunc("POST /images/generations", s.images(false))
-	mux.HandleFunc("POST /v1/images/edits", s.images(true))
-	mux.HandleFunc("POST /images/edits", s.images(true))
-	mux.HandleFunc("POST /v1/embeddings", s.retrieve("/embeddings", "embeddings"))
-	mux.HandleFunc("POST /embeddings", s.retrieve("/embeddings", "embeddings"))
-	mux.HandleFunc("POST /v1/rerank", s.retrieve("/rerank", "rerank"))
-	mux.HandleFunc("POST /rerank", s.retrieve("/rerank", "rerank"))
-	// OpenAI's Decisions API, typed answers to questions on one input
-	mux.HandleFunc("POST /v1/decisions", s.decide)
-	mux.HandleFunc("POST /decisions", s.decide)
-	// speech to text, for a client's voice input (#2053)
-	mux.HandleFunc("POST /v1/audio/transcriptions", s.transcribe("/audio/transcriptions", "transcriptions"))
-	mux.HandleFunc("POST /audio/transcriptions", s.transcribe("/audio/transcriptions", "transcriptions"))
-	mux.HandleFunc("GET /v1/realtime", s.realtime)
-	mux.HandleFunc("GET /realtime", s.realtime)
-	mux.HandleFunc("POST /v1/audio/translations", s.transcribe("/audio/translations", "translations"))
-	mux.HandleFunc("POST /audio/translations", s.transcribe("/audio/translations", "translations"))
-	mux.HandleFunc("POST /v1/audio/speech", s.speak)
-	mux.HandleFunc("POST /audio/speech", s.speak)
-	mux.HandleFunc("POST /v1/videos", s.videosCreate)
-	mux.HandleFunc("POST /videos", s.videosCreate)
-	mux.HandleFunc("GET /v1/videos/{id}", s.videosGet)
-	mux.HandleFunc("GET /videos/{id}", s.videosGet)
-	mux.HandleFunc("GET /v1/videos/{id}/content", s.videosContent)
-	mux.HandleFunc("GET /videos/{id}/content", s.videosContent)
 	// a provider's own API, as it is, at its host (native.go)
 	for _, m := range nativeMethods {
 		mux.HandleFunc(m+" "+NativePath+"{provider}/{path...}", s.native)
@@ -1196,19 +1160,72 @@ func (s *Server) routes() *routeMux {
 	mux.HandleFunc(HubMCPAll, s.hubMCP)
 	mux.HandleFunc(CodexPath+"/", s.codexBackend)
 	mux.HandleFunc("GET "+CodexCatalogPath, s.codexCatalog)
-	mux.HandleFunc("GET /v1beta/models", s.geminiModels)
-	mux.HandleFunc("POST /v1beta/models/{call...}", s.gemini)
+	mux.HandleFunc("GET /v1/realtime", s.realtime)
+	mux.HandleFunc("GET /realtime", s.realtime)
+	s.inferenceRoutes(mux)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, provider.Chat, http.StatusNotFound, "magpie serves /v1/chat/completions, /v1/responses, /v1/messages, /v1/systemone, /v1/images/generations, /v1/images/edits, /v1/videos, /v1/embeddings, /v1/rerank, /v1/decisions, /v1/audio/transcriptions, /v1/audio/translations, /v1/audio/speech, /v1/realtime (WebSocket) and /v1beta/models/*")
 	})
 	return mux
 }
 
+// inferenceRoutes is shared by the local and strict WAN entry points. Only
+// inference and model discovery belong here: no control APIs, MCP tools,
+// internal callbacks, or arbitrary backend subtrees.
+func (s *Server) inferenceRoutes(mux *routeMux) {
+	mux.HandleFunc("GET /v1/models", s.models)
+	mux.HandleFunc("GET /models", s.models)
+	mux.HandleFunc("GET /v1/models/{id...}", s.model)
+	mux.HandleFunc("GET /muse-code/models", s.museModels)
+	mux.HandleFunc("POST /v1/chat/completions", s.handle(provider.Chat))
+	mux.HandleFunc("POST /chat/completions", s.handle(provider.Chat))
+	mux.HandleFunc("POST /v1/responses", s.handle(provider.Responses))
+	mux.HandleFunc("POST /responses", s.handle(provider.Responses))
+	mux.HandleFunc("GET /v1/responses", s.responsesOverHTTP)
+	mux.HandleFunc("GET /responses", s.responsesOverHTTP)
+	mux.HandleFunc("POST /v1/messages", keepsSignIn(s.handle(provider.Anthropic)))
+	mux.HandleFunc("POST /messages", keepsSignIn(s.handle(provider.Anthropic)))
+	mux.HandleFunc("POST /v1/messages/count_tokens", keepsSignIn(s.countTokens))
+	mux.HandleFunc("POST /v1/images/generations", s.images(false))
+	mux.HandleFunc("POST /images/generations", s.images(false))
+	mux.HandleFunc("POST /v1/images/edits", s.images(true))
+	mux.HandleFunc("POST /images/edits", s.images(true))
+	mux.HandleFunc("POST /v1/embeddings", s.retrieve("/embeddings", "embeddings"))
+	mux.HandleFunc("POST /embeddings", s.retrieve("/embeddings", "embeddings"))
+	mux.HandleFunc("POST /v1/rerank", s.retrieve("/rerank", "rerank"))
+	mux.HandleFunc("POST /rerank", s.retrieve("/rerank", "rerank"))
+	// OpenAI's Decisions API, typed answers to questions on one input
+	mux.HandleFunc("POST /v1/decisions", s.decide)
+	mux.HandleFunc("POST /decisions", s.decide)
+	// speech to text, for a client's voice input (#2053)
+	mux.HandleFunc("POST /v1/audio/transcriptions", s.transcribe("/audio/transcriptions", "transcriptions"))
+	mux.HandleFunc("POST /audio/transcriptions", s.transcribe("/audio/transcriptions", "transcriptions"))
+	mux.HandleFunc("POST /v1/audio/translations", s.transcribe("/audio/translations", "translations"))
+	mux.HandleFunc("POST /audio/translations", s.transcribe("/audio/translations", "translations"))
+	mux.HandleFunc("POST /v1/audio/speech", s.speak)
+	mux.HandleFunc("POST /audio/speech", s.speak)
+	mux.HandleFunc("POST /v1/videos", s.videosCreate)
+	mux.HandleFunc("POST /videos", s.videosCreate)
+	mux.HandleFunc("GET /v1/videos/{id}", s.videosGet)
+	mux.HandleFunc("GET /videos/{id}", s.videosGet)
+	mux.HandleFunc("GET /v1/videos/{id}/content", s.videosContent)
+	mux.HandleFunc("GET /videos/{id}/content", s.videosContent)
+	mux.HandleFunc("GET /v1beta/models", s.geminiModels)
+	mux.HandleFunc("POST /v1beta/models/{call...}", s.gemini)
+}
+
+// apiHandler shares all request policy with WAN without exposing local-only
+// routes or socket upgrades. Ordinary Handler adds its local diagnostics and
+// per-turn WebSocket entry outside these wrappers.
+func (s *Server) apiHandler(mux *routeMux) http.Handler {
+	return retryCapped(s.counted(headerLogged(holdCatalog(corsGuard(callerGuard(readOnlyGuard(mux, withCaller(keptBodyRequests(keyLimited(s.keySlots(mux, mux)))))))))))
+}
+
 // responsesOverHTTP answers a GET on /v1/responses. A WebSocket upgrade
 // is Responses over a WebSocket (#1005, #4058), each turn served as its
 // POST is (responses_ws.go). A plain GET is told to POST.
 func (s *Server) responsesOverHTTP(w http.ResponseWriter, r *http.Request) {
-	if wantsSocket(r) && s.serveResponsesSocket(w, r) {
+	if !wanRequest(r) && wantsSocket(r) && s.serveResponsesSocket(w, r) {
 		return
 	}
 	if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {

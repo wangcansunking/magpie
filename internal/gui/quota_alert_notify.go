@@ -18,6 +18,7 @@ import (
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
+	"github.com/yetone/magpie/internal/wan"
 )
 
 // notifier is the system's notifications, started the first time an alert
@@ -98,6 +99,7 @@ func (n *notifier) problem() string {
 const (
 	turnNotice = "magpie-turn-"
 	maskNotice = "magpie-mask-"
+	wanNotice  = "magpie-wan-"
 )
 
 func (n *notifier) send(title, body string) { n.sendAs("magpie-alert-", title, body) }
@@ -151,6 +153,9 @@ func clickView(goos string, r notifications.NotificationResponse) string {
 	if strings.HasPrefix(r.ID, turnNotice) || goos == "linux" && r.ActionIdentifier != linuxClick {
 		return ""
 	}
+	if strings.HasPrefix(r.ID, wanNotice) {
+		return "wan"
+	}
 	if rest, ok := strings.CutPrefix(r.ID, maskNotice); ok {
 		key, _, _ := strings.Cut(rest, "-")
 		if _, err := strconv.ParseInt(key, 10, 64); err != nil || key == "0" {
@@ -181,6 +186,19 @@ func (h *host) watchAlerts() {
 	notifyProblem = n.problem
 	go func() {
 		<-h.ready
+		go func() {
+			ticker := time.NewTicker(3 * time.Second)
+			defer ticker.Stop()
+			watchWANRecovery(backendCtx, ticker.C, func() wan.Status {
+				if owner := served.Load(); owner != nil {
+					return owner.WANStatus()
+				}
+				return wan.Status{}
+			}, func() {
+				title, body := wanRecoveryAlertText(trayLang(settings.Load().Lang, systemLang))
+				n.sendAs(wanNotice, title, body)
+			})
+		}()
 		// set before this run: asked now, so Settings can say if it was refused
 		if s := settings.Load(); s.UsageAlert > 0 || s.BalanceAlert > 0 || s.ResetReminder > 0 || s.TurnDoneAlert > 0 || s.MaskAlert {
 			go n.allowed()

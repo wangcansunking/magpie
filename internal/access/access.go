@@ -26,6 +26,9 @@ import (
 )
 
 const Prefix = "sk-magpie-key-"
+const WANPrefix = "sk-magpie-wan-"
+const ScopeWAN = "wan"
+const wanIDPrefix = "wan-"
 const legacyLANPrefix = "sk-magpie-"
 const revokedLANPrefix = "sk-magpie-revoked-"
 
@@ -76,7 +79,7 @@ func ownSecrets() map[string]struct{} {
 	}
 	m := map[string]struct{}{}
 	for _, k := range keys {
-		if k.Secret != "" && !Managed(k.Secret) {
+		if k.localScope() && k.Secret != "" && !Managed(k.Secret) {
 			m[k.Secret] = struct{}{}
 		}
 	}
@@ -134,7 +137,11 @@ type Key struct {
 	Off    bool   `json:"off,omitempty"`
 	LAN    bool   `json:"lan,omitempty"` // default key and durable migration marker
 	Secret string `json:"secret,omitempty"`
-	Masked string `json:"masked,omitempty"`
+	// WAN credentials never occupy Secret: an older reader ignores Scope,
+	// and must not authenticate a WAN key as a local-network key.
+	Scope     string `json:"scope,omitempty"`
+	WANSecret string `json:"wanSecret,omitempty"`
+	Masked    string `json:"masked,omitempty"`
 	// Limit is the key's own budget (#585); nil for none.
 	Limit *Limit `json:"limit,omitempty"`
 	// More are its limits after the first (#2227), each a window of its
@@ -372,7 +379,25 @@ func load() ([]Key, error) {
 	return keys, err
 }
 
-// List never returns credentials; only the administrator's copy action does.
+// wanRecord also recognizes an older writer's round-trip: ID is an old
+// field it preserves when it drops Scope and WANSecret. Such a record can
+// be repaired only through WAN management, never rotated into a local key.
+func (k Key) wanRecord() bool {
+	return k.Scope == ScopeWAN || strings.HasPrefix(k.ID, wanIDPrefix) || k.WANSecret != "" || strings.HasPrefix(k.Secret, WANPrefix)
+}
+
+func (k Key) localScope() bool { return k.Scope == "" && !k.wanRecord() }
+
+// A legacy mirror must not turn a damaged or unknown scoped record into
+// a new unrestricted local credential.
+func nonLocalSecret(keys []Key, secret string) bool {
+	return secret != "" && slices.ContainsFunc(keys, func(k Key) bool {
+		return !k.localScope() && (subtle.ConstantTimeCompare([]byte(secret), []byte(k.Secret)) == 1 || subtle.ConstantTimeCompare([]byte(secret), []byte(k.WANSecret)) == 1)
+	})
+}
+
+// List includes both scopes for accounting and automatic budget activation.
+// It never returns credentials; only the administrator's copy action does.
 func List() ([]Key, error) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -382,6 +407,7 @@ func List() ([]Key, error) {
 	}
 	for i := range keys {
 		k := &keys[i]
+		k.Masked = ""
 		if len(k.Secret) > 8 {
 			prefix := legacyLANPrefix
 			if strings.HasPrefix(k.Secret, Prefix) {
@@ -395,9 +421,29 @@ func List() ([]Key, error) {
 				k.Masked += k.Secret[len(k.Secret)-4:]
 			}
 		}
-		k.Secret = ""
+		if k.wanRecord() {
+			k.Scope = ScopeWAN
+			k.Masked = ""
+			if strings.HasPrefix(k.WANSecret, WANPrefix) && len(k.WANSecret) > len(WANPrefix)+6 {
+				k.Masked = WANPrefix + "…" + k.WANSecret[len(k.WANSecret)-6:]
+			}
+		}
+		k.Secret, k.WANSecret = "", ""
 	}
 	return keys, nil
+}
+
+// ListLocal is the ordinary gateway editor's list, not the accounting list.
+func ListLocal() ([]Key, error) {
+	keys, err := List()
+	return slices.DeleteFunc(keys, func(k Key) bool { return !k.localScope() }), err
+}
+
+// ListWAN includes damaged WAN records so their owner can rotate or remove
+// them, but never offers another scope to the WAN editor.
+func ListWAN() ([]Key, error) {
+	keys, err := List()
+	return slices.DeleteFunc(keys, func(k Key) bool { return !k.wanRecord() }), err
 }
 
 // LANSecret is the key magpie shares the gateway on the local network with
@@ -422,13 +468,13 @@ func LANSecret() string {
 	if err != nil {
 		return ""
 	}
-	if i := slices.IndexFunc(keys, func(k Key) bool { return k.ID == s.LANKeyID || k.LAN }); i >= 0 {
+	if i := slices.IndexFunc(keys, func(k Key) bool { return k.localScope() && (k.ID == s.LANKeyID || k.LAN) }); i >= 0 {
 		if keys[i].Off {
 			return ""
 		}
 		return keys[i].Secret
 	}
-	if s.LANKeyID == "" && s.LANKey != "" && !strings.HasPrefix(s.LANKey, revokedLANPrefix) {
+	if s.LANKeyID == "" && s.LANKey != "" && !strings.HasPrefix(s.LANKey, revokedLANPrefix) && !strings.HasPrefix(s.LANKey, WANPrefix) && !nonLocalSecret(keys, s.LANKey) {
 		return s.LANKey
 	}
 	return ""
@@ -535,8 +581,15 @@ type Change struct {
 // Now is when Update sets or resets a limit. A variable for the tests.
 var Now = time.Now
 
-// Update writes the named key store atomically.
-func Update(action string, in Change) (string, error) {
+// Update writes local-network keys atomically. It cannot change WAN keys.
+func Update(action string, in Change) (string, error) { return update(action, in, "") }
+
+// UpdateWAN uses the same lifecycle and constraints as local-network keys,
+// but only for WAN keys. Creating or rotating one always makes a random
+// WAN credential, with its scope and secret persisted in the same write.
+func UpdateWAN(action string, in Change) (string, error) { return update(action, in, ScopeWAN) }
+
+func update(action string, in Change, scope string) (string, error) {
 	mu.Lock()
 	defer mu.Unlock()
 	keys, err := load()
@@ -556,6 +609,9 @@ func Update(action string, in Change) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		if scope == ScopeWAN && in.Secret != "" {
+			return "", errors.New("WAN keys use a generated key: leave the key empty")
+		}
 		if in.Secret != "" {
 			if secret, err = ownSecret(in.Secret, keys); err != nil {
 				return "", err
@@ -567,18 +623,29 @@ func Update(action string, in Change) (string, error) {
 			}
 			secret = Prefix + token
 		}
-		keys = append(keys, Key{ID: id, Name: name, Secret: secret, ReadOnly: in.ReadOnly || in.Browser, Browser: in.Browser})
+		k := Key{ID: id, Name: name, Secret: secret, ReadOnly: in.ReadOnly || in.Browser, Browser: in.Browser}
+		if scope == ScopeWAN {
+			secret = WANPrefix + strings.TrimPrefix(secret, Prefix)
+			k.ID, k.Scope, k.Secret, k.WANSecret = wanIDPrefix+id, ScopeWAN, "", secret
+		}
+		keys = append(keys, k)
 	} else {
 		i := slices.IndexFunc(keys, func(k Key) bool { return k.ID == in.Key })
 		if i < 0 {
 			return "", errors.New("Key not found")
 		}
-		defaultKey := keys[i].LAN || keys[i].ID == settings.Shared().LANKeyID
+		if (scope == ScopeWAN && !keys[i].wanRecord()) || (scope == "" && !keys[i].localScope()) {
+			return "", errors.New("Key belongs to another gateway scope")
+		}
+		defaultKey := scope == "" && (keys[i].LAN || keys[i].ID == settings.Shared().LANKeyID)
 		if defaultKey {
 			keys[i].LAN = true
 		}
 		switch action {
 		case "rotate-key":
+			if scope == ScopeWAN && in.Secret != "" {
+				return "", errors.New("WAN keys use a generated key: leave the key empty")
+			}
 			// a value of the user's own (isaac_bai on Discord: one easy to
 			// remember and pass on), checked as add-key's is; none, a new
 			// one magpie makes
@@ -593,7 +660,12 @@ func Update(action string, in Change) (string, error) {
 				}
 				secret = Prefix + token
 			}
-			keys[i].Secret = secret
+			if scope == ScopeWAN {
+				secret = WANPrefix + strings.TrimPrefix(secret, Prefix)
+				keys[i].Scope, keys[i].Secret, keys[i].WANSecret, keys[i].LAN = ScopeWAN, "", secret, false
+			} else {
+				keys[i].Secret = secret
+			}
 		case "rename-key":
 			keys[i].Name = name
 		case "limit-key":
@@ -792,6 +864,12 @@ func Update(action string, in Change) (string, error) {
 			k := keys[i]
 			keys = slices.Insert(slices.Delete(keys, i, i+1), *in.Index, k)
 		case "copy-key":
+			if scope == ScopeWAN {
+				if keys[i].Scope != ScopeWAN || keys[i].Secret != "" || !strings.HasPrefix(keys[i].WANSecret, WANPrefix) {
+					return "", errors.New("This WAN key has lost its credential: rotate it to make a new one")
+				}
+				return keys[i].WANSecret, nil
+			}
 			return keys[i].Secret, nil
 		default:
 			return "", fmt.Errorf("unknown key action %q", action)
@@ -895,7 +973,7 @@ func On(id string) bool {
 		if k.ID == id {
 			// an issued key is on while it hasn't expired and its issuer
 			// lets it in, as Check takes it
-			if k.Off || k.Secret == "" || k.expired(Now()) {
+			if !k.localScope() || k.Off || k.Secret == "" || k.expired(Now()) {
 				return false
 			}
 			_, err := identityOf(k, keys, Now())
@@ -903,10 +981,38 @@ func On(id string) bool {
 		}
 	}
 	s := settings.Load()
-	if s.LAN && s.LANKeyID == "" && s.LANKey != "" && !strings.HasPrefix(s.LANKey, revokedLANPrefix) && !slices.ContainsFunc(keys, func(k Key) bool { return k.LAN }) {
+	if s.LAN && s.LANKeyID == "" && s.LANKey != "" && !strings.HasPrefix(s.LANKey, revokedLANPrefix) && !strings.HasPrefix(s.LANKey, WANPrefix) && !nonLocalSecret(keys, s.LANKey) && !slices.ContainsFunc(keys, func(k Key) bool { return k.LAN }) {
 		return legacyLANKey(s.LANKey).ID == id
 	}
 	return false
+}
+
+// AuthenticateWAN reloads every time, as Authenticate does, so disabling,
+// removing or rotating a key applies to the next request in every process.
+// There is no local, LAN setting or legacy-secret fallback.
+func AuthenticateWAN(secret string) (Identity, bool) {
+	if !strings.HasPrefix(secret, WANPrefix) || len(secret) != len(WANPrefix)+48 {
+		return Identity{}, false
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	keys, err := load()
+	if err != nil {
+		return Identity{}, false
+	}
+	for _, k := range keys {
+		if k.Scope == ScopeWAN && strings.HasPrefix(k.ID, wanIDPrefix) && len(k.ID) > len(wanIDPrefix) && k.Secret == "" && !k.LAN && !k.Off && subtle.ConstantTimeCompare([]byte(secret), []byte(k.WANSecret)) == 1 {
+			now := Now()
+			if k.expired(now) {
+				return Identity{}, false
+			}
+			who, err := identityOf(k, keys, now)
+			// WAN exposes inference only, never management or key issuance.
+			who.Default, who.Issues, who.Admin = false, false, ""
+			return who, err == nil
+		}
+	}
+	return Identity{}, false
 }
 
 func legacyLANKey(secret string) Key {
@@ -932,18 +1038,21 @@ func MigrateLegacyLANKeyBestEffort() {
 
 func migrateLegacyLANKey() error {
 	s := settings.Load()
-	if s.LANKey == "" || s.LANKeyID != "" || strings.HasPrefix(s.LANKey, revokedLANPrefix) {
+	if s.LANKey == "" || s.LANKeyID != "" || strings.HasPrefix(s.LANKey, revokedLANPrefix) || strings.HasPrefix(s.LANKey, WANPrefix) {
 		return nil
 	}
 	keys, err := load()
 	if err != nil {
 		return err
 	}
+	if nonLocalSecret(keys, s.LANKey) {
+		return errors.New("The legacy gateway key belongs to another scope; it cannot become a local-network key")
+	}
 	if slices.ContainsFunc(keys, func(k Key) bool { return k.LAN }) {
 		return nil // the key-store write succeeded, even if settings were read-only
 	}
 	i := slices.IndexFunc(keys, func(k Key) bool {
-		return subtle.ConstantTimeCompare([]byte(k.Secret), []byte(s.LANKey)) == 1
+		return k.localScope() && subtle.ConstantTimeCompare([]byte(k.Secret), []byte(s.LANKey)) == 1
 	})
 	if i < 0 {
 		keys = append(keys, legacyLANKey(s.LANKey))
@@ -984,7 +1093,7 @@ func configureLAN(on, rotate bool) error {
 		if err != nil {
 			return err
 		}
-		i := slices.IndexFunc(keys, func(k Key) bool { return k.ID == s.LANKeyID || k.LAN })
+		i := slices.IndexFunc(keys, func(k Key) bool { return k.localScope() && (k.ID == s.LANKeyID || k.LAN) })
 		// a default key the user removed stays removed when sharing is
 		// turned on again: making a fresh "Magpie" key then read as a
 		// default key that keeps coming back beside the user's own

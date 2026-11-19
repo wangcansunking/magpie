@@ -559,7 +559,7 @@ func lanGuard(next http.Handler) http.Handler {
 		// with mTLS on, another machine's request needs magpie's client
 		// certificate before anything else is looked at, a callback's
 		// token and a gateway key included (mtls.go)
-		if refuseWithoutClientCert(w, r) {
+		if refuseWithoutClientCert(w, r) || refuseWANKey(w, r) {
 			return
 		}
 		if ownCallback(r) {
@@ -783,6 +783,9 @@ func ownHost(host string) bool {
 // callerGuard also covers embedded handlers used by the web app and tests.
 func callerGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if refuseWANKey(w, r) {
+			return
+		}
 		if access.Caller(r.Context()).KeyID == "" && managedKey(r) && (local(r) || remoteKeyed()) {
 			var ok bool
 			r, ok = identifyCaller(w, r)
@@ -837,20 +840,27 @@ func identifyCaller(w http.ResponseWriter, r *http.Request) (*http.Request, bool
 		r = aliasRequest(r, who)
 	}
 	r = keepCodexListAuth(r, ok)
+	return sanitizedCaller(r), true
+}
+
+// sanitizedCaller keeps caller credentials out of the inference chain.
+// Clone the request and URL too, so the caller's original is untouched.
+func sanitizedCaller(r *http.Request) *http.Request {
+	r = r.WithContext(r.Context())
 	r.Header = r.Header.Clone()
 	r.Header.Set("Authorization", "Bearer "+Token)
 	for _, h := range []string{"x-api-key", "x-goog-api-key"} {
-		if r.Header.Get(h) != "" {
+		if len(r.Header.Values(h)) != 0 {
 			r.Header.Set(h, Token)
 		}
 	}
-	if q := r.URL.Query(); q.Get("key") != "" {
+	if q := r.URL.Query(); len(q["key"]) != 0 {
 		q.Set("key", Token)
 		u := *r.URL
 		u.RawQuery = q.Encode()
 		r.URL = &u
 	}
-	return r, true
+	return r
 }
 
 // accountOf is the subscription account p answers as, named as the Routing
@@ -961,6 +971,9 @@ func refusedKey(key string) string {
 // loopback, wasn't passed on by a proxy or tunnel running here, and didn't
 // come through `magpie web`'s page port (viaPagePort).
 func local(r *http.Request) bool {
+	if wanRequest(r) {
+		return false
+	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return false

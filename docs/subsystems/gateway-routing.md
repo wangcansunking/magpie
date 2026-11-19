@@ -10,6 +10,21 @@ candidate.
 This page covers how a request is routed. Plugins that change requests and
 replies are in [Gateway middleware](gateway-middleware.md). Subscriptions
 served by a plugin are in [Provider and plugin ownership](provider-plugins.md).
+The opt-in public listener and WAN-only key boundary are documented in
+[WAN gateway](wan-gateway.md); they reuse inference handlers without
+publishing the gateway's diagnostics, callbacks or MCP tools. Both ingress
+paths hold catalog and file reads for lookup reuse. Each new hold checks the
+providers' and settings' file stamps even while an older stream remains
+active (`TestExternalProviderRevocationDuringStream`); reuse and invalidation
+are described in [Providers and accounts](providers-accounts.md). After a WAN
+key authenticates, admission calls `provider.Changed` (including
+`filememo.Forget`) before downstream policy and provider reads. This drops
+snapshots held by an overlapping GUI request so an external provider change
+or unreadable provider file from before admission is not hidden by that
+hold. Each authenticated WAN request can therefore trigger fresh catalog
+builds and file reads, and may invalidate concurrent readers' work. It does not provide a
+request-wide snapshot, cancel an admitted stream, or bind its later lookups
+to immutable credentials.
 
 WorkBuddy and CodeBuddy Code's `X-Conversation-ID` is a native session header
 in `sessionHeaders` (`sessionOf`, `nativeSessionOf`, `conversationID` in
@@ -3597,5 +3612,10 @@ go test -tags nogui ./internal/provider ./internal/gateway -run 'TestFolderUnder
 go test -tags nogui ./internal/provider -run 'TestGroup|TestCodexCreditsSwitch|TestRenewedAccountForgetsItsAllowance|TestDeclareSearch|TestNative|TestKeyAllowance|TestPlanKeyAllowance|TestClaudeAccountToldRenewed|TestPluginAccountToldRenewed|TestSkipsRedaction|TestSetRPM'
 ```
 
-The gateway's `TestMain` gives the package a home of its own, so these tests
-never read real providers or accounts.
+The gateway's `TestMain` gives the package a home of its own and puts inert
+external tools first on PATH. Its custom stand-in list, like `testenv`'s shared
+list, includes the exact `wsl.exe` name: redirecting Windows HOME alone does
+not isolate the homes inside running WSL distributions. The lookup guard and
+shared copied-binary sentinel test verify that real WSL is not reached, while
+tests can still supply explicit WSL fakes. No real WSL command is used by that
+negative control.

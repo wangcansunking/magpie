@@ -249,12 +249,14 @@ func Check(secret string) (Identity, error) {
 	if err != nil || secret == "" {
 		return Identity{}, errUnknown
 	}
-	i := slices.IndexFunc(keys, func(k Key) bool { return subtle.ConstantTimeCompare([]byte(secret), []byte(k.Secret)) == 1 })
+	i := slices.IndexFunc(keys, func(k Key) bool {
+		return k.localScope() && subtle.ConstantTimeCompare([]byte(secret), []byte(k.Secret)) == 1
+	})
 	if i < 0 {
 		s := settings.Load()
 		// A read-only config directory may prevent the first store write. Never
 		// fall back after either durable marker exists, or to a revoked mirror.
-		if s.LAN && s.LANKeyID == "" && s.LANKey != "" && !strings.HasPrefix(s.LANKey, revokedLANPrefix) && !slices.ContainsFunc(keys, func(k Key) bool { return k.LAN }) && subtle.ConstantTimeCompare([]byte(secret), []byte(s.LANKey)) == 1 {
+		if s.LAN && s.LANKeyID == "" && s.LANKey != "" && !strings.HasPrefix(s.LANKey, revokedLANPrefix) && !strings.HasPrefix(s.LANKey, WANPrefix) && !nonLocalSecret(keys, s.LANKey) && !slices.ContainsFunc(keys, func(k Key) bool { return k.LAN }) && subtle.ConstantTimeCompare([]byte(secret), []byte(s.LANKey)) == 1 {
 			k := legacyLANKey(s.LANKey)
 			// sum as Check gives the same key once migrated, so the
 			// caller's identity is one before and after

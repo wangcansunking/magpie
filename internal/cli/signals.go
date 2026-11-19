@@ -14,6 +14,7 @@ import (
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/sessions"
+	"github.com/yetone/magpie/internal/wan"
 )
 
 // endProbesOnSignal: the probes magpie asks a CLI with lead a session of
@@ -42,6 +43,7 @@ func endProbesOnSignal() {
 			// asked before the probes are ended, which can take a moment
 			// the command may spend finishing, and stop asking
 			handled := s == os.Interrupt && interrupts.Load() > 0
+			wan.Shutdown()
 			if !handled {
 				finishSignalGateway(s)
 			} else {

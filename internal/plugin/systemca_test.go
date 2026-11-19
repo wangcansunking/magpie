@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"context"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -35,6 +36,45 @@ func TestBunIsGivenTheSystemsRoots(t *testing.T) {
 	systemCAFile = func() string { return "" }
 	if got := caEnv(nil, ""); !slices.Equal(got, []string{"NODE_USE_SYSTEM_CA=1"}) {
 		t.Fatalf("with no file to add: %v, want Bun to read the system's store itself", got)
+	}
+}
+
+func TestBunCAEnvForIndependentHelper(t *testing.T) {
+	old := systemCAFile
+	t.Cleanup(func() { systemCAFile = old })
+	systemCAFile = func() string { return "/cache/bun/system-ca.pem" }
+	got, err := BunCAEnv([]string{"NODE_OPTIONS=--require=untrusted", "BUN_OPTIONS=--preload=untrusted", "HTTPS_PROXY=http://untrusted"}, t.TempDir())
+	if err != nil || !slices.Equal(got, []string{"NODE_USE_SYSTEM_CA=1", "NODE_EXTRA_CA_CERTS=/cache/bun/system-ca.pem"}) {
+		t.Fatalf("system roots for helper: %v %v", got, err)
+	}
+	path, err := filepath.Abs("my-relative-ca.pem")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	got, err = BunCAEnv([]string{"NODE_EXTRA_CA_CERTS=my-relative-ca.pem"}, dir)
+	want := "NODE_EXTRA_CA_CERTS=" + bunReadable(path, dir, runtime.GOOS)
+	if err != nil || !slices.Equal(got, []string{"NODE_USE_SYSTEM_CA=1", want}) {
+		t.Fatalf("user CA must resolve before helper cwd changes: %v %v want %q", got, err, want)
+	}
+	for _, system := range []string{"0", "1"} {
+		got, err = BunCAEnv([]string{"node_use_system_ca=" + system, "NODE_EXTRA_CA_CERTS=my-relative-ca.pem", "NODE_OPTIONS=--require=untrusted"}, dir)
+		if err != nil || !slices.Equal(got, []string{"NODE_USE_SYSTEM_CA=" + system, want}) {
+			t.Fatalf("helper changed user's system trust override: %v %v", got, err)
+		}
+	}
+	systemCAFile = func() string { return "" }
+	got, err = BunCAEnv(nil, dir)
+	if err != nil || !slices.Equal(got, []string{"NODE_USE_SYSTEM_CA=1"}) {
+		t.Fatalf("helper without a bundle lost system trust: %v %v", got, err)
+	}
+	if runtime.GOOS == "windows" {
+		ca := `C:\Users\张三\ca.pem`
+		dir := `C:\Users\张三\AppData\Local\Temp\wan-helper`
+		got, err = BunCAEnv([]string{"NODE_EXTRA_CA_CERTS=" + ca}, dir)
+		if err != nil || len(got) != 2 || got[0] != "NODE_USE_SYSTEM_CA=1" || got[1] != "NODE_EXTRA_CA_CERTS="+bunReadable(ca, dir, "windows") || !ascii(strings.TrimPrefix(got[1], "NODE_EXTRA_CA_CERTS=")) {
+			t.Fatalf("non-ASCII user CA not readable by Bun: %v %v", got, err)
+		}
 	}
 }
 

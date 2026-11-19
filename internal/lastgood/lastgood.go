@@ -118,7 +118,7 @@ func Keep(path string, valid Valid, perm fs.FileMode) error {
 		return err
 	}
 	if valid(b) {
-		if old, err := os.ReadFile(Bak(path)); err == nil && bytes.Equal(old, b) {
+		if old, err := steady.ReadFile(Bak(path)); err == nil && bytes.Equal(old, b) {
 			return nil
 		}
 		return steady.WriteFile(Bak(path), b, perm)

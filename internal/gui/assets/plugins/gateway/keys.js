@@ -134,7 +134,7 @@ async function gatewayKeyAction(action, body) {
   }
 }
 
-function gatewayRename(k) {
+function gatewayRename(k, action = gatewayKeyAction) {
   const b = el("button", "n rename", k.name);
   b.title = t("Rename");
   b.onclick = () => {
@@ -147,7 +147,7 @@ function gatewayRename(k) {
       finished = true;
       // Keep the other controls in place when blur precedes their click.
       i.replaceWith(b);
-      if (save && i.value.trim() !== k.name) await gatewayKeyAction("rename-key", { key: k.id, name: i.value });
+      if (save && i.value.trim() !== k.name) await action("rename-key", { key: k.id, name: i.value });
     };
     i.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") done(true); else if (e.key === "Escape") done(false); };
     i.onblur = () => done(true);
@@ -194,14 +194,17 @@ function gatewayKeyForm() {
   return box;
 }
 
-function copyCallerKeyBtn(k) {
-  const cp = copyBtn("", t("Gateway key"));
-  cp.setAttribute("aria-label", t("Copy gateway key"));
+function copyCallerKeyBtn(k, getSecret = () => api("caller-keys/copy-key", { key: k.id }), label = "Gateway key", copyLabel = "Copy gateway key") {
+  const cp = copyBtn("", t(label));
+  cp.setAttribute("aria-label", t(copyLabel));
   cp.onclick = async () => {
+    if (cp.disabled) return;
+    cp.disabled = true;
     try {
-      const out = await api("caller-keys/copy-key", { key: k.id });
-      await copy(out.secret, t("Gateway key"), cp);
+      const out = await getSecret();
+      if (out?.secret) await copy(out.secret, t(label), cp);
     } catch (e) { status(t(e.message), "err"); }
+    finally { cp.disabled = false; }
   };
   return cp;
 }
@@ -522,7 +525,7 @@ function gatewayAliasesAsk(k) {
   box.querySelector("input")?.focus({ preventScroll: true });
 }
 
-function askGatewayKey(k, rotate) {
+function askGatewayKey(k, rotate, action = gatewayKeyAction, changed = "Gateway key rotated. Update clients on other computers.", custom = true) {
   const ed = el("div", "editor");
   const head = el("div", "ehead");
   head.append(el("b", "", t(rotate ? "Rotate gateway key?" : "Remove gateway key?")));
@@ -532,7 +535,7 @@ function askGatewayKey(k, rotate) {
   // a value of one's own in place of the one magpie makes (isaac_bai on
   // Discord: one easy to remember and pass on)
   let own = null;
-  if (rotate) {
+  if (rotate && custom) {
     own = input("", t("Your own key (optional)"), "password");
     own.setAttribute("aria-label", t("Gateway key value"));
     own.title = t("Leave empty and magpie makes a key. Or enter one your clients already send, from another gateway, so they keep working.");
@@ -548,10 +551,10 @@ function askGatewayKey(k, rotate) {
     if (go.disabled) return;
     go.disabled = true;
     const mine = !!own?.value.trim();
-    const out = await gatewayKeyAction(rotate ? "rotate-key" : "remove-key", mine ? { key: k.id, secret: own.value } : { key: k.id });
+    const out = await action(rotate ? "rotate-key" : "remove-key", mine ? { key: k.id, secret: own.value } : { key: k.id });
     if (!out) { go.disabled = false; return; }
     closeConfirmAsk();
-    if (rotate) status(t(mine ? "Gateway key changed. Clients that send this key reach magpie now." : "Gateway key rotated. Update clients on other computers."), "ok");
+    if (rotate) status(t(mine ? "Gateway key changed. Clients that send this key reach magpie now." : changed), "ok");
   };
   bar.append(el("span", "grow"), cancel, go);
   ed.append(bar);

@@ -32,6 +32,7 @@ import (
 	"github.com/yetone/magpie/internal/shortcut"
 	"github.com/yetone/magpie/internal/stats"
 	"github.com/yetone/magpie/internal/update"
+	"github.com/yetone/magpie/internal/wan"
 	"github.com/yetone/magpie/internal/webview2env"
 )
 
@@ -446,6 +447,7 @@ func Run(version string, showMain bool, link string) error {
 		// so do the threads.
 		OnShutdown: func() {
 			unhookNoActivate()
+			wan.Shutdown()
 			stopServing()
 			proc.EndProbes()
 			if handedOver.Load() {
